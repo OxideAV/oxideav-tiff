@@ -1,0 +1,18 @@
+[package]
+name = "oxideav-tiff"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-tiff"
+homepage = "https://github.com/OxideAV/oxideav-tiff"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust TIFF 6.0 image decoder + container for oxideav (None / PackBits / LZW / Deflate; 1/4/8/16-bit; bilevel, gray, palette, RGB)"
+readme = "README.md"
+keywords = ["multimedia", "image", "tiff", "codec", "pure-rust"]
+categories = ["multimedia::encoding", "multimedia::images"]
+
+[dependencies]
+oxideav-core = "0.1"
+oxideav-pixfmt = "0.1"
+miniz_oxide = "0.9"
