@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.1](https://github.com/OxideAV/oxideav-tiff/releases/tag/v0.0.1) - 2026-05-03
+
+### Other
+
+- TIFF 6.0 image decoder (header/IFD/strip parse + None/PackBits/LZW/Deflate)
+
 ### Added
 
 - Initial release: pure-Rust TIFF 6.0 image decoder + container.
