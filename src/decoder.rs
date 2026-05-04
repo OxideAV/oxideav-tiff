@@ -1,69 +1,28 @@
 //! High-level TIFF 6.0 decode: parse the header + first IFD,
 //! decompress every strip, assemble the image, apply the predictor
 //! if any, expand palette / bilevel / 16-bit pixels into one of our
-//! standard `PixelFormat`s.
-
-use oxideav_core::Decoder;
-use oxideav_core::{
-    CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, VideoFrame, VideoPlane,
-};
+//! standard `TiffPixelFormat`s.
 
 use crate::compress::{unpack_deflate, unpack_lzw, unpack_packbits};
+use crate::error::{Result, TiffError as Error};
 use crate::ifd::{find, parse_header, parse_ifd, ByteOrder};
+use crate::image::{TiffImage, TiffPixelFormat, TiffPlane};
 use crate::types::*;
 
-/// Outcome of a successful decode: the pixel frame plus the resolved
-/// pixel format and dimensions (handy for tests / containers).
+/// Outcome of a successful decode: the image plus the resolved pixel
+/// format and dimensions (handy for tests / containers).
+///
+/// Identical in shape to [`TiffImage`] — kept as a distinct alias so
+/// the historical `DecodedTiff { frame, width, height, pixel_format }`
+/// shape stays available to callers.
 pub struct DecodedTiff {
-    pub frame: VideoFrame,
+    pub frame: TiffImage,
     pub width: u32,
     pub height: u32,
-    pub pixel_format: PixelFormat,
+    pub pixel_format: TiffPixelFormat,
 }
 
-/// Factory registered with the codec registry.
-pub fn make_decoder(_params: &CodecParameters) -> Result<Box<dyn Decoder>> {
-    Ok(Box::new(TiffDecoder {
-        codec_id: CodecId::new(crate::CODEC_ID_STR),
-        pending: None,
-        eof: false,
-    }))
-}
-
-struct TiffDecoder {
-    codec_id: CodecId,
-    pending: Option<VideoFrame>,
-    eof: bool,
-}
-
-impl Decoder for TiffDecoder {
-    fn codec_id(&self) -> &CodecId {
-        &self.codec_id
-    }
-    fn send_packet(&mut self, packet: &Packet) -> Result<()> {
-        let d = decode_tiff(&packet.data)?;
-        self.pending = Some(d.frame);
-        Ok(())
-    }
-    fn receive_frame(&mut self) -> Result<Frame> {
-        match self.pending.take() {
-            Some(f) => Ok(Frame::Video(f)),
-            None => {
-                if self.eof {
-                    Err(Error::Eof)
-                } else {
-                    Err(Error::NeedMore)
-                }
-            }
-        }
-    }
-    fn flush(&mut self) -> Result<()> {
-        self.eof = true;
-        Ok(())
-    }
-}
-
-/// Decode a complete TIFF file into a frame + metadata.
+/// Decode a complete TIFF file into a [`TiffImage`] + metadata.
 pub fn decode_tiff(input: &[u8]) -> Result<DecodedTiff> {
     let header = parse_header(input)?;
     let bo = header.byte_order;
@@ -209,46 +168,49 @@ pub fn decode_tiff(input: &[u8]) -> Result<DecodedTiff> {
         return Err(Error::invalid("TIFF: strips did not cover full image"));
     }
 
-    // ---- Convert into a standard PixelFormat ----
-    let (frame, pf) = match (photometric, samples_per_pixel, bps_first) {
+    // ---- Convert into a standard TiffPixelFormat ----
+    let (image, pf) = match (photometric, samples_per_pixel, bps_first) {
         (PHOTO_BLACK_IS_ZERO, 1, 1) | (PHOTO_WHITE_IS_ZERO, 1, 1) => {
             let inv = photometric == PHOTO_WHITE_IS_ZERO;
             (
                 build_gray8_from_1bpp(&pixel_buf, width, height, row_bytes, inv),
-                PixelFormat::Gray8,
+                TiffPixelFormat::Gray8,
             )
         }
         (PHOTO_BLACK_IS_ZERO, 1, 4) | (PHOTO_WHITE_IS_ZERO, 1, 4) => {
             let inv = photometric == PHOTO_WHITE_IS_ZERO;
             (
                 build_gray8_from_4bpp(&pixel_buf, width, height, row_bytes, inv),
-                PixelFormat::Gray8,
+                TiffPixelFormat::Gray8,
             )
         }
         (PHOTO_BLACK_IS_ZERO, 1, 8) | (PHOTO_WHITE_IS_ZERO, 1, 8) => {
             let inv = photometric == PHOTO_WHITE_IS_ZERO;
             (
                 build_gray8(&pixel_buf, width, height, inv),
-                PixelFormat::Gray8,
+                TiffPixelFormat::Gray8,
             )
         }
         (PHOTO_BLACK_IS_ZERO, 1, 16) | (PHOTO_WHITE_IS_ZERO, 1, 16) => {
             let inv = photometric == PHOTO_WHITE_IS_ZERO;
             (
                 build_gray16le(&pixel_buf, width, height, bo, inv),
-                PixelFormat::Gray16Le,
+                TiffPixelFormat::Gray16Le,
             )
         }
-        (PHOTO_RGB, 3, 8) => (build_rgb24(&pixel_buf, width, height), PixelFormat::Rgb24),
+        (PHOTO_RGB, 3, 8) => (
+            build_rgb24(&pixel_buf, width, height),
+            TiffPixelFormat::Rgb24,
+        ),
         (PHOTO_RGB, 3, 16) => (
             build_rgb48le(&pixel_buf, width, height, bo),
-            PixelFormat::Rgb48Le,
+            TiffPixelFormat::Rgb48Le,
         ),
         (PHOTO_RGB, n, 8) if n >= 4 => {
             // Skip extra samples (e.g. RGBA where we don't expose Rgba32 here).
             (
                 build_rgb_from_n_chunky_8bit(&pixel_buf, width, height, n as usize),
-                PixelFormat::Rgb24,
+                TiffPixelFormat::Rgb24,
             )
         }
         (PHOTO_PALETTE, 1, b @ (4 | 8)) => {
@@ -258,7 +220,7 @@ pub fn decode_tiff(input: &[u8]) -> Result<DecodedTiff> {
             let palette = parse_colormap(&cm, b)?;
             (
                 build_rgb24_from_palette(&pixel_buf, width, height, &palette, b, row_bytes),
-                PixelFormat::Rgb24,
+                TiffPixelFormat::Rgb24,
             )
         }
         (p, s, b) => {
@@ -269,7 +231,12 @@ pub fn decode_tiff(input: &[u8]) -> Result<DecodedTiff> {
     };
 
     Ok(DecodedTiff {
-        frame,
+        frame: TiffImage {
+            width,
+            height,
+            pixel_format: pf,
+            planes: image.planes,
+        },
         width,
         height,
         pixel_format: pf,
@@ -382,7 +349,7 @@ fn apply_horizontal_predictor(
 // Pixel-format conversions
 // ---------------------------------------------------------------------------
 
-fn build_gray8(src: &[u8], w: u32, h: u32, invert: bool) -> VideoFrame {
+fn build_gray8(src: &[u8], w: u32, h: u32, invert: bool) -> TiffImage {
     let stride = w as usize;
     let mut data = src[..stride * h as usize].to_vec();
     if invert {
@@ -390,13 +357,15 @@ fn build_gray8(src: &[u8], w: u32, h: u32, invert: bool) -> VideoFrame {
             *b = 255 - *b;
         }
     }
-    VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane { stride, data }],
+    TiffImage {
+        width: w,
+        height: h,
+        pixel_format: TiffPixelFormat::Gray8,
+        planes: vec![TiffPlane { stride, data }],
     }
 }
 
-fn build_gray8_from_4bpp(src: &[u8], w: u32, h: u32, row_bytes: usize, invert: bool) -> VideoFrame {
+fn build_gray8_from_4bpp(src: &[u8], w: u32, h: u32, row_bytes: usize, invert: bool) -> TiffImage {
     let stride = w as usize;
     let mut data = Vec::with_capacity(stride * h as usize);
     for y in 0..h as usize {
@@ -409,13 +378,15 @@ fn build_gray8_from_4bpp(src: &[u8], w: u32, h: u32, row_bytes: usize, invert: b
             data.push(if invert { 255 - v } else { v });
         }
     }
-    VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane { stride, data }],
+    TiffImage {
+        width: w,
+        height: h,
+        pixel_format: TiffPixelFormat::Gray8,
+        planes: vec![TiffPlane { stride, data }],
     }
 }
 
-fn build_gray8_from_1bpp(src: &[u8], w: u32, h: u32, row_bytes: usize, invert: bool) -> VideoFrame {
+fn build_gray8_from_1bpp(src: &[u8], w: u32, h: u32, row_bytes: usize, invert: bool) -> TiffImage {
     let stride = w as usize;
     let mut data = Vec::with_capacity(stride * h as usize);
     for y in 0..h as usize {
@@ -428,13 +399,15 @@ fn build_gray8_from_1bpp(src: &[u8], w: u32, h: u32, row_bytes: usize, invert: b
             data.push(if invert { 255 - v } else { v });
         }
     }
-    VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane { stride, data }],
+    TiffImage {
+        width: w,
+        height: h,
+        pixel_format: TiffPixelFormat::Gray8,
+        planes: vec![TiffPlane { stride, data }],
     }
 }
 
-fn build_gray16le(src: &[u8], w: u32, h: u32, bo: ByteOrder, invert: bool) -> VideoFrame {
+fn build_gray16le(src: &[u8], w: u32, h: u32, bo: ByteOrder, invert: bool) -> TiffImage {
     let stride = w as usize * 2;
     let n = (w * h) as usize;
     let mut data = Vec::with_capacity(stride * h as usize);
@@ -443,22 +416,26 @@ fn build_gray16le(src: &[u8], w: u32, h: u32, bo: ByteOrder, invert: bool) -> Vi
         let v = if invert { 0xFFFF - v } else { v };
         data.extend_from_slice(&v.to_le_bytes());
     }
-    VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane { stride, data }],
+    TiffImage {
+        width: w,
+        height: h,
+        pixel_format: TiffPixelFormat::Gray16Le,
+        planes: vec![TiffPlane { stride, data }],
     }
 }
 
-fn build_rgb24(src: &[u8], w: u32, h: u32) -> VideoFrame {
+fn build_rgb24(src: &[u8], w: u32, h: u32) -> TiffImage {
     let stride = w as usize * 3;
     let data = src[..stride * h as usize].to_vec();
-    VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane { stride, data }],
+    TiffImage {
+        width: w,
+        height: h,
+        pixel_format: TiffPixelFormat::Rgb24,
+        planes: vec![TiffPlane { stride, data }],
     }
 }
 
-fn build_rgb_from_n_chunky_8bit(src: &[u8], w: u32, h: u32, n: usize) -> VideoFrame {
+fn build_rgb_from_n_chunky_8bit(src: &[u8], w: u32, h: u32, n: usize) -> TiffImage {
     let stride = w as usize * 3;
     let mut data = Vec::with_capacity(stride * h as usize);
     for y in 0..h as usize {
@@ -469,13 +446,15 @@ fn build_rgb_from_n_chunky_8bit(src: &[u8], w: u32, h: u32, n: usize) -> VideoFr
             data.push(row[x * n + 2]);
         }
     }
-    VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane { stride, data }],
+    TiffImage {
+        width: w,
+        height: h,
+        pixel_format: TiffPixelFormat::Rgb24,
+        planes: vec![TiffPlane { stride, data }],
     }
 }
 
-fn build_rgb48le(src: &[u8], w: u32, h: u32, bo: ByteOrder) -> VideoFrame {
+fn build_rgb48le(src: &[u8], w: u32, h: u32, bo: ByteOrder) -> TiffImage {
     let stride = w as usize * 6;
     let pixels = (w * h) as usize;
     let mut data = Vec::with_capacity(stride * h as usize);
@@ -486,9 +465,11 @@ fn build_rgb48le(src: &[u8], w: u32, h: u32, bo: ByteOrder) -> VideoFrame {
             data.extend_from_slice(&v.to_le_bytes());
         }
     }
-    VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane { stride, data }],
+    TiffImage {
+        width: w,
+        height: h,
+        pixel_format: TiffPixelFormat::Rgb48Le,
+        planes: vec![TiffPlane { stride, data }],
     }
 }
 
@@ -520,7 +501,7 @@ fn build_rgb24_from_palette(
     palette: &[[u8; 3]],
     bps: u16,
     row_bytes: usize,
-) -> VideoFrame {
+) -> TiffImage {
     let stride = w as usize * 3;
     let mut data = Vec::with_capacity(stride * h as usize);
     for y in 0..h as usize {
@@ -540,8 +521,10 @@ fn build_rgb24_from_palette(
             data.push(p[2]);
         }
     }
-    VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane { stride, data }],
+    TiffImage {
+        width: w,
+        height: h,
+        pixel_format: TiffPixelFormat::Rgb24,
+        planes: vec![TiffPlane { stride, data }],
     }
 }

@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Default-on `registry` Cargo feature gates the `oxideav-core`
+  dependency, the `Decoder` trait implementation, the TIFF container
+  demuxer + probe, and the `register_codecs` / `register_containers`
+  entry points. Image-library consumers can now depend on
+  `oxideav-tiff` with `default-features = false` and skip the
+  `oxideav-core` dep tree entirely; the standalone path exposes
+  `decode_tiff` plus crate-local `TiffImage` / `TiffPixelFormat` /
+  `TiffPlane` / `TiffError` types built only on `std`.
+- Inline `ci-standalone` CI job verifies `cargo build --lib
+  --no-default-features` and `cargo test --no-default-features` stay
+  green on every change.
 - Initial release: pure-Rust TIFF 6.0 image decoder + container.
 - Header parse: `II` (little-endian) and `MM` (big-endian) byte
   orders, magic 42, first-IFD offset.

@@ -15,8 +15,7 @@
 //! All multi-byte ints in the file (including offsets) are read with
 //! the byte order from the header.
 
-use oxideav_core::{Error, Result};
-
+use crate::error::{Result, TiffError as Error};
 use crate::types::*;
 
 #[derive(Debug, Clone, Copy)]

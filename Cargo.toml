@@ -13,6 +13,21 @@ keywords = ["multimedia", "image", "tiff", "codec", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::images"]
 
 [dependencies]
-oxideav-core = "0.1"
-oxideav-pixfmt = "0.1"
+# `oxideav-core` is gated behind the default-on `registry` feature so
+# image-library consumers can depend on `oxideav-tiff` with
+# `default-features = false` and avoid the framework dependency tree
+# entirely. Without `registry` the crate exposes a free-standing
+# `decode_tiff` API plus local `TiffImage` / `TiffError` types and
+# never references `oxideav-core`.
+oxideav-core = { version = "0.1", optional = true }
 miniz_oxide = "0.9"
+
+[features]
+default = ["registry"]
+
+# Wires up the `Decoder` trait implementation, the TIFF container
+# demuxer + probe, and the `register_codecs` / `register_containers`
+# entry points against `oxideav-core` so the crate can plug into the
+# `oxideav` framework registry. Default-on; turn off for image-library
+# use-cases that just want the standalone `decode_tiff` API.
+registry = ["dep:oxideav-core"]

@@ -18,45 +18,41 @@
 //! Out of scope for round 1 (round 2 backlog): BigTIFF, tiles, CCITT
 //! G3/G4 fax, JPEG-in-TIFF, YCbCr / CIELab / CMYK, multi-page IFD
 //! chain, encoder.
+//!
+//! ## Standalone vs registry-integrated
+//!
+//! The crate's default `registry` Cargo feature pulls in `oxideav-core`
+//! and exposes the `Decoder` trait surface, the TIFF container
+//! demuxer/probe, and the [`registry::register`] entry point. Disable
+//! the feature (`default-features = false`) for an oxideav-core-free
+//! build that still exposes the standalone [`decode_tiff`] API plus
+//! [`TiffImage`] / [`TiffPixelFormat`] / [`TiffPlane`] / [`TiffError`]
+//! types — none of which depend on `oxideav-core`.
 
 pub mod compress;
-pub mod container;
 pub mod decoder;
+pub mod error;
 pub mod ifd;
+pub mod image;
 pub mod types;
 
-use oxideav_core::ContainerRegistry;
-use oxideav_core::{CodecCapabilities, CodecId, PixelFormat};
-use oxideav_core::{CodecInfo, CodecRegistry};
+#[cfg(feature = "registry")]
+pub mod container;
+
+#[cfg(feature = "registry")]
+pub mod registry;
 
 /// Codec id for TIFF image frames.
 pub const CODEC_ID_STR: &str = "tiff";
 
-pub fn register_codecs(reg: &mut CodecRegistry) {
-    let caps = CodecCapabilities::video("tiff_sw")
-        .with_intra_only(true)
-        .with_lossless(true)
-        .with_max_size(65535, 65535)
-        .with_pixel_formats(vec![
-            PixelFormat::Rgb24,
-            PixelFormat::Rgb48Le,
-            PixelFormat::Gray8,
-            PixelFormat::Gray16Le,
-        ]);
-    reg.register(
-        CodecInfo::new(CodecId::new(CODEC_ID_STR))
-            .capabilities(caps)
-            .decoder(decoder::make_decoder),
-    );
-}
-
-pub fn register_containers(reg: &mut ContainerRegistry) {
-    container::register(reg);
-}
-
-pub fn register(codecs: &mut CodecRegistry, containers: &mut ContainerRegistry) {
-    register_codecs(codecs);
-    register_containers(containers);
-}
-
+// Standalone, framework-free API. Available regardless of the
+// `registry` feature.
 pub use decoder::{decode_tiff, DecodedTiff};
+pub use error::{Result, TiffError};
+pub use image::{TiffImage, TiffPixelFormat, TiffPlane};
+
+// Framework-integrated API (`oxideav-core`-dependent). Gated behind
+// `registry` so image-library callers can build the crate without
+// dragging in `oxideav-core`.
+#[cfg(feature = "registry")]
+pub use registry::{make_decoder, register, register_codecs, register_containers};

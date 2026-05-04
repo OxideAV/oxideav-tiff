@@ -250,6 +250,7 @@ fn decode_64x64_rgb_deflate_imagemagick() {
 /// Quick sanity check: end-to-end through the registry's probe_input
 /// using a minimal hand-built TIFF header — confirms the
 /// container is registered and the probe wins.
+#[cfg(feature = "registry")]
 #[test]
 fn probe_recognises_minimal_le_tiff() {
     use std::io::Cursor;
@@ -261,6 +262,7 @@ fn probe_recognises_minimal_le_tiff() {
     assert_eq!(name, "tiff");
 }
 
+#[cfg(feature = "registry")]
 #[test]
 fn probe_recognises_minimal_be_tiff() {
     use std::io::Cursor;

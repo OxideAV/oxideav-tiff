@@ -5,7 +5,7 @@
 //! All routines take the raw on-disk strip bytes and the expected
 //! decompressed length (in bytes) and return the decompressed bytes.
 
-use oxideav_core::{Error, Result};
+use crate::error::{Result, TiffError as Error};
 
 // ---------------------------------------------------------------------------
 // PackBits — TIFF 6.0 Section 9
