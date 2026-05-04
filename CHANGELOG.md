@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.1...v0.0.2) - 2026-05-04
+
+### Other
+
+- add default-on `registry` cargo feature for standalone-friendly builds
+- Merge pull request #1 from OxideAV/release-plz-2026-05-03T03-53-50Z
+
 ## [0.0.1](https://github.com/OxideAV/oxideav-tiff/releases/tag/v0.0.1) - 2026-05-03
 
 ### Other
