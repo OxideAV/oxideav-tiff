@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Encoder: classic-II TIFF 6.0 writer covering MinIsBlack 8/16-bit
+  greyscale, RGB 8-bit, and 8-bit indexed palette photometrics with
+  None / PackBits / LZW / Deflate compression. Single-IFD via
+  `encode_tiff`, or chained multi-page via `encode_tiff_multi`.
+  Output validates round-trip through ImageMagick `convert`,
+  `tiffinfo`, and `tiffcp`.
+- Decoder: BigTIFF (8-byte offsets, magic 43) header + IFD parsing
+  alongside classic 32-bit TIFF. New `LONG8` / `SLONG8` / `IFD8`
+  field types decode through the existing `Entry::as_u64_vec` /
+  `as_u32_vec` accessors.
+- Decoder: tile layout (`TileWidth` / `TileLength` / `TileOffsets`
+  / `TileByteCounts`) for byte-aligned bit depths (8 / 16). Edge
+  tiles whose visible region is narrower / shorter than the tile
+  geometry are correctly trimmed.
+- Decoder: multi-page support via the new `decode_tiff_all` API
+  (full next-IFD chain walk with cycle detection).
+- Decoder: CMYK photometric (4-sample × 8-bit chunky) → `Rgb24`
+  via the standard multiplicative complement-of-coverage transform.
+- Decoder: YCbCr photometric (3-sample × 8-bit chunky) →
+  `Rgb24` via BT.601 inverse-matrix integer coefficients with
+  `YCbCrSubSampling` parsing for the common 1×1 / 2×1 / 2×2 / 1×2 /
+  4×1 / 4×2 layouts.
+- Container probe now also recognises the BigTIFF II / MM magic
+  bytes (`II 2B 00` / `MM 00 2B`).
+
 ## [0.0.2](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.1...v0.0.2) - 2026-05-04
 
 ### Other

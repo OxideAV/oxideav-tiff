@@ -247,51 +247,148 @@ pub fn unpack_deflate(input: &[u8], _expected_len: usize) -> Result<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
+// Encoders (used by the writer in `encoder.rs`)
+// ---------------------------------------------------------------------------
+
+/// PackBits encode per TIFF 6.0 §9 pseudocode. Greedy: emit replicate
+/// runs of length >=3, otherwise literal runs up to 128 bytes.
+pub fn pack_packbits(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < input.len() {
+        // Find run length at i (max 128).
+        let mut run = 1usize;
+        while run < 128 && i + run < input.len() && input[i + run] == input[i] {
+            run += 1;
+        }
+        if run >= 3 {
+            out.push((-(run as i32 - 1)) as i8 as u8);
+            out.push(input[i]);
+            i += run;
+        } else {
+            // Literal: gather up to 128 bytes that don't start a
+            // 3-byte+ replicate.
+            let lit_start = i;
+            let mut lit_end = i + 1;
+            while lit_end - lit_start < 128 && lit_end < input.len() {
+                let r = lit_end + 2 < input.len()
+                    && input[lit_end] == input[lit_end + 1]
+                    && input[lit_end + 1] == input[lit_end + 2];
+                if r {
+                    break;
+                }
+                lit_end += 1;
+            }
+            let n = lit_end - lit_start;
+            out.push((n as i32 - 1) as u8);
+            out.extend_from_slice(&input[lit_start..lit_end]);
+            i = lit_end;
+        }
+    }
+    out
+}
+
+/// LZW encode for TIFF (TIFF 6.0 §13). Builds the same code table
+/// the decoder expects, writes codes MSB-first ("FillOrder=1, codes
+/// stored high-to-low-order"), bumps code width "one early" exactly
+/// as `unpack_lzw` does on the read side, and emits `ClearCode`
+/// when the table fills.
+pub fn pack_lzw(input: &[u8]) -> Vec<u8> {
+    use std::collections::HashMap;
+    let mut dict: HashMap<(u16, u8), u16> = HashMap::new();
+    let mut next_code: u16 = LZW_FIRST_CODE;
+    let mut code_size: u32 = 9;
+
+    let mut bit_buf: u64 = 0;
+    let mut bit_count: u32 = 0;
+    let mut out = Vec::new();
+    let write_code = |c: u16, n: u32, bit_buf: &mut u64, bit_count: &mut u32, out: &mut Vec<u8>| {
+        *bit_buf = (*bit_buf << n) | (c as u64);
+        *bit_count += n;
+        while *bit_count >= 8 {
+            let shift = *bit_count - 8;
+            let b = ((*bit_buf >> shift) & 0xFF) as u8;
+            out.push(b);
+            *bit_count -= 8;
+            *bit_buf &= (1u64 << *bit_count) - 1;
+        }
+    };
+
+    // Emit ClearCode first.
+    write_code(
+        LZW_CLEAR_CODE,
+        code_size,
+        &mut bit_buf,
+        &mut bit_count,
+        &mut out,
+    );
+
+    if input.is_empty() {
+        write_code(
+            LZW_EOI_CODE,
+            code_size,
+            &mut bit_buf,
+            &mut bit_count,
+            &mut out,
+        );
+    } else {
+        let mut current: u16 = input[0] as u16;
+        for &b in &input[1..] {
+            let key = (current, b);
+            if let Some(&c) = dict.get(&key) {
+                current = c;
+            } else {
+                write_code(current, code_size, &mut bit_buf, &mut bit_count, &mut out);
+                if next_code <= LZW_MAX_CODE {
+                    dict.insert(key, next_code);
+                    if code_size < 12 && next_code >= (1u16 << code_size) - 1 {
+                        code_size += 1;
+                    }
+                    next_code += 1;
+                } else {
+                    write_code(
+                        LZW_CLEAR_CODE,
+                        code_size,
+                        &mut bit_buf,
+                        &mut bit_count,
+                        &mut out,
+                    );
+                    dict.clear();
+                    next_code = LZW_FIRST_CODE;
+                    code_size = 9;
+                }
+                current = b as u16;
+            }
+        }
+        write_code(current, code_size, &mut bit_buf, &mut bit_count, &mut out);
+        write_code(
+            LZW_EOI_CODE,
+            code_size,
+            &mut bit_buf,
+            &mut bit_count,
+            &mut out,
+        );
+    }
+    if bit_count > 0 {
+        let b = ((bit_buf << (8 - bit_count)) & 0xFF) as u8;
+        out.push(b);
+    }
+    out
+}
+
+/// Deflate encode (zlib stream) using `miniz_oxide` at default
+/// compression level. Matches Compression=8 (Adobe Deflate).
+pub fn pack_deflate(input: &[u8]) -> Vec<u8> {
+    miniz_oxide::deflate::compress_to_vec_zlib(input, 6)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Encode a byte stream into PackBits — minimal correct encoder
-    /// good enough for tests. Greedy: emit replicate runs of length
-    /// >=3, otherwise literal runs up to 128 bytes.
-    fn pack_packbits(input: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < input.len() {
-            // Find run length at i (max 128).
-            let mut run = 1usize;
-            while run < 128 && i + run < input.len() && input[i + run] == input[i] {
-                run += 1;
-            }
-            if run >= 3 {
-                out.push((-(run as i32 - 1)) as i8 as u8);
-                out.push(input[i]);
-                i += run;
-            } else {
-                // Literal: gather up to 128 bytes that don't start a
-                // 3-byte+ replicate.
-                let lit_start = i;
-                let mut lit_end = i + 1;
-                while lit_end - lit_start < 128 && lit_end < input.len() {
-                    let r = lit_end + 2 < input.len()
-                        && input[lit_end] == input[lit_end + 1]
-                        && input[lit_end + 1] == input[lit_end + 2];
-                    if r {
-                        break;
-                    }
-                    lit_end += 1;
-                }
-                let n = lit_end - lit_start;
-                out.push((n as i32 - 1) as u8);
-                out.extend_from_slice(&input[lit_start..lit_end]);
-                i = lit_end;
-            }
-        }
-        out
-    }
 
     #[test]
     fn packbits_roundtrip_replicates() {
@@ -326,97 +423,6 @@ mod tests {
         let input = vec![0x80, 0x00, b'A']; // noop, then 1-byte literal 'A'
         let out = unpack_packbits(&input, 1).unwrap();
         assert_eq!(out, b"A");
-    }
-
-    /// Minimal LZW encoder for tests. Builds the same table the
-    /// decoder builds, writes codes MSB-first.
-    fn pack_lzw(input: &[u8]) -> Vec<u8> {
-        // Hash dictionary: (prev_code, byte) -> code
-        use std::collections::HashMap;
-        let mut dict: HashMap<(u16, u8), u16> = HashMap::new();
-        let mut next_code: u16 = LZW_FIRST_CODE;
-        let mut code_size: u32 = 9;
-
-        let mut bit_buf: u64 = 0;
-        let mut bit_count: u32 = 0;
-        let mut out = Vec::new();
-        let write_code =
-            |c: u16, n: u32, bit_buf: &mut u64, bit_count: &mut u32, out: &mut Vec<u8>| {
-                *bit_buf = (*bit_buf << n) | (c as u64);
-                *bit_count += n;
-                while *bit_count >= 8 {
-                    let shift = *bit_count - 8;
-                    let b = ((*bit_buf >> shift) & 0xFF) as u8;
-                    out.push(b);
-                    *bit_count -= 8;
-                    *bit_buf &= (1u64 << *bit_count) - 1;
-                }
-            };
-
-        // Emit ClearCode first.
-        write_code(
-            LZW_CLEAR_CODE,
-            code_size,
-            &mut bit_buf,
-            &mut bit_count,
-            &mut out,
-        );
-
-        if input.is_empty() {
-            write_code(
-                LZW_EOI_CODE,
-                code_size,
-                &mut bit_buf,
-                &mut bit_count,
-                &mut out,
-            );
-        } else {
-            let mut current: u16 = input[0] as u16;
-            for &b in &input[1..] {
-                let key = (current, b);
-                if let Some(&c) = dict.get(&key) {
-                    current = c;
-                } else {
-                    write_code(current, code_size, &mut bit_buf, &mut bit_count, &mut out);
-                    if next_code <= LZW_MAX_CODE {
-                        dict.insert(key, next_code);
-                        // Bump BEFORE bumping next_code to mirror
-                        // the decoder's "bump one early" rule.
-                        if code_size < 12 && next_code >= (1u16 << code_size) - 1 {
-                            code_size += 1;
-                        }
-                        next_code += 1;
-                    } else {
-                        // Table full: emit Clear and reset.
-                        write_code(
-                            LZW_CLEAR_CODE,
-                            code_size,
-                            &mut bit_buf,
-                            &mut bit_count,
-                            &mut out,
-                        );
-                        dict.clear();
-                        next_code = LZW_FIRST_CODE;
-                        code_size = 9;
-                    }
-                    current = b as u16;
-                }
-            }
-            write_code(current, code_size, &mut bit_buf, &mut bit_count, &mut out);
-            write_code(
-                LZW_EOI_CODE,
-                code_size,
-                &mut bit_buf,
-                &mut bit_count,
-                &mut out,
-            );
-        }
-        // Flush remaining bits.
-        if bit_count > 0 {
-            let b = ((bit_buf << (8 - bit_count)) & 0xFF) as u8;
-            out.push(b);
-        }
-        out
     }
 
     #[test]

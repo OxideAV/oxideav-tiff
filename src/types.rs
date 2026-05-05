@@ -12,6 +12,7 @@
 pub const BYTE_ORDER_LE: u16 = 0x4949; // "II"
 pub const BYTE_ORDER_BE: u16 = 0x4D4D; // "MM"
 pub const TIFF_MAGIC: u16 = 42;
+pub const BIGTIFF_MAGIC: u16 = 43;
 
 // --- Field types (Section 2) --------------------------------------------
 pub const TYPE_BYTE: u16 = 1;
@@ -26,6 +27,10 @@ pub const TYPE_SLONG: u16 = 9;
 pub const TYPE_SRATIONAL: u16 = 10;
 pub const TYPE_FLOAT: u16 = 11;
 pub const TYPE_DOUBLE: u16 = 12;
+// BigTIFF additions (Adobe Pagemaker 6.0 → BigTIFF spec):
+pub const TYPE_LONG8: u16 = 16;
+pub const TYPE_SLONG8: u16 = 17;
+pub const TYPE_IFD8: u16 = 18;
 
 /// Size in bytes of a single value of the given field type. `0` for
 /// unknown types (per spec, readers must skip those gracefully).
@@ -35,6 +40,8 @@ pub fn type_size(t: u16) -> u32 {
         TYPE_SHORT | TYPE_SSHORT => 2,
         TYPE_LONG | TYPE_SLONG | TYPE_FLOAT => 4,
         TYPE_RATIONAL | TYPE_SRATIONAL | TYPE_DOUBLE => 8,
+        // BigTIFF: 64-bit unsigned/signed long + 64-bit IFD pointer.
+        TYPE_LONG8 | TYPE_SLONG8 | TYPE_IFD8 => 8,
         _ => 0,
     }
 }
@@ -62,6 +69,18 @@ pub const TAG_PREDICTOR: u16 = 317;
 pub const TAG_COLOR_MAP: u16 = 320;
 pub const TAG_EXTRA_SAMPLES: u16 = 338;
 pub const TAG_SAMPLE_FORMAT: u16 = 339;
+
+// --- Tile tags (Section 15) ---------------------------------------------
+pub const TAG_TILE_WIDTH: u16 = 322;
+pub const TAG_TILE_LENGTH: u16 = 323;
+pub const TAG_TILE_OFFSETS: u16 = 324;
+pub const TAG_TILE_BYTE_COUNTS: u16 = 325;
+
+// --- YCbCr tags (Section 21) --------------------------------------------
+pub const TAG_YCBCR_COEFFICIENTS: u16 = 529;
+pub const TAG_YCBCR_SUBSAMPLING: u16 = 530;
+pub const TAG_YCBCR_POSITIONING: u16 = 531;
+pub const TAG_REFERENCE_BLACK_WHITE: u16 = 532;
 
 // --- Compression schemes (Section 3 + Section 13) -----------------------
 pub const COMPRESSION_NONE: u16 = 1;

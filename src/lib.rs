@@ -1,23 +1,35 @@
-//! Pure-Rust TIFF 6.0 image decoder + container.
+//! Pure-Rust TIFF 6.0 image decoder + encoder + container.
 //!
-//! Implements the *Aldus TIFF Revision 6.0 (June 1992)* baseline, plus
-//! the two universally-deployed Part 2 extensions (LZW with optional
-//! horizontal-differencing predictor; Adobe Deflate). Spec-only
-//! clean-room: no external library source was consulted at any point.
+//! Implements the *Aldus TIFF Revision 6.0 (June 1992)* baseline plus
+//! the universally-deployed Part 2 extensions (LZW with optional
+//! horizontal-differencing predictor; Adobe Deflate; YCbCr / CMYK
+//! photometrics; tiles), the multi-IFD chain (multi-page) and the
+//! Adobe Pagemaker 6.0 *BigTIFF* design (8-byte offsets, magic 43).
+//! Spec-only clean-room: no external library source was consulted at
+//! any point.
 //!
 //! Decode-side coverage:
 //!
 //! * Byte order: `II` (little-endian) and `MM` (big-endian)
-//! * Photometric: WhiteIsZero / BlackIsZero / RGB / Palette
-//! * Bit depths: 1, 4, 8, 16
+//! * Variants: classic TIFF (32-bit offsets) + BigTIFF (64-bit offsets)
+//! * Photometric: WhiteIsZero / BlackIsZero / RGB / Palette / CMYK / YCbCr
+//! * Bit depths: 1, 4, 8, 16 (per-strip and per-tile)
 //! * Compression: 1 None / 32773 PackBits / 5 LZW / 8 Deflate (zlib)
 //! * Predictor: 1 (none) and 2 (horizontal differencing,
 //!   per-component for SamplesPerPixel > 1)
-//! * Strip-based decode (any number of strips)
+//! * Strip OR tile layout
+//! * Multi-page (full next-IFD chain walk via [`decode_tiff_all`])
 //!
-//! Out of scope for round 1 (round 2 backlog): BigTIFF, tiles, CCITT
-//! G3/G4 fax, JPEG-in-TIFF, YCbCr / CIELab / CMYK, multi-page IFD
-//! chain, encoder.
+//! Encode-side coverage (classic II / single or multi page):
+//!
+//! * Photometric: BlackIsZero (8/16-bit greyscale) / RGB (8-bit) /
+//!   Palette (8-bit indexed)
+//! * Compression: None / PackBits / LZW / Deflate
+//! * Multi-page chain via [`encode_tiff_multi`]
+//!
+//! Out of scope for this round (next-round backlog): CCITT G3/G4 fax,
+//! JPEG-in-TIFF (Compression=6/7), CIELab photometric, BigTIFF write,
+//! tile write, predictor encoding, planar (non-chunky) layout.
 //!
 //! ## Standalone vs registry-integrated
 //!
@@ -31,6 +43,7 @@
 
 pub mod compress;
 pub mod decoder;
+pub mod encoder;
 pub mod error;
 pub mod ifd;
 pub mod image;
@@ -47,7 +60,10 @@ pub const CODEC_ID_STR: &str = "tiff";
 
 // Standalone, framework-free API. Available regardless of the
 // `registry` feature.
-pub use decoder::{decode_tiff, DecodedTiff};
+pub use decoder::{decode_tiff, decode_tiff_all, DecodedTiff};
+pub use encoder::{
+    encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat, RgbColor, TiffCompression,
+};
 pub use error::{Result, TiffError};
 pub use image::{TiffImage, TiffPixelFormat, TiffPlane};
 

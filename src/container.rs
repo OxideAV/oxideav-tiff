@@ -23,10 +23,16 @@ pub fn register(reg: &mut ContainerRegistry) {
 
 fn probe(data: &ProbeData) -> ProbeScore {
     if data.buf.len() >= 4 {
-        // II 4949 + magic 002A (LE) → bytes 49 49 2A 00.
-        // MM 4D4D + magic 002A (BE) → bytes 4D 4D 00 2A.
+        // II 4949 + magic 002A (LE) → bytes 49 49 2A 00 (classic).
+        // MM 4D4D + magic 002A (BE) → bytes 4D 4D 00 2A (classic).
+        // II 4949 + magic 002B (LE) → bytes 49 49 2B 00 (BigTIFF).
+        // MM 4D4D + magic 002B (BE) → bytes 4D 4D 00 2B (BigTIFF).
         let h = &data.buf[..4];
-        if h == [b'I', b'I', 0x2A, 0x00] || h == [b'M', b'M', 0x00, 0x2A] {
+        if h == [b'I', b'I', 0x2A, 0x00]
+            || h == [b'M', b'M', 0x00, 0x2A]
+            || h == [b'I', b'I', 0x2B, 0x00]
+            || h == [b'M', b'M', 0x00, 0x2B]
+        {
             return MAX_PROBE_SCORE;
         }
     }
@@ -45,7 +51,12 @@ pub fn open_demuxer(
     let mut buf = Vec::new();
     input.read_to_end(&mut buf)?;
     let header = parse_header(&buf)?;
-    let (entries, _next) = parse_ifd(&buf, header.byte_order, header.first_ifd_offset)?;
+    let (entries, _next) = parse_ifd(
+        &buf,
+        header.byte_order,
+        header.variant,
+        header.first_ifd_offset,
+    )?;
     let bo = header.byte_order;
 
     let width = find(&entries, TAG_IMAGE_WIDTH)
