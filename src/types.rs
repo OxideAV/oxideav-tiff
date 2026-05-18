@@ -76,6 +76,15 @@ pub const TAG_TILE_LENGTH: u16 = 323;
 pub const TAG_TILE_OFFSETS: u16 = 324;
 pub const TAG_TILE_BYTE_COUNTS: u16 = 325;
 
+// --- CCITT tags (Section 11) --------------------------------------------
+pub const TAG_T4_OPTIONS: u16 = 292;
+pub const TAG_T6_OPTIONS: u16 = 293;
+
+// T4Options bits (Section 11):
+pub const T4OPT_2D_CODING: u32 = 1 << 0;
+pub const T4OPT_UNCOMPRESSED: u32 = 1 << 1;
+pub const T4OPT_EOL_BYTE_ALIGNED: u32 = 1 << 2;
+
 // --- YCbCr tags (Section 21) --------------------------------------------
 pub const TAG_YCBCR_COEFFICIENTS: u16 = 529;
 pub const TAG_YCBCR_SUBSAMPLING: u16 = 530;

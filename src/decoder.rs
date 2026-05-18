@@ -3,6 +3,7 @@
 //! if any, expand palette / bilevel / 16-bit pixels into one of our
 //! standard `TiffPixelFormat`s.
 
+use crate::ccitt::{decode_ccitt, CcittVariant, FillOrder};
 use crate::compress::{unpack_deflate, unpack_lzw, unpack_packbits};
 use crate::error::{Result, TiffError as Error};
 use crate::ifd::{find, parse_header, parse_ifd, ByteOrder, Entry};
@@ -127,6 +128,26 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         )));
     }
 
+    // Extract CCITT-relevant IFD fields once; the strip/tile paths
+    // use them only when `compression` is 2 or 3.
+    let fill_order = find(entries, TAG_FILL_ORDER)
+        .map(|e| e.as_u32(bo))
+        .transpose()?
+        .unwrap_or(1) as u16;
+    if matches!(
+        compression,
+        COMPRESSION_CCITT_HUFFMAN | COMPRESSION_CCITT_T4 | COMPRESSION_CCITT_T6
+    ) && fill_order != 1
+    {
+        return Err(Error::invalid(format!(
+            "TIFF: FillOrder={fill_order} with CCITT compression not supported (need MSB-first)"
+        )));
+    }
+    let t4_options = find(entries, TAG_T4_OPTIONS)
+        .map(|e| e.as_u32(bo))
+        .transpose()?
+        .unwrap_or(0);
+
     let pixel_buf = if find(entries, TAG_TILE_WIDTH).is_some() {
         decode_tiles(
             input,
@@ -138,6 +159,7 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             bps_first,
             compression,
             predictor,
+            t4_options,
         )?
     } else {
         decode_strips(
@@ -150,8 +172,22 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             bps_first,
             compression,
             predictor,
+            t4_options,
         )?
     };
+
+    // Note on CCITT photometric handling: §10 / §11 describe the
+    // codec as "self-photometric in terms of white and black runs",
+    // and TIFF 6.0 says a BlackIsZero reader must "reverse the
+    // meaning of white and black when displaying". In practice
+    // libtiff (and the spec's wire format) treats the codec as
+    // bit-transparent: the encoder emits white runs for input bits
+    // of 0 and black runs for input bits of 1, irrespective of
+    // PhotometricInterpretation; the reader returns the raw
+    // 1-bit-per-pixel buffer untouched and lets the downstream
+    // bilevel-to-Gray8 conversion apply the photometric inversion
+    // (which `build_gray8_from_1bpp` already does via its `invert`
+    // argument). No extra inversion is needed here.
 
     // ---- Convert into a standard TiffPixelFormat ----
     let (image, _pf) = match (photometric, samples_per_pixel, bps_first) {
@@ -258,6 +294,7 @@ fn decode_strips(
     bps_first: u16,
     compression: u16,
     predictor: u16,
+    t4_options: u32,
 ) -> Result<Vec<u8>> {
     let rows_per_strip = find(entries, TAG_ROWS_PER_STRIP)
         .map(|e| e.as_u32(bo))
@@ -298,7 +335,20 @@ fn decode_strips(
         let raw = &input[start..end];
         let rows_this_strip = rows_per_strip.min(height - rows_done);
         let expected = row_bytes * rows_this_strip as usize;
-        let decompressed = decompress_block(raw, expected, compression)?;
+        let ccitt = if matches!(
+            compression,
+            COMPRESSION_CCITT_HUFFMAN | COMPRESSION_CCITT_T4 | COMPRESSION_CCITT_T6
+        ) {
+            Some(CcittParams {
+                width,
+                rows: rows_this_strip,
+                fill: FillOrder::MsbFirst,
+                t4_options,
+            })
+        } else {
+            None
+        };
+        let decompressed = decompress_block(raw, expected, compression, ccitt)?;
         if decompressed.len() < expected {
             return Err(Error::invalid(format!(
                 "TIFF: strip {i} short after decompress: got {} bytes, expected {}",
@@ -342,6 +392,7 @@ fn decode_tiles(
     bps_first: u16,
     compression: u16,
     predictor: u16,
+    t4_options: u32,
 ) -> Result<Vec<u8>> {
     let tile_w = find(entries, TAG_TILE_WIDTH)
         .ok_or_else(|| Error::invalid("TIFF: missing TileWidth"))?
@@ -395,7 +446,20 @@ fn decode_tiles(
                 return Err(Error::invalid("TIFF: tile extends past EOF"));
             }
             let raw = &input[off..end];
-            let mut tile = decompress_block(raw, tile_size_bytes, compression)?;
+            let ccitt = if matches!(
+                compression,
+                COMPRESSION_CCITT_HUFFMAN | COMPRESSION_CCITT_T4 | COMPRESSION_CCITT_T6
+            ) {
+                Some(CcittParams {
+                    width: tile_w,
+                    rows: tile_h,
+                    fill: FillOrder::MsbFirst,
+                    t4_options,
+                })
+            } else {
+                None
+            };
+            let mut tile = decompress_block(raw, tile_size_bytes, compression, ccitt)?;
             if tile.len() < tile_size_bytes {
                 return Err(Error::invalid("TIFF: tile short after decompress"));
             }
@@ -444,12 +508,58 @@ fn decode_tiles(
     Ok(out)
 }
 
-fn decompress_block(raw: &[u8], expected: usize, compression: u16) -> Result<Vec<u8>> {
+/// Parameters needed for CCITT compression schemes (2 / 3). Carries
+/// the per-block geometry plus the codec-shape options decoded out
+/// of the IFD (FillOrder + T4Options).
+#[derive(Debug, Clone, Copy)]
+struct CcittParams {
+    width: u32,
+    rows: u32,
+    fill: FillOrder,
+    t4_options: u32,
+}
+
+fn decompress_block(
+    raw: &[u8],
+    expected: usize,
+    compression: u16,
+    ccitt: Option<CcittParams>,
+) -> Result<Vec<u8>> {
     match compression {
         COMPRESSION_NONE => Ok(raw.to_vec()),
         COMPRESSION_PACKBITS => unpack_packbits(raw, expected),
         COMPRESSION_LZW => unpack_lzw(raw, expected),
         COMPRESSION_DEFLATE_ADOBE => unpack_deflate(raw, expected),
+        COMPRESSION_CCITT_HUFFMAN => {
+            let p = ccitt
+                .ok_or_else(|| Error::invalid("TIFF: CCITT compression requires CcittParams"))?;
+            decode_ccitt(raw, p.width, p.rows, CcittVariant::ModifiedHuffman, p.fill)
+        }
+        COMPRESSION_CCITT_T4 => {
+            let p = ccitt
+                .ok_or_else(|| Error::invalid("TIFF: CCITT-T4 compression requires CcittParams"))?;
+            if p.t4_options & T4OPT_2D_CODING != 0 {
+                return Err(Error::invalid(
+                    "TIFF: T4 2-D coding (T4Options bit 0) not supported (docs lack 2D mode codes)",
+                ));
+            }
+            if p.t4_options & T4OPT_UNCOMPRESSED != 0 {
+                return Err(Error::invalid(
+                    "TIFF: T4 uncompressed-mode extension (T4Options bit 1) not supported",
+                ));
+            }
+            let eol_byte_aligned = p.t4_options & T4OPT_EOL_BYTE_ALIGNED != 0;
+            decode_ccitt(
+                raw,
+                p.width,
+                p.rows,
+                CcittVariant::T4OneD { eol_byte_aligned },
+                p.fill,
+            )
+        }
+        COMPRESSION_CCITT_T6 => Err(Error::invalid(
+            "TIFF: T.6 (Compression=4) not supported (docs lack 2D mode codes)",
+        )),
         other => Err(Error::invalid(format!(
             "TIFF: Compression={other} not supported"
         ))),

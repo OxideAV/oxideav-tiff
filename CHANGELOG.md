@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decoder: CCITT Modified Huffman (`Compression = 2`, TIFF 6.0
+  §10) and CCITT T.4 1-D (`Compression = 3` with `T4Options` bit 0
+  cleared, §11) decompression. Full white + black terminating and
+  make-up code tables (Tables 1/T.4 and 2/T.4 plus the 1792..2560
+  additional make-up codes from page 47) transcribed verbatim from
+  the TIFF 6.0 PDF. `T4Options` bit 2 (`EOL-byte-aligned`) is
+  honoured. `FillOrder` other than 1 (MSB-first) is rejected
+  explicitly. CCITT T.4 2-D (`T4Options` bit 0 = 1) and T.6 /
+  Group 4 (`Compression = 4`) remain unsupported because the 2-D
+  Pass / Horizontal / Vertical mode codes are not part of the TIFF
+  6.0 spec — those callers receive a precise error. Validated
+  pixel-for-pixel against `tiffcp -c g3:1d` and `tiffcp -c
+  g3:1d:fill` output for solid, multi-run, make-up-bumped, and
+  diagonal patterns.
 - Encoder: classic-II TIFF 6.0 writer covering MinIsBlack 8/16-bit
   greyscale, RGB 8-bit, and 8-bit indexed palette photometrics with
   None / PackBits / LZW / Deflate compression. Single-IFD via

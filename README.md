@@ -5,18 +5,20 @@ Pure-Rust TIFF 6.0 image decoder + encoder + container for the
 
 Implements the *Aldus TIFF Revision 6.0 (June 1992)* baseline plus the
 universally-deployed Part 2 extensions (LZW + Deflate, tiles, YCbCr /
-CMYK photometrics), the multi-IFD chain (multi-page), and the Adobe
-Pagemaker 6.0 *BigTIFF* design (8-byte offsets, magic 43). Spec-only
-clean-room: no external library source was consulted.
+CMYK photometrics, CCITT Modified Huffman + T.4 1-D), the multi-IFD
+chain (multi-page), and the Adobe Pagemaker 6.0 *BigTIFF* design
+(8-byte offsets, magic 43). Spec-only clean-room: no external library
+source was consulted.
 
 ## Decode
 
 | Photometric    | Bit depth      | Compression                        | Output       |
 | -------------- | -------------- | ---------------------------------- | ------------ |
-| WhiteIsZero    | 1              | None / PackBits / LZW / Deflate    | `Gray8`      |
+| WhiteIsZero    | 1              | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate    | `Gray8`      |
 | WhiteIsZero    | 4 / 8          | None / PackBits / LZW / Deflate    | `Gray8`      |
 | WhiteIsZero    | 16             | None / PackBits / LZW / Deflate    | `Gray16Le`   |
-| BlackIsZero    | 1 / 4 / 8 / 16 | None / PackBits / LZW / Deflate    | `Gray8` / `Gray16Le` |
+| BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate    | `Gray8`      |
+| BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate    | `Gray8` / `Gray16Le` |
 | Palette        | 4 / 8          | None / PackBits / LZW / Deflate    | `Rgb24`      |
 | RGB (3 chan)   | 8              | None / PackBits / LZW / Deflate    | `Rgb24`      |
 | RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate    | `Rgb48Le`    |
@@ -43,14 +45,21 @@ Output is classic II little-endian TIFF, single-IFD via
 [`encode_tiff`] or multi-page via [`encode_tiff_multi`]. Files
 roundtrip through ImageMagick / `tiffinfo` / `tiffcp`.
 
-## Round-3 backlog (not yet implemented)
+## Backlog (not yet implemented)
 
 - BigTIFF write, tile write, predictor on encode
-- CCITT Group 3 / 4 fax compression (Compression = 2 / 3 / 4)
+- CCITT T.4 2-D coding (`Compression = 3` with `T4Options` bit 0
+  set) and T.6 / Group 4 (`Compression = 4`). The 2-D Pass /
+  Horizontal / Vertical mode codes are not in the TIFF 6.0 PDF —
+  it defers to CCITT Rec. T.4 / T.6 — so implementing these
+  requires a clean-room transcription added to
+  `docs/image/tiff/` first.
+- CCITT encode (Compression = 2 / 3)
 - JPEG-in-TIFF (Compression = 6 old-style, 7 new-style)
 - CIELab / Transparency-mask photometric interpretations
 - DNG / GeoTIFF / EXIF blob extraction
 - Planar (separate-plane) layout
+- `FillOrder = 2` (LSB-first) for CCITT-compressed strips
 
 ## Registration
 
