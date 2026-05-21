@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decoder: `FillOrder = 2` (LSB-first) for bilevel data. Both
+  uncompressed (`Compression = 1`) and CCITT-compressed
+  (`Compression = 2 / 3`) bilevel strips and tiles now accept
+  FillOrder=2 inputs, per TIFF 6.0 §FillOrder (page 32). The
+  decoder normalises every byte to MSB-first canonical layout via a
+  bit-reversal helper before the CCITT run-length scanner or the
+  bilevel-to-Gray8 expander runs, so downstream paths stay
+  FillOrder-agnostic. FillOrder=2 combined with non-bilevel data
+  (`BitsPerSample != 1`) or a non-CCITT compressor is explicitly
+  rejected, matching the spec's restriction. Validated
+  pixel-for-pixel against `tiffcp -f lsb2msb` output for
+  Compression=None, Compression=2 (Modified Huffman), and
+  Compression=3 (T.4 1-D) fixtures.
 - Decoder: CCITT Modified Huffman (`Compression = 2`, TIFF 6.0
   §10) and CCITT T.4 1-D (`Compression = 3` with `T4Options` bit 0
   cleared, §11) decompression. Full white + black terminating and

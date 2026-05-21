@@ -33,6 +33,14 @@ strips or tiles). Multi-page files walk the next-IFD chain via
 byte orders are accepted, and both classic 32-bit-offset TIFF and
 BigTIFF (8-byte offsets, magic 43) parse.
 
+`FillOrder = 1` (MSB-first, the baseline default) and `FillOrder = 2`
+(LSB-first) are both accepted for the bit orderings the spec admits:
+FillOrder=2 is honoured for uncompressed and CCITT-compressed
+(`Compression = 1 / 2 / 3`) `BitsPerSample = 1` strips and tiles, per
+TIFF 6.0 §FillOrder (page 32). Any other combination of FillOrder=2
+with non-bilevel data or with a non-CCITT compressor is rejected with
+a precise error.
+
 ## Encode
 
 | Photometric    | Bit depth | Compression                        | API call                |
@@ -59,7 +67,6 @@ roundtrip through ImageMagick / `tiffinfo` / `tiffcp`.
 - CIELab / Transparency-mask photometric interpretations
 - DNG / GeoTIFF / EXIF blob extraction
 - Planar (separate-plane) layout
-- `FillOrder = 2` (LSB-first) for CCITT-compressed strips
 
 ## Registration
 

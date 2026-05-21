@@ -35,13 +35,28 @@
 
 use crate::error::{Result, TiffError as Error};
 
-/// FillOrder=1 (MSB-first) means the first transmitted bit lives in
-/// the high-order bit of the first byte. This is the only fill order
-/// we currently decode; FillOrder=2 (LSB-first) is reported as an
-/// explicit error.
+/// TIFF FillOrder (tag 266, §FillOrder, page 32 of the TIFF 6.0 PDF).
+///
+/// * `MsbFirst` (FillOrder=1, the baseline default): the high-order
+///   bit of the first compression code is stored in the high-order
+///   bit of byte 0, the next-highest bit in the next-highest bit, and
+///   so on.
+/// * `LsbFirst` (FillOrder=2): the same bit stream is captured into
+///   storage with the bit transmission order reversed within each
+///   octet — the first transmitted bit lands in the low-order bit of
+///   byte 0, the next-transmitted in the next-lowest, etc. (Common
+///   when CCITT data is captured straight off a Group 3 facsimile
+///   serial link; see TIFF 6.0 §11 "Modified Huffman Compression /
+///   FillOrder", pp. 50–51 of the PDF.)
+///
+/// Per spec page 32, FillOrder=2 is meaningful only when
+/// `BitsPerSample = 1` and the data is either uncompressed or
+/// compressed with CCITT 1-D / 2-D. The decoder rejects FillOrder=2
+/// in any other context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FillOrder {
     MsbFirst, // FillOrder = 1
+    LsbFirst, // FillOrder = 2
 }
 
 /// Variant flag controlling whether each row is preceded by an EOL
@@ -80,15 +95,24 @@ pub fn decode_ccitt(
     variant: CcittVariant,
     fill: FillOrder,
 ) -> Result<Vec<u8>> {
-    if !matches!(fill, FillOrder::MsbFirst) {
-        return Err(Error::invalid(
-            "TIFF/CCITT: FillOrder=2 (LSB-first) not supported in this build",
-        ));
-    }
+    // FillOrder=2 (LSB-first) just permutes the bit order inside each
+    // byte; per TIFF 6.0 §FillOrder (page 32) the writer "can reverse
+    // bit order by using a 256-byte lookup table". We do the same:
+    // pre-reverse every input byte, then run the MSB-first parser
+    // unchanged. This keeps the run-length tables and EOL scanner in
+    // one canonical bit order.
+    let owned: Vec<u8>;
+    let stream: &[u8] = match fill {
+        FillOrder::MsbFirst => input,
+        FillOrder::LsbFirst => {
+            owned = input.iter().map(|&b| reverse_bits_u8(b)).collect();
+            &owned
+        }
+    };
 
     let row_bytes = (width as usize).div_ceil(8);
     let mut out = vec![0u8; row_bytes * rows as usize];
-    let mut bits = BitReader::new(input);
+    let mut bits = BitReader::new(stream);
 
     for r in 0..rows {
         // Read & discard the row-leading EOL when the variant has
@@ -271,6 +295,30 @@ fn expect_eol(bits: &mut BitReader<'_>, byte_aligned: bool) -> Result<()> {
             }
             return Ok(());
         }
+    }
+}
+
+/// Reverse the bit order of a single byte: the byte that previously
+/// had its low-order bit holding pixel 0 now has its high-order bit
+/// holding pixel 0. Used by the FillOrder=2 → FillOrder=1 normaliser
+/// in [`decode_ccitt`] and by the uncompressed-bilevel path in
+/// `decoder.rs`. Equivalent to `u8::reverse_bits`; spelled out here
+/// because the call site cares about the spec language ("256-byte
+/// lookup table" from TIFF 6.0 §FillOrder).
+#[inline]
+pub fn reverse_bits_u8(b: u8) -> u8 {
+    b.reverse_bits()
+}
+
+/// In-place LSB-first → MSB-first bit-order normalisation across a
+/// whole buffer. Exposed so `decoder.rs` can normalise the raw
+/// `Compression=None` bilevel strips/tiles before handing them to
+/// `build_gray8_from_1bpp`, which assumes MSB-first byte layout
+/// per spec page 32 ("FillOrder = 1 ... pixel 0 of a row is stored
+/// in the high-order bit of byte 0").
+pub fn reverse_bits_in_place(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        *b = b.reverse_bits();
     }
 }
 
@@ -716,20 +764,104 @@ mod tests {
     }
 
     #[test]
-    fn rejects_lsb_fillorder() {
+    fn empty_input_errors_out_cleanly() {
+        // An empty buffer must trigger the bit-stream-exhausted path
+        // rather than panic or silently succeed.
         let r = decode_ccitt(
             &[],
             8,
             1,
             CcittVariant::ModifiedHuffman,
-            // Synthesise a hypothetical LSB-first by name: we don't
-            // have a variant for it, so this test really just
-            // exercises the matches! guard. Replace with a real
-            // variant when LSB support lands.
             FillOrder::MsbFirst,
         );
-        // The fixture is empty, so we expect a non-ok result but
-        // *not* the LSB guard message.
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn reverse_bits_u8_matches_spec_examples() {
+        // Spec-illustrative cases: 0x01 (low bit set) reversed must
+        // produce 0x80 (high bit set), and vice-versa.
+        assert_eq!(reverse_bits_u8(0x01), 0x80);
+        assert_eq!(reverse_bits_u8(0x80), 0x01);
+        assert_eq!(reverse_bits_u8(0x12), 0x48);
+        assert_eq!(reverse_bits_u8(0xFF), 0xFF);
+        assert_eq!(reverse_bits_u8(0x00), 0x00);
+    }
+
+    #[test]
+    fn reverse_bits_in_place_round_trips() {
+        let mut buf = [0xDE, 0xAD, 0xBE, 0xEFu8];
+        let orig = buf;
+        reverse_bits_in_place(&mut buf);
+        // Applying it twice must reproduce the input.
+        reverse_bits_in_place(&mut buf);
+        assert_eq!(buf, orig);
+    }
+
+    #[test]
+    fn mh_lsb_first_decodes_same_as_msb_first() {
+        // Build an MSB-first stream for the "all-black 8-pixel row"
+        // case (validated against tiffcp in the integration suite),
+        // then mirror its bytes and verify the LSB-first decode path
+        // produces identical pixels.
+        let mut bw = BitWriter::new();
+        bw.write(0b00110101, 8); // white 0
+        bw.write(0b000101, 6); // black 8
+        let msb_bytes = bw.finish();
+        let lsb_bytes: Vec<u8> = msb_bytes.iter().map(|&b| reverse_bits_u8(b)).collect();
+
+        let got_msb = decode_ccitt(
+            &msb_bytes,
+            8,
+            1,
+            CcittVariant::ModifiedHuffman,
+            FillOrder::MsbFirst,
+        )
+        .unwrap();
+        let got_lsb = decode_ccitt(
+            &lsb_bytes,
+            8,
+            1,
+            CcittVariant::ModifiedHuffman,
+            FillOrder::LsbFirst,
+        )
+        .unwrap();
+        assert_eq!(got_msb, vec![0xFFu8]);
+        assert_eq!(got_lsb, got_msb);
+    }
+
+    #[test]
+    fn t4_1d_lsb_first_decodes_same_as_msb_first() {
+        let mut bw = BitWriter::new();
+        bw.write(0b000000000001, 12); // EOL row 0
+        bw.write(0b10011, 5); // white 8
+        bw.write(0b000000000001, 12); // EOL row 1
+        bw.write(0b00110101, 8); // white 0
+        bw.write(0b000101, 6); // black 8
+        let msb_bytes = bw.finish();
+        let lsb_bytes: Vec<u8> = msb_bytes.iter().map(|&b| reverse_bits_u8(b)).collect();
+
+        let got_msb = decode_ccitt(
+            &msb_bytes,
+            8,
+            2,
+            CcittVariant::T4OneD {
+                eol_byte_aligned: false,
+            },
+            FillOrder::MsbFirst,
+        )
+        .unwrap();
+        let got_lsb = decode_ccitt(
+            &lsb_bytes,
+            8,
+            2,
+            CcittVariant::T4OneD {
+                eol_byte_aligned: false,
+            },
+            FillOrder::LsbFirst,
+        )
+        .unwrap();
+        assert_eq!(got_msb, vec![0u8, 0xFFu8]);
+        assert_eq!(got_lsb, got_msb);
     }
 }

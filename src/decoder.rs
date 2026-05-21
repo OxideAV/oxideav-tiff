@@ -3,7 +3,7 @@
 //! if any, expand palette / bilevel / 16-bit pixels into one of our
 //! standard `TiffPixelFormat`s.
 
-use crate::ccitt::{decode_ccitt, CcittVariant, FillOrder};
+use crate::ccitt::{decode_ccitt, reverse_bits_in_place, CcittVariant, FillOrder};
 use crate::compress::{unpack_deflate, unpack_lzw, unpack_packbits};
 use crate::error::{Result, TiffError as Error};
 use crate::ifd::{find, parse_header, parse_ifd, ByteOrder, Entry};
@@ -128,21 +128,47 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         )));
     }
 
-    // Extract CCITT-relevant IFD fields once; the strip/tile paths
-    // use them only when `compression` is 2 or 3.
-    let fill_order = find(entries, TAG_FILL_ORDER)
+    // Extract CCITT/FillOrder-relevant IFD fields once.
+    //
+    // FillOrder (tag 266, TIFF 6.0 §FillOrder page 32): 1 = pixels
+    // with lower column values are in the high-order bits (default,
+    // canonical), 2 = pixels with lower column values are in the
+    // low-order bits (only meaningful when BitsPerSample=1 and the
+    // data is uncompressed or CCITT-compressed; spec says
+    // explicitly: "FillOrder = 2 should be used only when
+    // BitsPerSample = 1 and the data is either uncompressed or
+    // compressed using CCITT 1D or 2D compression").
+    let fill_order_raw = find(entries, TAG_FILL_ORDER)
         .map(|e| e.as_u32(bo))
         .transpose()?
         .unwrap_or(1) as u16;
-    if matches!(
-        compression,
-        COMPRESSION_CCITT_HUFFMAN | COMPRESSION_CCITT_T4 | COMPRESSION_CCITT_T6
-    ) && fill_order != 1
-    {
-        return Err(Error::invalid(format!(
-            "TIFF: FillOrder={fill_order} with CCITT compression not supported (need MSB-first)"
-        )));
-    }
+    let fill_order = match fill_order_raw {
+        1 => FillOrder::MsbFirst,
+        2 => {
+            // Spec page 32: FillOrder=2 is only valid for BPS=1
+            // (uncompressed or CCITT-compressed). Reject other
+            // combinations rather than silently mis-decode.
+            let allowed_compression = matches!(
+                compression,
+                COMPRESSION_NONE
+                    | COMPRESSION_CCITT_HUFFMAN
+                    | COMPRESSION_CCITT_T4
+                    | COMPRESSION_CCITT_T6
+            );
+            if bps_first != 1 || !allowed_compression {
+                return Err(Error::invalid(format!(
+                    "TIFF: FillOrder=2 only valid for BitsPerSample=1 uncompressed/CCITT \
+                     (got bps={bps_first}, compression={compression})"
+                )));
+            }
+            FillOrder::LsbFirst
+        }
+        n => {
+            return Err(Error::invalid(format!(
+                "TIFF: FillOrder={n} unknown (spec defines only 1 and 2)"
+            )));
+        }
+    };
     let t4_options = find(entries, TAG_T4_OPTIONS)
         .map(|e| e.as_u32(bo))
         .transpose()?
@@ -160,6 +186,7 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             compression,
             predictor,
             t4_options,
+            fill_order,
         )?
     } else {
         decode_strips(
@@ -173,6 +200,7 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             compression,
             predictor,
             t4_options,
+            fill_order,
         )?
     };
 
@@ -295,6 +323,7 @@ fn decode_strips(
     compression: u16,
     predictor: u16,
     t4_options: u32,
+    fill_order: FillOrder,
 ) -> Result<Vec<u8>> {
     let rows_per_strip = find(entries, TAG_ROWS_PER_STRIP)
         .map(|e| e.as_u32(bo))
@@ -342,7 +371,7 @@ fn decode_strips(
             Some(CcittParams {
                 width,
                 rows: rows_this_strip,
-                fill: FillOrder::MsbFirst,
+                fill: fill_order,
                 t4_options,
             })
         } else {
@@ -358,6 +387,15 @@ fn decode_strips(
         }
         // Apply predictor per-row if requested.
         let mut strip = decompressed[..expected].to_vec();
+        // Uncompressed bilevel data carried with FillOrder=2 has the
+        // bit order reversed in every byte; canonicalise to MSB-first
+        // here so the bilevel-to-Gray8 expander downstream sees the
+        // same layout regardless of FillOrder. CCITT-compressed data
+        // is already normalised inside `decode_ccitt`, so we only
+        // touch the Compression=None path.
+        if compression == COMPRESSION_NONE && fill_order == FillOrder::LsbFirst && bps_first == 1 {
+            reverse_bits_in_place(&mut strip);
+        }
         if predictor == PREDICTOR_HORIZONTAL {
             apply_horizontal_predictor(
                 &mut strip,
@@ -393,6 +431,7 @@ fn decode_tiles(
     compression: u16,
     predictor: u16,
     t4_options: u32,
+    fill_order: FillOrder,
 ) -> Result<Vec<u8>> {
     let tile_w = find(entries, TAG_TILE_WIDTH)
         .ok_or_else(|| Error::invalid("TIFF: missing TileWidth"))?
@@ -453,7 +492,7 @@ fn decode_tiles(
                 Some(CcittParams {
                     width: tile_w,
                     rows: tile_h,
-                    fill: FillOrder::MsbFirst,
+                    fill: fill_order,
                     t4_options,
                 })
             } else {
@@ -464,6 +503,17 @@ fn decode_tiles(
                 return Err(Error::invalid("TIFF: tile short after decompress"));
             }
             tile.truncate(tile_size_bytes);
+            // Uncompressed bilevel tile path: see the strip-path
+            // companion comment. Tiles are gated to bps_first % 8 ==
+            // 0 above (see the explicit error a few lines below), so
+            // in practice bps_first==1 + tiles is rejected, but we
+            // keep the normalisation here for symmetry / safety.
+            if compression == COMPRESSION_NONE
+                && fill_order == FillOrder::LsbFirst
+                && bps_first == 1
+            {
+                reverse_bits_in_place(&mut tile);
+            }
             if predictor == PREDICTOR_HORIZONTAL {
                 apply_horizontal_predictor(
                     &mut tile,

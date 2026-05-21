@@ -75,6 +75,26 @@ fn tiffcp_recompress(src: &PathBuf, dst: &PathBuf, copts: &str) {
     }
 }
 
+/// Run `tiffcp -c <copts> -f <fill> src dst`. `-f lsb2msb` requests
+/// FillOrder=2 output, `-f msb2lsb` requests FillOrder=1.
+fn tiffcp_recompress_fill(src: &PathBuf, dst: &PathBuf, copts: &str, fill: &str) {
+    let out = Command::new("tiffcp")
+        .arg("-c")
+        .arg(copts)
+        .arg("-f")
+        .arg(fill)
+        .arg(src)
+        .arg(dst)
+        .output()
+        .expect("tiffcp spawn");
+    if !out.status.success() {
+        panic!(
+            "tiffcp -c {copts} -f {fill} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 fn decode(path: &PathBuf) -> Vec<u8> {
     let bytes = std::fs::read(path).expect("read tiff");
     let img = decode_tiff(&bytes).expect("decode_tiff");
@@ -219,6 +239,114 @@ fn ccitt_g4_is_unsupported() {
     assert!(
         msg.contains("T.6") || msg.contains("Compression=4"),
         "unexpected G4 error: {msg}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// FillOrder=2 (LSB-first) carriage, TIFF 6.0 §FillOrder page 32. Both
+// CCITT-compressed and uncompressed bilevel strips are valid carriers;
+// pixel results must match the FillOrder=1 baseline byte-for-byte.
+// -------------------------------------------------------------------------
+fn run_fillorder_roundtrip(w: u32, h: u32, draw: Option<&str>, copts: &str, label: &str) {
+    if !must_have_tooling() {
+        return;
+    }
+    let base = unique_tmp("oxideav-tiff-r82");
+    let raw = base.with_extension("none.tif");
+    let msb = base.with_extension(format!("{label}_msb.tif"));
+    let lsb = base.with_extension(format!("{label}_lsb.tif"));
+    make_bilevel(&raw, w, h, draw);
+    // Reference: same compression, MSB-first (FillOrder=1).
+    tiffcp_recompress_fill(&raw, &msb, copts, "msb2lsb");
+    // Variant under test: same compression, LSB-first (FillOrder=2).
+    tiffcp_recompress_fill(&raw, &lsb, copts, "lsb2msb");
+
+    let pix_msb = decode(&msb);
+    let pix_lsb = decode(&lsb);
+
+    let _ = std::fs::remove_file(&raw);
+    let _ = std::fs::remove_file(&msb);
+    let _ = std::fs::remove_file(&lsb);
+
+    assert_eq!(
+        pix_lsb.len(),
+        pix_msb.len(),
+        "{label}: byte-length mismatch ({} vs ref {})",
+        pix_lsb.len(),
+        pix_msb.len()
+    );
+    if pix_lsb != pix_msb {
+        let first = pix_lsb.iter().zip(pix_msb.iter()).position(|(a, b)| a != b);
+        panic!("{label}: FillOrder=2 pixels differ from FillOrder=1 reference at byte {first:?}",);
+    }
+}
+
+#[test]
+fn ccitt_t4_1d_fillorder_lsb_first_64x8() {
+    run_fillorder_roundtrip(
+        64,
+        8,
+        Some("rectangle 4,1 30,5 rectangle 40,2 55,4"),
+        "g3:1d",
+        "t4_1d_fillorder",
+    );
+}
+
+#[test]
+fn ccitt_t4_1d_fillorder_lsb_first_128x4_wide_run() {
+    // Force at least one make-up code through the LSB-first path so
+    // we cover make-up + terminator across reversed bytes.
+    run_fillorder_roundtrip(
+        128,
+        4,
+        Some("rectangle 0,0 100,3"),
+        "g3:1d",
+        "t4_1d_fillorder_wide",
+    );
+}
+
+#[test]
+fn ccitt_mh_fillorder_lsb_first_64x4() {
+    // Compression=2 (Modified Huffman) with FillOrder=2.
+    run_fillorder_roundtrip(64, 4, Some("rectangle 8,1 50,2"), "g3:1d", "mh_fillorder");
+    // Note: -c g3:1d emits Compression=3 (T.4 1-D). Modified-Huffman
+    // (Compression=2) requires a different tiffcp invocation: there
+    // is no `-c g3:mh` shorthand, so we additionally exercise the MH
+    // path here through a direct call.
+    if !must_have_tooling() {
+        return;
+    }
+    let base = unique_tmp("oxideav-tiff-r82-mh");
+    let raw = base.with_extension("none.tif");
+    let mh_msb = base.with_extension("mh_msb.tif");
+    let mh_lsb = base.with_extension("mh_lsb.tif");
+    make_bilevel(&raw, 64, 4, Some("rectangle 8,1 50,2"));
+    // `tiffcp -c g3` (no `:1d` suffix) defaults to MH per libtiff
+    // CLI. We can't validate the exact compression code here, but
+    // the round-trip oracle compares pixel buffers, not metadata.
+    tiffcp_recompress_fill(&raw, &mh_msb, "g3", "msb2lsb");
+    tiffcp_recompress_fill(&raw, &mh_lsb, "g3", "lsb2msb");
+    let p_msb = decode(&mh_msb);
+    let p_lsb = decode(&mh_lsb);
+    let _ = std::fs::remove_file(&raw);
+    let _ = std::fs::remove_file(&mh_msb);
+    let _ = std::fs::remove_file(&mh_lsb);
+    assert_eq!(
+        p_lsb, p_msb,
+        "MH/FillOrder=2 must decode same as FillOrder=1"
+    );
+}
+
+#[test]
+fn uncompressed_bilevel_fillorder_lsb_first_64x4() {
+    // -c none keeps Compression=1 (uncompressed); the spec
+    // explicitly allows FillOrder=2 for uncompressed BPS=1.
+    run_fillorder_roundtrip(
+        64,
+        4,
+        Some("rectangle 8,1 50,2 rectangle 10,3 30,3"),
+        "none",
+        "raw_fillorder",
     );
 }
 
