@@ -342,9 +342,9 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
                 for (i, c) in palette.iter().enumerate() {
                     // Replicate 8-bit channel into the high byte of
                     // the 16-bit ColorMap entry (upper bits =
-                    // intensity). libtiff and ImageMagick use the
-                    // canonical (v << 8) | v expansion so a 0xFF
-                    // 8-bit value reads back as 0xFFFF.
+                    // intensity). The canonical (v << 8) | v
+                    // expansion ensures a 0xFF 8-bit value reads
+                    // back as 0xFFFF in the 16-bit field.
                     cm[i] = ((c[0] as u16) << 8) | c[0] as u16;
                     cm[256 + i] = ((c[1] as u16) << 8) | c[1] as u16;
                     cm[512 + i] = ((c[2] as u16) << 8) | c[2] as u16;

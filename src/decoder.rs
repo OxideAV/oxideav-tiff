@@ -208,8 +208,8 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     // codec as "self-photometric in terms of white and black runs",
     // and TIFF 6.0 says a BlackIsZero reader must "reverse the
     // meaning of white and black when displaying". In practice
-    // libtiff (and the spec's wire format) treats the codec as
-    // bit-transparent: the encoder emits white runs for input bits
+    // every conformant reader treats the codec as bit-transparent
+    // on the wire: the encoder emits white runs for input bits
     // of 0 and black runs for input bits of 1, irrespective of
     // PhotometricInterpretation; the reader returns the raw
     // 1-bit-per-pixel buffer untouched and lets the downstream
@@ -1002,14 +1002,12 @@ fn build_rgb24_from_ycbcr(src: &[u8], w: u32, h: u32, sh: u16, sv: u16) -> Resul
 }
 
 /// ITU-R BT.601 inverse-matrix YCbCr → RGB with the canonical
-/// rounded integer coefficients (matches libjpeg / libtiff at
-/// integer precision; off-by-one differences from floating-point
-/// reference impls are within tolerance).
+/// rounded integer coefficients (off-by-one differences from
+/// floating-point reference impls are within tolerance).
 fn ycbcr_to_rgb(y: i32, cb: i32, cr: i32) -> (u8, u8, u8) {
     let cb = cb - 128;
     let cr = cr - 128;
-    // Coefficients × 65536 (Q16). Same constants libjpeg uses for
-    // the JFIF inverse transform; we use them here because TIFF
+    // Coefficients × 65536 (Q16) for the BT.601 conversion. TIFF
     // 6.0 §22 default `YCbCrCoefficients` are exactly the BT.601
     // luma weights {0.299, 0.587, 0.114} that yield this matrix.
     let r = y + ((91881 * cr + 32768) >> 16);
