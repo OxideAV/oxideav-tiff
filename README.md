@@ -43,15 +43,27 @@ a precise error.
 
 ## Encode
 
-| Photometric    | Bit depth | Compression                        | API call                |
-| -------------- | --------- | ---------------------------------- | ----------------------- |
-| BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate    | `EncodePixelFormat::Gray8` / `::Gray16Le` |
-| RGB            | 8         | None / PackBits / LZW / Deflate    | `EncodePixelFormat::Rgb24`     |
-| Palette        | 8         | None / PackBits / LZW / Deflate    | `EncodePixelFormat::Palette8`  |
+| Photometric    | Bit depth | Compression                                                 | API call                |
+| -------------- | --------- | ----------------------------------------------------------- | ----------------------- |
+| WhiteIsZero    | 1         | None / CCITT-MH / T.4-1D                                    | `EncodePixelFormat::Bilevel`   |
+| BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Gray8` / `::Gray16Le` |
+| RGB            | 8         | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Rgb24`     |
+| Palette        | 8         | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Palette8`  |
+
+`TiffCompression::CcittRle` selects Modified Huffman
+(`Compression = 2`, TIFF 6.0 §10) and `TiffCompression::CcittT4OneD`
+selects T.4 1-D (`Compression = 3`, §11) with an optional
+`eol_byte_aligned` flag that writes `T4Options` bit 2. Both
+encoders use the same `WHITE` / `BLACK` run-length tables we
+transcribed from the TIFF 6.0 PDF for decode. The CCITT writer
+rejects non-bilevel inputs with a precise error.
 
 Output is classic II little-endian TIFF, single-IFD via
 [`encode_tiff`] or multi-page via [`encode_tiff_multi`]. Files
-roundtrip through ImageMagick / `tiffinfo` / `tiffcp`.
+roundtrip through ImageMagick / `tiffinfo` / `tiffcp`; CCITT
+outputs additionally validate by asking `tiffcp -c none` to
+transcode our `Compression = 3` stream back to uncompressed and
+checking the resulting pixels match the original input.
 
 ## Backlog (not yet implemented)
 
@@ -62,7 +74,6 @@ roundtrip through ImageMagick / `tiffinfo` / `tiffcp`.
   it defers to CCITT Rec. T.4 / T.6 — so implementing these
   requires a clean-room transcription added to
   `docs/image/tiff/` first.
-- CCITT encode (Compression = 2 / 3)
 - JPEG-in-TIFF (Compression = 6 old-style, 7 new-style)
 - CIELab / Transparency-mask photometric interpretations
 - DNG / GeoTIFF / EXIF blob extraction

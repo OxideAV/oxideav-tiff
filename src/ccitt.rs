@@ -323,6 +323,232 @@ pub fn reverse_bits_in_place(buf: &mut [u8]) {
 }
 
 // ---------------------------------------------------------------------------
+// Encoder
+// ---------------------------------------------------------------------------
+
+/// Encode a bilevel raster into a CCITT-compressed byte stream.
+///
+/// `input` is the MSB-first, byte-packed bilevel buffer (1 = black,
+/// 0 = white, the CCITT/TIFF convention). `width` is the number of
+/// pixels per row; `rows` is the row count; `input` must therefore be
+/// at least `rows * ceil(width / 8)` bytes long.
+///
+/// `variant` controls Compression=2 (Modified Huffman, no EOL codes,
+/// rows byte-aligned per TIFF 6.0 §10) vs Compression=3 with bit 0
+/// cleared (T.4 1-D, 12-bit EOL prefix per row, optional byte
+/// alignment per T4Options bit 2 per §11).
+///
+/// `fill` controls whether the *returned* byte sequence is laid out
+/// MSB-first (FillOrder=1, baseline default) or has every byte
+/// bit-reversed for FillOrder=2 storage. The encoder builds the
+/// canonical MSB-first stream then optionally reverses bytes in place
+/// — matching exactly what the decoder's `FillOrder` normalisation
+/// undoes on the read side.
+pub fn encode_ccitt(
+    input: &[u8],
+    width: u32,
+    rows: u32,
+    variant: CcittVariant,
+    fill: FillOrder,
+) -> Result<Vec<u8>> {
+    let row_bytes = (width as usize).div_ceil(8);
+    let need = row_bytes * rows as usize;
+    if input.len() < need {
+        return Err(Error::invalid(format!(
+            "TIFF/CCITT encode: input buffer is {} bytes, need {need} (rows={rows}, row_bytes={row_bytes})",
+            input.len()
+        )));
+    }
+
+    let mut bw = BitWriter::new();
+    for r in 0..rows {
+        // T.4 1-D: each row begins with the 12-bit EOL code, optionally
+        // preceded by zero-fill bits so the trailing 1 lands on a
+        // byte boundary (T4Options bit 2). MH has no EOL codes.
+        if let CcittVariant::T4OneD { eol_byte_aligned } = variant {
+            if eol_byte_aligned {
+                // EOL: 12 bits, the trailing 1 in bit position 7 of a
+                // byte. So the leading 11 zeros plus our zero-fill
+                // pad must end at bit position 7 mod 8 = bit 7 of a
+                // byte; equivalently, the 1-bit lands at byte_pos % 8
+                // == 7, equivalently the bit BEFORE the leading 11
+                // zeros lands at byte_pos % 8 == 4 — i.e. after
+                // emitting the fill we want `bit_count % 8 == 4` so
+                // that 11 zeros + 1 = 12 bits fills the rest of the
+                // current byte and one more byte cleanly. Compute the
+                // pad and emit it as zeros.
+                let cur = bw.bit_count % 8;
+                let pad = (4 + 8 - cur) % 8;
+                for _ in 0..pad {
+                    bw.write(0, 1);
+                }
+            }
+            // 12-bit EOL = 000000000001.
+            bw.write(0b0000_0000_0001, 12);
+        }
+
+        // Decompose the row into alternating white/black runs (white
+        // first, per §10: "all data lines begin with a white
+        // run-length code word set. If the actual scan line begins
+        // with a black run, a white run-length of zero is sent").
+        let row_off = (r as usize) * row_bytes;
+        let runs = scan_runs(&input[row_off..row_off + row_bytes], width as usize);
+        let mut is_white = true;
+        for &run in &runs {
+            emit_run(&mut bw, run, is_white);
+            is_white = !is_white;
+        }
+
+        // §10: "New rows always begin on the next available byte
+        // boundary." This is the row separator for Compression=2. For
+        // Compression=3, the EOL code at the next row's start is the
+        // separator — no inter-row alignment.
+        if matches!(variant, CcittVariant::ModifiedHuffman) {
+            bw.align();
+        }
+    }
+
+    let mut out = bw.finish();
+    if matches!(fill, FillOrder::LsbFirst) {
+        reverse_bits_in_place(&mut out);
+    }
+    Ok(out)
+}
+
+/// Decompose one row of MSB-first packed bilevel bytes into a
+/// sequence of run lengths. The first run is always the white run
+/// (0-length if the row starts with a black pixel), then runs
+/// alternate. Total of all runs == `width`.
+fn scan_runs(row: &[u8], width: usize) -> Vec<usize> {
+    let mut runs: Vec<usize> = Vec::new();
+    let mut cur_color_is_white = true;
+    let mut cur_len: usize = 0;
+    for x in 0..width {
+        let bit = (row[x / 8] >> (7 - (x % 8))) & 1;
+        let pixel_is_white = bit == 0;
+        if pixel_is_white == cur_color_is_white {
+            cur_len += 1;
+        } else {
+            runs.push(cur_len);
+            cur_color_is_white = !cur_color_is_white;
+            cur_len = 1;
+        }
+    }
+    runs.push(cur_len);
+    runs
+}
+
+/// Emit one run length into `bw` per TIFF 6.0 §10 "Coding Scheme":
+///
+/// * 0..=63 — one terminating code from the (white or black) column.
+/// * 64..=2623 — make-up code for the largest multiple-of-64 not
+///   greater than `run`, followed by the terminating code for the
+///   remainder.
+/// * 2624.. — repeated make-up code of 2560 until the remainder is
+///   under 2560, then one final make-up + terminating pair as above.
+fn emit_run(bw: &mut BitWriter, mut run: usize, is_white: bool) {
+    // Drain ≥ 2624 with repeated 2560 make-up codes.
+    while run >= 2624 {
+        let (l, c) = lookup_makeup(2560, is_white).expect("makeup 2560 in table");
+        bw.write(c, l);
+        run -= 2560;
+    }
+    // Range [64, 2623] now (or under 64). Emit at most one make-up
+    // code for the largest multiple-of-64 <= run.
+    if run >= 64 {
+        let bucket = (run / 64) * 64;
+        let (l, c) = lookup_makeup(bucket as u32, is_white)
+            .unwrap_or_else(|| panic!("missing make-up code for run bucket {bucket}"));
+        bw.write(c, l);
+        run -= bucket;
+    }
+    // 0..=63 left → exactly one terminating code.
+    let (l, c) = lookup_terminating(run as u32, is_white)
+        .unwrap_or_else(|| panic!("missing terminating code for run {run}"));
+    bw.write(c, l);
+}
+
+/// Look up the terminating code for a run of length `run` in the
+/// given colour table. Returns `(bit_length, code)` or `None` if no
+/// terminator exists (only possible if the caller passes `run > 63`,
+/// which is a bug).
+fn lookup_terminating(run: u32, is_white: bool) -> Option<(u32, u32)> {
+    let table = if is_white { WHITE } else { BLACK };
+    for &(len, code, r, makeup) in table {
+        if !makeup && r == run {
+            return Some((len, code));
+        }
+    }
+    None
+}
+
+/// Look up the make-up code for a run of length `run` in the given
+/// colour table. The "additional make-up" entries 1792..=2560 live in
+/// both tables (we duplicated them in each); §10 says they are shared
+/// between white and black so this is correct.
+fn lookup_makeup(run: u32, is_white: bool) -> Option<(u32, u32)> {
+    let table = if is_white { WHITE } else { BLACK };
+    for &(len, code, r, makeup) in table {
+        if makeup && r == run {
+            return Some((len, code));
+        }
+    }
+    None
+}
+
+/// Bit writer used by the CCITT encoder. Bits are appended MSB-first
+/// into a byte vector (FillOrder=1). `align` pads the current partial
+/// byte to a boundary with zero bits, matching §10's "new rows always
+/// begin on the next available byte boundary".
+struct BitWriter {
+    buf: Vec<u8>,
+    bit_count: usize,
+}
+
+impl BitWriter {
+    fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            bit_count: 0,
+        }
+    }
+    fn write(&mut self, code: u32, nbits: u32) {
+        debug_assert!(nbits <= 32);
+        for i in (0..nbits).rev() {
+            let bit = ((code >> i) & 1) as u8;
+            let byte_idx = self.bit_count / 8;
+            if byte_idx >= self.buf.len() {
+                self.buf.push(0);
+            }
+            let bit_in_byte = 7 - (self.bit_count % 8);
+            self.buf[byte_idx] |= bit << bit_in_byte;
+            self.bit_count += 1;
+        }
+    }
+    fn align(&mut self) {
+        let rem = self.bit_count % 8;
+        if rem != 0 {
+            self.bit_count += 8 - rem;
+        }
+    }
+    fn finish(mut self) -> Vec<u8> {
+        // Pad up to byte boundary with zeros so the byte vector
+        // length matches `(bit_count+7) / 8`.
+        self.align();
+        // Ensure the underlying buffer has exactly `bit_count / 8`
+        // bytes (the writer may not have grown to a clean byte if the
+        // last bit emitted was bit 0 of a fresh byte then we aligned).
+        let want = self.bit_count / 8;
+        if self.buf.len() < want {
+            self.buf.resize(want, 0);
+        } else {
+            self.buf.truncate(want);
+        }
+        self.buf
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Bit stream (MSB-first read; TIFF FillOrder = 1)
 // ---------------------------------------------------------------------------
 
@@ -863,5 +1089,210 @@ mod tests {
         .unwrap();
         assert_eq!(got_msb, vec![0u8, 0xFFu8]);
         assert_eq!(got_lsb, got_msb);
+    }
+
+    // -----------------------------------------------------------------
+    // Encoder tests — self-roundtrip through `encode_ccitt` +
+    // `decode_ccitt` for the run-length spans the spec explicitly
+    // calls out: 0..=63 (terminating-only), 64..=2623 (one make-up +
+    // terminating), 2624+ (repeated 2560 make-up + terminating).
+    // -----------------------------------------------------------------
+
+    /// Pack a length-`width` sequence of pixel values (0=white,
+    /// 1=black) into an MSB-first byte buffer matching the
+    /// `EncodePixelFormat::Bilevel` layout.
+    fn pack_row_msb(pixels: &[u8]) -> Vec<u8> {
+        let row_bytes = pixels.len().div_ceil(8);
+        let mut out = vec![0u8; row_bytes];
+        for (i, &p) in pixels.iter().enumerate() {
+            if p == 1 {
+                out[i / 8] |= 1 << (7 - (i % 8));
+            }
+        }
+        out
+    }
+
+    /// Decompose an MSB-first byte buffer back into a per-pixel
+    /// 0/1 vector. Inverse of `pack_row_msb`.
+    fn unpack_row_msb(buf: &[u8], width: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(width);
+        for x in 0..width {
+            let b = (buf[x / 8] >> (7 - (x % 8))) & 1;
+            out.push(b);
+        }
+        out
+    }
+
+    fn ccitt_roundtrip(pixels: &[u8], width: u32, rows: u32, variant: CcittVariant) {
+        let packed = pack_row_msb(pixels);
+        let encoded = encode_ccitt(&packed, width, rows, variant, FillOrder::MsbFirst).unwrap();
+        let decoded = decode_ccitt(&encoded, width, rows, variant, FillOrder::MsbFirst).unwrap();
+        assert_eq!(packed, decoded, "round-trip mismatch (variant={variant:?})");
+        // Sanity: cross-check the pixel-level expansion too.
+        let back = unpack_row_msb(&decoded, (width * rows) as usize);
+        assert_eq!(back, pixels);
+    }
+
+    #[test]
+    fn encode_mh_all_white_8x1() {
+        ccitt_roundtrip(&[0u8; 8], 8, 1, CcittVariant::ModifiedHuffman);
+    }
+
+    #[test]
+    fn encode_mh_all_black_8x1() {
+        ccitt_roundtrip(&[1u8; 8], 8, 1, CcittVariant::ModifiedHuffman);
+    }
+
+    #[test]
+    fn encode_mh_alternating_8x1() {
+        let row: Vec<u8> = (0..8).map(|i| (i % 2) as u8).collect();
+        ccitt_roundtrip(&row, 8, 1, CcittVariant::ModifiedHuffman);
+    }
+
+    #[test]
+    fn encode_mh_long_white_run_72x1() {
+        // Hits the make-up code path (64 + terminating 8).
+        ccitt_roundtrip(&[0u8; 72], 72, 1, CcittVariant::ModifiedHuffman);
+    }
+
+    #[test]
+    fn encode_mh_long_black_run_72x1() {
+        ccitt_roundtrip(&[1u8; 72], 72, 1, CcittVariant::ModifiedHuffman);
+    }
+
+    #[test]
+    fn encode_mh_multi_row_aligns_between_rows() {
+        // 3 rows of width 16, mix of patterns. Each row should end on
+        // a byte boundary because MH aligns between rows.
+        let r0 = vec![0u8; 16];
+        let r1 = vec![1u8; 16];
+        let r2: Vec<u8> = (0..16).map(|i| (i % 2) as u8).collect();
+        let mut all = Vec::new();
+        all.extend_from_slice(&r0);
+        all.extend_from_slice(&r1);
+        all.extend_from_slice(&r2);
+        ccitt_roundtrip(&all, 16, 3, CcittVariant::ModifiedHuffman);
+    }
+
+    #[test]
+    fn encode_mh_huge_white_run_5000x1() {
+        // Exercises the 2624+ branch: ceil(5000/2560) = 2 sentinel
+        // 2560 make-ups + remainder (5000 - 2*2560 = -120, but spec
+        // says drop into "after the first 2560 if remainder is still
+        // >= 2560 issue another 2560"). 5000 - 2560 = 2440; 2440 <
+        // 2560 so just one 2560 then a (2432 make-up + 8
+        // terminating). We don't need to verify the exact code count;
+        // round-trip equality is enough.
+        ccitt_roundtrip(&vec![0u8; 5000], 5000, 1, CcittVariant::ModifiedHuffman);
+    }
+
+    #[test]
+    fn encode_t4_1d_emits_eol_per_row() {
+        // Two rows; T.4 1-D should produce a stream that begins with
+        // the EOL code (12 bits all-zeros + trailing 1 = 0x00 0x10
+        // when MSB-packed from offset 0). Sanity-check the prefix
+        // then round-trip.
+        let pixels = vec![0u8; 16]; // 2 rows of 8 white pixels
+        let packed = pack_row_msb(&pixels);
+        let encoded = encode_ccitt(
+            &packed,
+            8,
+            2,
+            CcittVariant::T4OneD {
+                eol_byte_aligned: false,
+            },
+            FillOrder::MsbFirst,
+        )
+        .unwrap();
+        // The first 12 bits must be 0b0000_0000_0001. Packed
+        // MSB-first that's bytes[0] == 0x00, bytes[1] high nibble ==
+        // 0x10 -> bytes[1] & 0xF0 == 0x10.
+        assert_eq!(encoded[0], 0x00, "first byte of T.4 1-D stream");
+        assert_eq!(encoded[1] & 0xF0, 0x10, "EOL trailing 1 at bit 11");
+        let decoded = decode_ccitt(
+            &encoded,
+            8,
+            2,
+            CcittVariant::T4OneD {
+                eol_byte_aligned: false,
+            },
+            FillOrder::MsbFirst,
+        )
+        .unwrap();
+        assert_eq!(decoded, packed);
+    }
+
+    #[test]
+    fn encode_t4_1d_byte_aligned_eol_ends_on_byte_boundary() {
+        // Three rows so the first byte-aligned EOL has work to do.
+        // After encoding row 0 (which doesn't byte-align), the EOL
+        // for row 1 needs leading zero-fill to pad until the trailing
+        // 1 lands on a byte boundary.
+        let r0: Vec<u8> = (0..16).map(|i| (i % 2) as u8).collect();
+        let r1 = vec![0u8; 16];
+        let r2 = vec![1u8; 16];
+        let mut all = Vec::new();
+        all.extend_from_slice(&r0);
+        all.extend_from_slice(&r1);
+        all.extend_from_slice(&r2);
+        ccitt_roundtrip(
+            &all,
+            16,
+            3,
+            CcittVariant::T4OneD {
+                eol_byte_aligned: true,
+            },
+        );
+    }
+
+    #[test]
+    fn encode_ccitt_lsb_first_yields_bit_reversed_stream() {
+        // The encoder's FillOrder parameter only flips the byte
+        // layout of the final stream. Decoding the LSB-first output
+        // with FillOrder::LsbFirst must reproduce the input
+        // identically to the MSB-first round-trip.
+        let pixels = vec![1u8; 16];
+        let packed = pack_row_msb(&pixels);
+        let msb_stream = encode_ccitt(
+            &packed,
+            16,
+            1,
+            CcittVariant::ModifiedHuffman,
+            FillOrder::MsbFirst,
+        )
+        .unwrap();
+        let lsb_stream = encode_ccitt(
+            &packed,
+            16,
+            1,
+            CcittVariant::ModifiedHuffman,
+            FillOrder::LsbFirst,
+        )
+        .unwrap();
+        let lsb_expected: Vec<u8> = msb_stream.iter().map(|&b| b.reverse_bits()).collect();
+        assert_eq!(lsb_stream, lsb_expected);
+        let decoded = decode_ccitt(
+            &lsb_stream,
+            16,
+            1,
+            CcittVariant::ModifiedHuffman,
+            FillOrder::LsbFirst,
+        )
+        .unwrap();
+        assert_eq!(decoded, packed);
+    }
+
+    #[test]
+    fn encode_buffer_too_short_errors() {
+        // Need 4 row_bytes for width=24, rows=2 (3 bytes/row). Give
+        // only 5 bytes (3+2) and confirm the encoder refuses cleanly.
+        let r = encode_ccitt(
+            &[0u8; 5],
+            24,
+            2,
+            CcittVariant::ModifiedHuffman,
+            FillOrder::MsbFirst,
+        );
+        assert!(r.is_err());
     }
 }

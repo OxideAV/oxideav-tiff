@@ -3,16 +3,19 @@
 //!
 //! The encoder targets the same baseline our decoder reads:
 //!
-//! * Photometric: BlackIsZero (greyscale 8/16-bit), RGB (8-bit),
-//!   Palette (8-bit indexed)
-//! * Compression: 1 None, 32773 PackBits, 5 LZW, 8 Deflate
+//! * Photometric: WhiteIsZero (1-bit bilevel), BlackIsZero (greyscale
+//!   8/16-bit), RGB (8-bit), Palette (8-bit indexed)
+//! * Compression: 1 None, 2 CCITT Modified Huffman, 3 CCITT T.4 1-D
+//!   (with optional T4Options bit 2 byte-aligned EOLs), 5 LZW,
+//!   8 Deflate, 32773 PackBits
 //! * Strip layout (single strip per page)
 //! * Single-IFD or multi-IFD chain via [`encode_tiff_multi`]
 //!
-//! BigTIFF write, tile write, CCITT and JPEG-in-TIFF compression,
-//! YCbCr / CIELab / CMYK output, and predictor encoding are
-//! intentionally out of scope for this round.
+//! BigTIFF write, tile write, T.4 2-D / T.6 (Compression=4) encoding,
+//! JPEG-in-TIFF, YCbCr / CIELab / CMYK output, and predictor encoding
+//! are intentionally out of scope for this round.
 
+use crate::ccitt::{encode_ccitt, CcittVariant, FillOrder};
 use crate::compress::{pack_deflate, pack_lzw, pack_packbits};
 use crate::error::{Result, TiffError as Error};
 use crate::types::*;
@@ -38,6 +41,15 @@ pub struct EncodePage<'a> {
 /// Pixel layouts the encoder knows how to write.
 #[derive(Debug, Clone)]
 pub enum EncodePixelFormat<'a> {
+    /// 1-bit bilevel (1 sample per pixel, MSB-first byte packing).
+    /// `pixels` must contain `ceil(width / 8) * height` bytes. The
+    /// bit convention follows §10 / §11: bit value 0 = white,
+    /// 1 = black. The `WhiteIsZero` (default) PhotometricInterpretation
+    /// reads those bits straight through; combine with
+    /// `BlackIsZero` by inverting the input first. Required for
+    /// CCITT compression schemes ([`TiffCompression::CcittRle`],
+    /// [`TiffCompression::CcittT4OneD`]).
+    Bilevel { pixels: &'a [u8] },
     /// 8-bit greyscale (BlackIsZero, 1 sample per pixel).
     /// `pixels.len() == width * height`.
     Gray8 { pixels: &'a [u8] },
@@ -61,6 +73,19 @@ pub enum TiffCompression {
     PackBits,
     Lzw,
     Deflate,
+    /// Compression=2 — CCITT Modified Huffman (TIFF 6.0 §10). Bilevel
+    /// only. Encoded as a sequence of white/black run-length codes
+    /// from Tables 1/T.4 and 2/T.4. No EOL codes; rows align to byte
+    /// boundaries.
+    CcittRle,
+    /// Compression=3 — CCITT T.4 1-D (TIFF 6.0 §11). Bilevel only.
+    /// Each row is preceded by a 12-bit EOL prefix. With
+    /// `eol_byte_aligned`, the EOL is byte-aligned (T4Options bit 2).
+    /// 2-D coding (T4Options bit 0) is not yet supported on either
+    /// the encode or the decode side.
+    CcittT4OneD {
+        eol_byte_aligned: bool,
+    },
 }
 
 impl TiffCompression {
@@ -70,16 +95,43 @@ impl TiffCompression {
             TiffCompression::PackBits => COMPRESSION_PACKBITS,
             TiffCompression::Lzw => COMPRESSION_LZW,
             TiffCompression::Deflate => COMPRESSION_DEFLATE_ADOBE,
+            TiffCompression::CcittRle => COMPRESSION_CCITT_HUFFMAN,
+            TiffCompression::CcittT4OneD { .. } => COMPRESSION_CCITT_T4,
         }
     }
 
-    fn pack(self, raw: &[u8]) -> Vec<u8> {
+    /// Compress `raw` per this scheme. For bilevel CCITT schemes the
+    /// caller supplies the geometry; non-CCITT schemes ignore those
+    /// arguments. Errors only on CCITT (the others are infallible).
+    fn pack(self, raw: &[u8], width: u32, rows: u32) -> Result<Vec<u8>> {
         match self {
-            TiffCompression::None => raw.to_vec(),
-            TiffCompression::PackBits => pack_packbits(raw),
-            TiffCompression::Lzw => pack_lzw(raw),
-            TiffCompression::Deflate => pack_deflate(raw),
+            TiffCompression::None => Ok(raw.to_vec()),
+            TiffCompression::PackBits => Ok(pack_packbits(raw)),
+            TiffCompression::Lzw => Ok(pack_lzw(raw)),
+            TiffCompression::Deflate => Ok(pack_deflate(raw)),
+            TiffCompression::CcittRle => encode_ccitt(
+                raw,
+                width,
+                rows,
+                CcittVariant::ModifiedHuffman,
+                FillOrder::MsbFirst,
+            ),
+            TiffCompression::CcittT4OneD { eol_byte_aligned } => encode_ccitt(
+                raw,
+                width,
+                rows,
+                CcittVariant::T4OneD { eol_byte_aligned },
+                FillOrder::MsbFirst,
+            ),
         }
+    }
+
+    /// Bilevel CCITT schemes accept only [`EncodePixelFormat::Bilevel`].
+    fn is_ccitt(self) -> bool {
+        matches!(
+            self,
+            TiffCompression::CcittRle | TiffCompression::CcittT4OneD { .. }
+        )
     }
 }
 
@@ -284,8 +336,35 @@ struct PageIfd {
 }
 
 fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
+    // CCITT schemes are bilevel-only per TIFF 6.0 §10 / §11.
+    if p.compression.is_ccitt() && !matches!(p.kind, EncodePixelFormat::Bilevel { .. }) {
+        return Err(Error::invalid(
+            "TIFF encode: CCITT compression (Compression=2/3) requires Bilevel input",
+        ));
+    }
+
     let (samples_per_pixel, bits_per_sample, photometric, raw_pixels, color_map_words) =
         match &p.kind {
+            EncodePixelFormat::Bilevel { pixels } => {
+                let row_bytes = (p.width as usize).div_ceil(8);
+                let want = row_bytes * (p.height as usize);
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/Bilevel: pixel buffer is {} bytes, expected {want} \
+                         (row_bytes={row_bytes}, height={})",
+                        pixels.len(),
+                        p.height
+                    )));
+                }
+                // §10 / §11: "The 'normal' PhotometricInterpretation
+                // for bilevel CCITT compressed data is WhiteIsZero".
+                // We follow the same default for uncompressed bilevel
+                // so a Bilevel input round-trips through any
+                // compression scheme without changing meaning. The
+                // decoder applies the photometric inversion on the
+                // way to Gray8.
+                (1u16, vec![1u16], PHOTO_WHITE_IS_ZERO, pixels.to_vec(), None)
+            }
             EncodePixelFormat::Gray8 { pixels } => {
                 let want = (p.width as usize) * (p.height as usize);
                 if pixels.len() != want {
@@ -353,7 +432,7 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
             }
         };
 
-    let compressed = p.compression.pack(&raw_pixels);
+    let compressed = p.compression.pack(&raw_pixels, p.width, p.height)?;
 
     // Build the IFD entry list. Tags must appear in ascending order
     // per spec.
@@ -453,6 +532,22 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
         count: 1,
         value: IfdValue::Inline(PLANAR_CHUNKY.to_le_bytes().to_vec()),
     });
+    // 292 T4Options (LONG) — only for Compression=3. Bit 0 (2D) and
+    // bit 1 (uncompressed mode) are always clear for this encoder;
+    // bit 2 (EOL byte-aligned) is set per the variant flag.
+    if let TiffCompression::CcittT4OneD { eol_byte_aligned } = p.compression {
+        let flags: u32 = if eol_byte_aligned {
+            T4OPT_EOL_BYTE_ALIGNED
+        } else {
+            0
+        };
+        entries.push(PageIfdEntry {
+            tag: TAG_T4_OPTIONS,
+            field_type: TYPE_LONG,
+            count: 1,
+            value: IfdValue::Inline(flags.to_le_bytes().to_vec()),
+        });
+    }
     // 320 ColorMap (SHORT, 3*2^bps) — palette only.
     if let Some(cm) = color_map_words {
         let bytes: Vec<u8> = cm.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -599,6 +694,155 @@ mod tests {
             want.extend_from_slice(&p);
         }
         assert_eq!(d.frame.planes[0].data, want);
+    }
+
+    fn bilevel_checkerboard(w: u32, h: u32) -> Vec<u8> {
+        // Pack an MSB-first 1-bit bilevel buffer with a 1-pixel
+        // checkerboard pattern. Used to exercise the run-length coder
+        // on the worst-case input (every pixel is a run boundary).
+        let row_bytes = (w as usize).div_ceil(8);
+        let mut out = vec![0u8; row_bytes * h as usize];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let on = ((x ^ y) & 1) == 1;
+                if on {
+                    out[y * row_bytes + x / 8] |= 1 << (7 - (x % 8));
+                }
+            }
+        }
+        out
+    }
+
+    fn bilevel_stripes(w: u32, h: u32, period: u32) -> Vec<u8> {
+        // Wider runs to exercise the make-up-code paths.
+        let row_bytes = (w as usize).div_ceil(8);
+        let mut out = vec![0u8; row_bytes * h as usize];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let on = ((x as u32) / period) & 1 == 1;
+                if on {
+                    out[y * row_bytes + x / 8] |= 1 << (7 - (x % 8));
+                }
+            }
+        }
+        out
+    }
+
+    /// Inflate a packed MSB-first bilevel buffer to Gray8 the same
+    /// way the decoder would, with the WhiteIsZero convention the
+    /// `Bilevel` encoder emits (bit 0 = white = 0xFF in Gray8).
+    fn bilevel_to_gray8(packed: &[u8], w: u32, h: u32) -> Vec<u8> {
+        let row_bytes = (w as usize).div_ceil(8);
+        let mut out = Vec::with_capacity((w * h) as usize);
+        for y in 0..h as usize {
+            let row = &packed[y * row_bytes..(y + 1) * row_bytes];
+            for x in 0..w as usize {
+                let bit = (row[x / 8] >> (7 - (x % 8))) & 1;
+                // WhiteIsZero photometric: bit 0 -> white -> 0xFF.
+                out.push(if bit == 0 { 0xFF } else { 0x00 });
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn encode_bilevel_uncompressed_roundtrip() {
+        let packed = bilevel_checkerboard(24, 16);
+        let page = EncodePage {
+            width: 24,
+            height: 16,
+            kind: EncodePixelFormat::Bilevel { pixels: &packed },
+            compression: TiffCompression::None,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        assert_eq!((d.width, d.height), (24, 16));
+        let want = bilevel_to_gray8(&packed, 24, 16);
+        assert_eq!(d.frame.planes[0].data, want);
+    }
+
+    #[test]
+    fn encode_bilevel_ccitt_rle_roundtrip_checkerboard() {
+        let packed = bilevel_checkerboard(16, 8);
+        let page = EncodePage {
+            width: 16,
+            height: 8,
+            kind: EncodePixelFormat::Bilevel { pixels: &packed },
+            compression: TiffCompression::CcittRle,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        let want = bilevel_to_gray8(&packed, 16, 8);
+        assert_eq!(d.frame.planes[0].data, want);
+    }
+
+    #[test]
+    fn encode_bilevel_ccitt_rle_roundtrip_stripes() {
+        // Width 128 with a 16-pixel stripe period exercises the
+        // make-up-code path on every run (each run is exactly 16
+        // pixels = white-terminating or black-terminating directly).
+        let packed = bilevel_stripes(128, 4, 16);
+        let page = EncodePage {
+            width: 128,
+            height: 4,
+            kind: EncodePixelFormat::Bilevel { pixels: &packed },
+            compression: TiffCompression::CcittRle,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        let want = bilevel_to_gray8(&packed, 128, 4);
+        assert_eq!(d.frame.planes[0].data, want);
+    }
+
+    #[test]
+    fn encode_bilevel_ccitt_t4_1d_roundtrip() {
+        let packed = bilevel_stripes(96, 6, 8);
+        let page = EncodePage {
+            width: 96,
+            height: 6,
+            kind: EncodePixelFormat::Bilevel { pixels: &packed },
+            compression: TiffCompression::CcittT4OneD {
+                eol_byte_aligned: false,
+            },
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        let want = bilevel_to_gray8(&packed, 96, 6);
+        assert_eq!(d.frame.planes[0].data, want);
+    }
+
+    #[test]
+    fn encode_bilevel_ccitt_t4_1d_byte_aligned_roundtrip() {
+        // T4Options bit 2 must end up in the IFD and the decoder
+        // must read it back to find the byte-aligned EOLs.
+        let packed = bilevel_stripes(64, 8, 4);
+        let page = EncodePage {
+            width: 64,
+            height: 8,
+            kind: EncodePixelFormat::Bilevel { pixels: &packed },
+            compression: TiffCompression::CcittT4OneD {
+                eol_byte_aligned: true,
+            },
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        let want = bilevel_to_gray8(&packed, 64, 8);
+        assert_eq!(d.frame.planes[0].data, want);
+    }
+
+    #[test]
+    fn encode_ccitt_rejects_non_bilevel() {
+        // Asking for CCITT compression with a Gray8 input must be a
+        // clean error, not a silent mis-encode.
+        let pixels = ramp_gray8(8, 8);
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::Gray8 { pixels: &pixels },
+            compression: TiffCompression::CcittRle,
+        };
+        let r = encode_tiff(&page);
+        assert!(r.is_err());
     }
 
     #[test]

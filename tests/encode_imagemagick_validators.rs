@@ -467,6 +467,166 @@ fn decoder_reads_imagemagick_multipage() {
     assert_eq!(imgs[1].planes[0].data, p2);
 }
 
+/// Build an MSB-first packed bilevel buffer with a stripe pattern.
+/// Returned tuple is `(packed_bilevel, gray8_expected)`.
+fn bilevel_stripes_and_gray8(w: u32, h: u32, period: u32) -> (Vec<u8>, Vec<u8>) {
+    let row_bytes = (w as usize).div_ceil(8);
+    let mut packed = vec![0u8; row_bytes * h as usize];
+    let mut gray = Vec::with_capacity((w * h) as usize);
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let on = ((x as u32) / period) & 1 == 1;
+            if on {
+                packed[y * row_bytes + x / 8] |= 1 << (7 - (x % 8));
+                gray.push(0x00);
+            } else {
+                gray.push(0xFF);
+            }
+        }
+    }
+    (packed, gray)
+}
+
+#[test]
+fn encoder_ccitt_rle_visible_to_tiffinfo() {
+    // Encode a CCITT MH bilevel image, then have tiffinfo read it.
+    // It must report the right dimensions + Compression name.
+    let (packed, _gray) = bilevel_stripes_and_gray8(64, 16, 8);
+    let page = EncodePage {
+        width: 64,
+        height: 16,
+        kind: EncodePixelFormat::Bilevel { pixels: &packed },
+        compression: TiffCompression::CcittRle,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    // Self-roundtrip first.
+    let d = decode_tiff(&bytes).unwrap();
+    assert_eq!((d.width, d.height), (64, 16));
+    if let Some(info) = run_tiffinfo(&bytes) {
+        assert!(
+            info.contains("Image Width: 64") && info.contains("Image Length: 16"),
+            "tiffinfo missing dims for CCITT MH output: {info}"
+        );
+        // tiffinfo names this "CCITT modified Huffman" or
+        // "CCITTRLE" depending on the libtiff version. Either spelling
+        // is acceptable; both contain "CCITT".
+        assert!(
+            info.contains("CCITT"),
+            "tiffinfo should mention CCITT for Compression=2: {info}"
+        );
+        // Bilevel: 1 bit per sample.
+        assert!(
+            info.contains("Bits/Sample: 1"),
+            "tiffinfo should report 1 bit/sample: {info}"
+        );
+    } else {
+        eprintln!("skipping CCITT MH tiffinfo check: tiffinfo unavailable");
+    }
+}
+
+#[test]
+fn encoder_ccitt_t4_1d_decodes_via_tiffcp_to_uncompressed() {
+    // End-to-end: encode CCITT T.4 1-D, ask tiffcp to recompress to
+    // uncompressed, then decode the result with our reader. Pixels
+    // must match the original bilevel pattern.
+    if !binary_available("tiffcp") {
+        eprintln!("skipping: tiffcp not available");
+        return;
+    }
+    let (packed, gray_expected) = bilevel_stripes_and_gray8(48, 8, 4);
+    let page = EncodePage {
+        width: 48,
+        height: 8,
+        kind: EncodePixelFormat::Bilevel { pixels: &packed },
+        compression: TiffCompression::CcittT4OneD {
+            eol_byte_aligned: false,
+        },
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    let dir = tmp_dir();
+    let in_path = dir.join("ccitt_t4.tiff");
+    let out_path = dir.join("none.tiff");
+    fs::write(&in_path, &bytes).unwrap();
+    let st = Command::new("tiffcp")
+        .arg("-c")
+        .arg("none")
+        .arg(&in_path)
+        .arg(&out_path)
+        .status();
+    let st = match st {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("tiffcp spawn failed: {e}");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+    if !st.success() {
+        eprintln!("tiffcp -c none failed on our T.4 1-D output: {st:?}");
+        let _ = fs::remove_dir_all(&dir);
+        // tiffcp's failure on our output is signal of a malformed
+        // stream — surface it as a hard fail rather than skip.
+        panic!("tiffcp could not transcode our CCITT T.4 1-D output to uncompressed");
+    }
+    let trans = fs::read(&out_path).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
+    assert_eq!((d.width, d.height), (48, 8));
+    // After transcoding, our decoder must match the expected Gray8
+    // rendering of the original input.
+    assert_eq!(
+        d.frame.planes[0].data, gray_expected,
+        "pixel mismatch after CCITT T.4 1-D encode + tiffcp -c none"
+    );
+}
+
+#[test]
+fn encoder_ccitt_t4_1d_byte_aligned_decodes_via_tiffcp() {
+    // Variant covering T4Options bit 2 (EOL byte-aligned).
+    if !binary_available("tiffcp") {
+        eprintln!("skipping: tiffcp not available");
+        return;
+    }
+    let (packed, gray_expected) = bilevel_stripes_and_gray8(64, 8, 4);
+    let page = EncodePage {
+        width: 64,
+        height: 8,
+        kind: EncodePixelFormat::Bilevel { pixels: &packed },
+        compression: TiffCompression::CcittT4OneD {
+            eol_byte_aligned: true,
+        },
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    let dir = tmp_dir();
+    let in_path = dir.join("ccitt_t4_bf.tiff");
+    let out_path = dir.join("none.tiff");
+    fs::write(&in_path, &bytes).unwrap();
+    let st = Command::new("tiffcp")
+        .arg("-c")
+        .arg("none")
+        .arg(&in_path)
+        .arg(&out_path)
+        .status();
+    let st = match st {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("tiffcp spawn failed: {e}");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+    if !st.success() {
+        eprintln!("tiffcp -c none failed on byte-aligned T.4 output: {st:?}");
+        let _ = fs::remove_dir_all(&dir);
+        panic!("tiffcp could not transcode our byte-aligned CCITT T.4 output");
+    }
+    let trans = fs::read(&out_path).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let d = decode_tiff(&trans).expect("decode transcoded TIFF");
+    assert_eq!((d.width, d.height), (64, 8));
+    assert_eq!(d.frame.planes[0].data, gray_expected);
+}
+
 #[test]
 fn decoder_reads_tiffcp_bigtiff() {
     if !binary_available("convert") || !binary_available("tiffcp") {

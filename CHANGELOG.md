@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encoder: CCITT Modified Huffman (`Compression = 2`) and CCITT
+  T.4 1-D (`Compression = 3`, optional `T4Options` bit 2
+  byte-aligned EOLs) writers, sharing the same `WHITE` / `BLACK`
+  run-length code tables that the decoder uses. A new
+  `EncodePixelFormat::Bilevel { pixels }` accepts MSB-first
+  byte-packed 1-bit input; the encoder rejects CCITT compression
+  with any non-bilevel pixel format. Writes `T4Options` (tag 292)
+  when Compression=3 is selected, in the correct ascending-tag-order
+  slot of the IFD. Self-roundtrip tests cover all-white / all-black
+  /alternating rows, the 64-pixel make-up-code threshold, the
+  2624-pixel repeated-2560 path, multi-row byte alignment, and the
+  byte-aligned-EOL variant. External validation: `tiffinfo` reports
+  the expected metadata on Compression=2 output, and `tiffcp -c
+  none` successfully transcodes both flavours of our
+  Compression=3 streams (`eol_byte_aligned` true and false) back to
+  uncompressed TIFFs that re-decode to the original pixels.
 - Decoder: `FillOrder = 2` (LSB-first) for bilevel data. Both
   uncompressed (`Compression = 1`) and CCITT-compressed
   (`Compression = 2 / 3`) bilevel strips and tiles now accept

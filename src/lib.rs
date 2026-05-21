@@ -23,9 +23,12 @@
 //!
 //! Encode-side coverage (classic II / single or multi page):
 //!
-//! * Photometric: BlackIsZero (8/16-bit greyscale) / RGB (8-bit) /
-//!   Palette (8-bit indexed)
-//! * Compression: None / PackBits / LZW / Deflate
+//! * Photometric: WhiteIsZero (1-bit bilevel) / BlackIsZero (8/16-bit
+//!   greyscale) / RGB (8-bit) / Palette (8-bit indexed)
+//! * Compression: None / PackBits / LZW / Deflate /
+//!   CCITT Modified Huffman (Compression=2) /
+//!   CCITT T.4 1-D (Compression=3, with optional T4Options bit 2
+//!   byte-aligned EOLs)
 //! * Multi-page chain via [`encode_tiff_multi`]
 //!
 //! Out of scope for this round (next-round backlog): CCITT T.4 2-D
