@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.2...v0.0.3) - 2026-05-21
+
+### Other
+
+- CCITT Modified Huffman (Compression=2) + T.4 1-D (Compression=3)
+- rewrite 4 libtiff / libjpeg cross-reference comments
+- FillOrder = 2 (LSB-first) for bilevel strips and tiles
+- CCITT Modified Huffman (Compression=2) + T.4 1-D (Compression=3)
+- update description to reflect round-2 encoder + BigTIFF/tiles/CMYK/YCbCr/multi-page
+- encoder + BigTIFF/tiles/CMYK/YCbCr/multi-page decode (round 2)
+
 ### Added
 
 - Encoder: CCITT Modified Huffman (`Compression = 2`) and CCITT
