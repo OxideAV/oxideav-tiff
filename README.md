@@ -30,10 +30,19 @@ source was consulted.
 `Predictor = 1` (no prediction) and `Predictor = 2` (horizontal
 differencing, per-component for `SamplesPerPixel > 1`) are both
 supported. Strip- and tile-based layouts both decode (any number of
-strips or tiles). Multi-page files walk the next-IFD chain via
-[`decode_tiff_all`]. Both `II` (little-endian) and `MM` (big-endian)
-byte orders are accepted, and both classic 32-bit-offset TIFF and
-BigTIFF (8-byte offsets, magic 43) parse.
+strips or tiles). `PlanarConfiguration = 1` (chunky) and
+`PlanarConfiguration = 2` (separate component planes) are both
+accepted: per TIFF 6.0 §"PlanarConfiguration", the second arrangement
+stores `StripOffsets` / `StripByteCounts` (and `TileOffsets` /
+`TileByteCounts`) as `SamplesPerPixel × StripsPerImage` entries with
+component 0 first, then component 1, etc.; the decoder re-interleaves
+the planes into chunky order downstream so every photometric path
+(RGB / CMYK / YCbCr) sees the same input shape. JPEG-in-TIFF
+(`Compression = 7`) remains chunky-only — TN2's planar-2 rules are
+out of scope for this round. Multi-page files walk the next-IFD chain
+via [`decode_tiff_all`]. Both `II` (little-endian) and `MM`
+(big-endian) byte orders are accepted, and both classic
+32-bit-offset TIFF and BigTIFF (8-byte offsets, magic 43) parse.
 
 ### JPEG-in-TIFF (Compression = 7)
 
@@ -66,8 +75,10 @@ Supported photometric / sampling combinations:
 
 Out of scope in this round (return precise `Error::Unsupported`):
 12-bit (SOF1 with `P = 12`), arithmetic (SOF9 / SOF11), CMYK
-(`PhotometricInterpretation = 5`), `PlanarConfiguration = 2`, and the
-deprecated TIFF 6.0 §22 "old-style" JPEG (`Compression = 6`).
+(`PhotometricInterpretation = 5`), `PlanarConfiguration = 2`
+(`Compression = 7` only; the non-JPEG compressors do accept planar
+layout — see above), and the deprecated TIFF 6.0 §22 "old-style"
+JPEG (`Compression = 6`).
 JPEG-in-TIFF requires the default-on `registry` Cargo feature; with
 `default-features = false` the JPEG path returns
 `Error::Unsupported`.
@@ -120,7 +131,9 @@ checking the resulting pixels match the original input.
   CMYK JPEG, and `PlanarConfiguration = 2` JPEG remain unsupported.
 - CIELab / Transparency-mask photometric interpretations
 - DNG / GeoTIFF / EXIF blob extraction
-- Planar (separate-plane) layout
+- Encoder-side planar (`PlanarConfiguration = 2`) writing — decode
+  is now supported across uncompressed / PackBits / LZW / Deflate
+  strips and tiles, but the encoder still emits chunky only
 
 ## Registration
 

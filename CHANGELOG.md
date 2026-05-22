@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decoder: `PlanarConfiguration = 2` (separate component planes), per
+  TIFF 6.0 §"PlanarConfiguration" (page 38) and the strip / tile
+  count formulas in §"StripOffsets" / §"TileOffsets" (pages 67 / 71).
+  Strip and tile layouts both support planar: the offset / byte-count
+  arrays carry `SamplesPerPixel × StripsPerImage` (or
+  `SamplesPerPixel × TilesPerImage`) entries with all of component 0
+  first, then all of component 1, then component 2, etc. — exactly
+  the row-major (`SamplesPerPixel × StripsPerImage`) ordering the spec
+  prescribes. Each plane decodes to a single-component image of the
+  full `width × height`, then the planes are re-interleaved into
+  chunky pixel order so every downstream photometric path
+  (RGB / CMYK / YCbCr / Gray) receives the same input shape it did
+  for planar=1. Compression schemes covered: None / PackBits / LZW /
+  Deflate / CCITT (any combination that's valid in chunky mode). The
+  horizontal predictor (`Predictor = 2`) is driven with `samples = 1`
+  per-plane in this path, matching TIFF 6.0 §14: "If
+  PlanarConfiguration is 2, there is no problem. Differencing works
+  the same as it does for grayscale data."
+
+  JPEG-in-TIFF (`Compression = 7`) stays chunky-only — TN2's
+  planar-2 rules require per-segment dimension restatement that we
+  don't handle yet; the decoder returns
+  `Error::Unsupported("TIFF/JPEG: PlanarConfiguration=2 …")` for
+  that combination so the bug surfaces precisely rather than as
+  silent corruption.
+
+  Validated against three hand-built planar fixtures (uncompressed
+  RGB 32×16, solid-blue 8×8 to catch plane swaps, and a
+  distinct-per-plane gradient pattern) plus two
+  `tiffcp -p separate` black-box fixtures (uncompressed 64×64 RGB
+  and `tiffcp -p separate -c lzw` 64×64 RGB). `SamplesPerPixel = 1`
+  files tagged `PlanarConfiguration = 2` are accepted: the spec
+  says the field is irrelevant in that case, so we collapse them
+  into the chunky walker.
+
 - Decoder: JPEG-in-TIFF (`Compression = 7`, per TIFF Technical
   Note 2 "DRAFT 17-Mar-95"). Each strip or tile is decoded as a
   freestanding ISO JPEG datastream by merging the optional

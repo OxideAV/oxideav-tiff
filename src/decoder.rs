@@ -99,11 +99,22 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         .map(|e| e.as_u32(bo))
         .transpose()?
         .unwrap_or(PLANAR_CHUNKY as u32) as u16;
-    if planar != PLANAR_CHUNKY {
-        return Err(Error::invalid(
-            "TIFF: PlanarConfiguration=2 (separate planes) not yet supported",
-        ));
+    if planar != PLANAR_CHUNKY && planar != PLANAR_SEPARATE {
+        return Err(Error::invalid(format!(
+            "TIFF: PlanarConfiguration={planar} unknown (spec defines only 1 and 2)"
+        )));
     }
+    // Spec page 38 ("PlanarConfiguration"): "If SamplesPerPixel is 1,
+    // PlanarConfiguration is irrelevant, and need not be included."
+    // A SPP=1 file tagged PlanarConfiguration=2 is well-formed and the
+    // on-disk layout is identical to chunky — collapse the two cases
+    // up front so the planar walker only has to handle the
+    // multi-component branch.
+    let planar = if samples_per_pixel == 1 {
+        PLANAR_CHUNKY
+    } else {
+        planar
+    };
 
     let predictor = find(entries, TAG_PREDICTOR)
         .map(|e| e.as_u32(bo))
@@ -181,6 +192,17 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     // walker bypasses the chunky `pixel_buf` intermediate entirely.
     #[cfg(feature = "registry")]
     if compression == COMPRESSION_JPEG_NEW {
+        // TN2 "Special considerations for PlanarConfiguration 2":
+        // each image segment carries one component plane only, and
+        // chroma-subsampled JPEG segments must restate their
+        // dimensions in absolute pixel terms. Our JPEG path is
+        // chunky-only; reject planar=2 with a precise error so we
+        // don't silently mis-decode.
+        if planar == PLANAR_SEPARATE {
+            return Err(Error::Unsupported(
+                "TIFF/JPEG: PlanarConfiguration=2 (separate planes) not supported".into(),
+            ));
+        }
         return decode_ifd_jpeg(
             input,
             entries,
@@ -213,7 +235,37 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     }
 
     let pixel_buf = if find(entries, TAG_TILE_WIDTH).is_some() {
-        decode_tiles(
+        if planar == PLANAR_SEPARATE {
+            decode_tiles_planar(
+                input,
+                entries,
+                bo,
+                width,
+                height,
+                samples_per_pixel,
+                bps_first,
+                compression,
+                predictor,
+                t4_options,
+                fill_order,
+            )?
+        } else {
+            decode_tiles(
+                input,
+                entries,
+                bo,
+                width,
+                height,
+                samples_per_pixel,
+                bps_first,
+                compression,
+                predictor,
+                t4_options,
+                fill_order,
+            )?
+        }
+    } else if planar == PLANAR_SEPARATE {
+        decode_strips_planar(
             input,
             entries,
             bo,
@@ -593,6 +645,355 @@ fn decode_tiles(
         }
     }
 
+    Ok(out)
+}
+
+/// Decode strips for `PlanarConfiguration = 2` (separate component
+/// planes), per TIFF 6.0 §"PlanarConfiguration" (page 38) and §22
+/// "YCbCr Images / Storage Order".
+///
+/// Layout, per spec verbatim: "The values in StripOffsets and
+/// StripByteCounts are then arranged as a 2-dimensional array, with
+/// SamplesPerPixel rows and StripsPerImage columns. (All of the
+/// columns for row 0 are stored first, followed by the columns of
+/// row 1, and so on.)" So the entry arrays carry
+/// `SamplesPerPixel * StripsPerImage` values; the first
+/// `StripsPerImage` entries describe component 0 (e.g. Red), the next
+/// `StripsPerImage` describe component 1 (Green), and so on.
+///
+/// Each plane decodes to a single-component image of the full
+/// `width × height`. We then re-interleave the planes into chunky
+/// `width × samples_per_pixel × height` ordering so the downstream
+/// pixel-format conversion paths (which all assume chunky input)
+/// don't need a planar duplicate.
+#[allow(clippy::too_many_arguments)]
+fn decode_strips_planar(
+    input: &[u8],
+    entries: &[Entry],
+    bo: ByteOrder,
+    width: u32,
+    height: u32,
+    samples_per_pixel: u16,
+    bps_first: u16,
+    compression: u16,
+    predictor: u16,
+    t4_options: u32,
+    fill_order: FillOrder,
+) -> Result<Vec<u8>> {
+    if samples_per_pixel < 2 {
+        // SPP=1 routes through the chunky walker by construction
+        // (see `planar = if samples_per_pixel == 1 { ... }` in
+        // `decode_ifd`), so reaching here with SPP<2 is a programming
+        // error.
+        return Err(Error::invalid(
+            "TIFF: PlanarConfiguration=2 with SamplesPerPixel<2 is meaningless",
+        ));
+    }
+    if bps_first % 8 != 0 {
+        // Sub-byte component planes would need bit-level
+        // interleaving in the chunky-rebuild step. None of the
+        // photometrics that use planar layout (RGB, YCbCr, CMYK)
+        // ship sub-byte samples in any deployed encoder, so the
+        // value of supporting that case is low. Reject precisely
+        // rather than silently mis-decode.
+        return Err(Error::invalid(
+            "TIFF: PlanarConfiguration=2 at sub-byte bit depths not supported",
+        ));
+    }
+    let rows_per_strip = find(entries, TAG_ROWS_PER_STRIP)
+        .map(|e| e.as_u32(bo))
+        .transpose()?
+        .unwrap_or(height);
+    let strip_offsets = find(entries, TAG_STRIP_OFFSETS)
+        .ok_or_else(|| Error::invalid("TIFF: missing StripOffsets"))?
+        .as_u64_vec(bo)?;
+    let strip_byte_counts = find(entries, TAG_STRIP_BYTE_COUNTS)
+        .ok_or_else(|| Error::invalid("TIFF: missing StripByteCounts"))?
+        .as_u64_vec(bo)?;
+    if strip_offsets.len() != strip_byte_counts.len() {
+        return Err(Error::invalid(
+            "TIFF: StripOffsets / StripByteCounts length mismatch",
+        ));
+    }
+    let strips_per_image = (height as u64).div_ceil(rows_per_strip as u64) as usize;
+    let expected_entries = strips_per_image * samples_per_pixel as usize;
+    if strip_offsets.len() != expected_entries {
+        return Err(Error::invalid(format!(
+            "TIFF: PlanarConfiguration=2 expects {expected_entries} strip entries \
+             (SamplesPerPixel={samples_per_pixel} × StripsPerImage={strips_per_image}), got {}",
+            strip_offsets.len()
+        )));
+    }
+
+    // Per-plane row stride: one component, full width, native bit
+    // depth. `bits_per_sample[0] == bps_first` is enforced earlier
+    // (the uniform-BPS check); each plane therefore carries the same
+    // shape.
+    let bits_per_plane_row = (width as u64) * (bps_first as u64);
+    let plane_row_bytes = bits_per_plane_row.div_ceil(8) as usize;
+
+    let spp = samples_per_pixel as usize;
+    let mut planes: Vec<Vec<u8>> = Vec::with_capacity(spp);
+    for plane in 0..spp {
+        let mut plane_buf: Vec<u8> = Vec::with_capacity(plane_row_bytes * height as usize);
+        let mut rows_done: u32 = 0;
+        let plane_start = plane * strips_per_image;
+        for s in 0..strips_per_image {
+            let i = plane_start + s;
+            let offset = strip_offsets[i];
+            let byte_count = strip_byte_counts[i];
+            let start = offset as usize;
+            let end = start.checked_add(byte_count as usize).ok_or_else(|| {
+                Error::invalid(format!("TIFF: plane-{plane} strip {s} length overflow"))
+            })?;
+            if end > input.len() {
+                return Err(Error::invalid(format!(
+                    "TIFF: plane-{plane} strip {s} extends past EOF"
+                )));
+            }
+            let raw = &input[start..end];
+            let rows_this_strip = rows_per_strip.min(height - rows_done);
+            let expected = plane_row_bytes * rows_this_strip as usize;
+            let ccitt = if matches!(
+                compression,
+                COMPRESSION_CCITT_HUFFMAN | COMPRESSION_CCITT_T4 | COMPRESSION_CCITT_T6
+            ) {
+                Some(CcittParams {
+                    width,
+                    rows: rows_this_strip,
+                    fill: fill_order,
+                    t4_options,
+                })
+            } else {
+                None
+            };
+            let decompressed = decompress_block(raw, expected, compression, ccitt)?;
+            if decompressed.len() < expected {
+                return Err(Error::invalid(format!(
+                    "TIFF: plane-{plane} strip {s} short after decompress: got {}, expected {expected}",
+                    decompressed.len()
+                )));
+            }
+            let mut strip = decompressed[..expected].to_vec();
+            if compression == COMPRESSION_NONE
+                && fill_order == FillOrder::LsbFirst
+                && bps_first == 1
+            {
+                reverse_bits_in_place(&mut strip);
+            }
+            if predictor == PREDICTOR_HORIZONTAL {
+                // Spec §14: "If PlanarConfiguration is 2, there is
+                // no problem. Differencing works the same as it does
+                // for grayscale data." So we drive the predictor
+                // with `samples = 1` regardless of the file's actual
+                // SPP, because *within* a plane the data is a
+                // single-component stream.
+                apply_horizontal_predictor(
+                    &mut strip,
+                    width as usize,
+                    rows_this_strip as usize,
+                    1,
+                    bps_first as usize,
+                    plane_row_bytes,
+                    bo,
+                )?;
+            }
+            plane_buf.extend_from_slice(&strip);
+            rows_done += rows_this_strip;
+            if rows_done >= height {
+                break;
+            }
+        }
+        if rows_done < height {
+            return Err(Error::invalid(format!(
+                "TIFF: plane-{plane} strips did not cover full image"
+            )));
+        }
+        planes.push(plane_buf);
+    }
+    interleave_planes(&planes, width, height, samples_per_pixel, bps_first)
+}
+
+/// Decode tiles for `PlanarConfiguration = 2`, per TIFF 6.0
+/// §"TileOffsets" (page 71): "TileOffsets length =
+/// SamplesPerPixel * TilesPerImage for PlanarConfiguration = 2" with
+/// "the offsets for the first component plane are stored first,
+/// followed by all the offsets for the second component plane, and
+/// so on." Same shape as the planar-strip walker; each plane decodes
+/// into a single-component image, then we re-interleave.
+#[allow(clippy::too_many_arguments)]
+fn decode_tiles_planar(
+    input: &[u8],
+    entries: &[Entry],
+    bo: ByteOrder,
+    width: u32,
+    height: u32,
+    samples_per_pixel: u16,
+    bps_first: u16,
+    compression: u16,
+    predictor: u16,
+    t4_options: u32,
+    fill_order: FillOrder,
+) -> Result<Vec<u8>> {
+    if samples_per_pixel < 2 {
+        return Err(Error::invalid(
+            "TIFF: PlanarConfiguration=2 with SamplesPerPixel<2 is meaningless",
+        ));
+    }
+    if bps_first % 8 != 0 {
+        return Err(Error::invalid(
+            "TIFF: planar tiled images at sub-byte bit depths not supported",
+        ));
+    }
+    let tile_w = find(entries, TAG_TILE_WIDTH)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileWidth"))?
+        .as_u32(bo)?;
+    let tile_h = find(entries, TAG_TILE_LENGTH)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileLength"))?
+        .as_u32(bo)?;
+    if tile_w == 0 || tile_h == 0 {
+        return Err(Error::invalid("TIFF: zero tile dimension"));
+    }
+    let tile_offsets = find(entries, TAG_TILE_OFFSETS)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileOffsets"))?
+        .as_u64_vec(bo)?;
+    let tile_byte_counts = find(entries, TAG_TILE_BYTE_COUNTS)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileByteCounts"))?
+        .as_u64_vec(bo)?;
+    if tile_offsets.len() != tile_byte_counts.len() {
+        return Err(Error::invalid(
+            "TIFF: TileOffsets / TileByteCounts length mismatch",
+        ));
+    }
+    let tiles_across = (width as u64).div_ceil(tile_w as u64) as u32;
+    let tiles_down = (height as u64).div_ceil(tile_h as u64) as u32;
+    let tiles_per_plane = (tiles_across as usize) * (tiles_down as usize);
+    let expected_tiles = tiles_per_plane * samples_per_pixel as usize;
+    if tile_offsets.len() != expected_tiles {
+        return Err(Error::invalid(format!(
+            "TIFF: PlanarConfiguration=2 expects {expected_tiles} tile entries \
+             (SamplesPerPixel={samples_per_pixel} × TilesPerImage={tiles_per_plane}), got {}",
+            tile_offsets.len()
+        )));
+    }
+
+    let sample_bytes = (bps_first / 8) as usize;
+    let bits_per_plane_tile_row = (tile_w as u64) * (bps_first as u64);
+    let tile_row_bytes = bits_per_plane_tile_row.div_ceil(8) as usize;
+    let tile_size_bytes = tile_row_bytes * tile_h as usize;
+    let bits_per_plane_image_row = (width as u64) * (bps_first as u64);
+    let plane_image_row_bytes = bits_per_plane_image_row.div_ceil(8) as usize;
+
+    let spp = samples_per_pixel as usize;
+    let mut planes: Vec<Vec<u8>> = Vec::with_capacity(spp);
+    for plane in 0..spp {
+        let mut plane_buf = vec![0u8; plane_image_row_bytes * height as usize];
+        let plane_start = plane * tiles_per_plane;
+        for ty in 0..tiles_down {
+            for tx in 0..tiles_across {
+                let idx = plane_start + (ty * tiles_across + tx) as usize;
+                let off = tile_offsets[idx] as usize;
+                let bc = tile_byte_counts[idx] as usize;
+                let end = off.checked_add(bc).ok_or_else(|| {
+                    Error::invalid(format!("TIFF: plane-{plane} tile length overflow"))
+                })?;
+                if end > input.len() {
+                    return Err(Error::invalid(format!(
+                        "TIFF: plane-{plane} tile extends past EOF"
+                    )));
+                }
+                let raw = &input[off..end];
+                let ccitt = if matches!(
+                    compression,
+                    COMPRESSION_CCITT_HUFFMAN | COMPRESSION_CCITT_T4 | COMPRESSION_CCITT_T6
+                ) {
+                    Some(CcittParams {
+                        width: tile_w,
+                        rows: tile_h,
+                        fill: fill_order,
+                        t4_options,
+                    })
+                } else {
+                    None
+                };
+                let mut tile = decompress_block(raw, tile_size_bytes, compression, ccitt)?;
+                if tile.len() < tile_size_bytes {
+                    return Err(Error::invalid(format!(
+                        "TIFF: plane-{plane} tile short after decompress"
+                    )));
+                }
+                tile.truncate(tile_size_bytes);
+                if compression == COMPRESSION_NONE
+                    && fill_order == FillOrder::LsbFirst
+                    && bps_first == 1
+                {
+                    reverse_bits_in_place(&mut tile);
+                }
+                if predictor == PREDICTOR_HORIZONTAL {
+                    apply_horizontal_predictor(
+                        &mut tile,
+                        tile_w as usize,
+                        tile_h as usize,
+                        1,
+                        bps_first as usize,
+                        tile_row_bytes,
+                        bo,
+                    )?;
+                }
+                let visible_w =
+                    ((width as i64) - (tx as i64) * (tile_w as i64)).min(tile_w as i64) as usize;
+                let visible_h =
+                    ((height as i64) - (ty as i64) * (tile_h as i64)).min(tile_h as i64) as usize;
+                let visible_row_bytes = visible_w * sample_bytes;
+                let dst_origin_x = tx as usize * tile_w as usize * sample_bytes;
+                let dst_origin_y = ty as usize * tile_h as usize;
+                for r in 0..visible_h {
+                    let src_off = r * tile_row_bytes;
+                    let dst_off = (dst_origin_y + r) * plane_image_row_bytes + dst_origin_x;
+                    plane_buf[dst_off..dst_off + visible_row_bytes]
+                        .copy_from_slice(&tile[src_off..src_off + visible_row_bytes]);
+                }
+            }
+        }
+        planes.push(plane_buf);
+    }
+    interleave_planes(&planes, width, height, samples_per_pixel, bps_first)
+}
+
+/// Re-interleave per-component planes into chunky pixel order. The
+/// caller has validated that every plane is `width * height *
+/// (bps/8)` bytes and that `bps` is a multiple of 8. The output is
+/// `width * height * samples_per_pixel * (bps/8)` bytes in
+/// component-0, component-1, …, component-(spp-1), component-0,
+/// component-1, … sequence (which is what the downstream chunky
+/// converters consume).
+fn interleave_planes(
+    planes: &[Vec<u8>],
+    width: u32,
+    height: u32,
+    samples_per_pixel: u16,
+    bps_first: u16,
+) -> Result<Vec<u8>> {
+    let sample_bytes = (bps_first / 8) as usize;
+    let spp = samples_per_pixel as usize;
+    let pixels = (width as usize) * (height as usize);
+    let plane_bytes = pixels * sample_bytes;
+    for (i, p) in planes.iter().enumerate() {
+        if p.len() != plane_bytes {
+            return Err(Error::invalid(format!(
+                "TIFF: plane {i} has {} bytes, expected {plane_bytes}",
+                p.len()
+            )));
+        }
+    }
+    let mut out = vec![0u8; pixels * spp * sample_bytes];
+    for px in 0..pixels {
+        for (c, plane) in planes.iter().enumerate() {
+            let src = &plane[px * sample_bytes..(px + 1) * sample_bytes];
+            let dst_off = (px * spp + c) * sample_bytes;
+            out[dst_off..dst_off + sample_bytes].copy_from_slice(src);
+        }
+    }
     Ok(out)
 }
 
