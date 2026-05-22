@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/OxideAV/oxideav-tiff"
 homepage = "https://github.com/OxideAV/oxideav-tiff"
 authors = ["Mark Karpeles"]
-description = "Pure-Rust TIFF 6.0 image decoder + encoder + container for oxideav (None/CCITT-MH/CCITT-T4-1D/PackBits/LZW/Deflate; 1/4/8/16-bit; bilevel/gray/palette/RGB/CMYK/YCbCr; BigTIFF; tiles; multi-page)"
+description = "Pure-Rust TIFF 6.0 image decoder + encoder + container for oxideav (None/CCITT-MH/CCITT-T4-1D/PackBits/LZW/Deflate/JPEG-in-TIFF-7; 1/4/8/16-bit; bilevel/gray/palette/RGB/CMYK/YCbCr; BigTIFF; tiles; multi-page)"
 readme = "README.md"
 keywords = ["multimedia", "image", "tiff", "codec", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::images"]
@@ -20,6 +20,14 @@ categories = ["multimedia::encoding", "multimedia::images"]
 # `decode_tiff` API plus local `TiffImage` / `TiffError` types and
 # never references `oxideav-core`.
 oxideav-core = { version = "0.1", optional = true }
+# `oxideav-mjpeg` is the foundational JPEG codec for the workspace and
+# is the only way to decode Compression=7 (TIFF Tech Note 2 JPEG-in-TIFF)
+# strips/tiles, each of which is itself a complete ISO JPEG datastream.
+# Gated behind `registry` because we reach JPEG through mjpeg's
+# `Decoder` trait surface (which depends on `oxideav-core`); without
+# `registry`, Compression=7 yields a precise "feature gated" error
+# rather than dragging both crates into a default-features=false build.
+oxideav-mjpeg = { version = "0.1", optional = true }
 miniz_oxide = "0.9"
 
 [features]
@@ -30,4 +38,9 @@ default = ["registry"]
 # entry points against `oxideav-core` so the crate can plug into the
 # `oxideav` framework registry. Default-on; turn off for image-library
 # use-cases that just want the standalone `decode_tiff` API.
-registry = ["dep:oxideav-core"]
+#
+# Also pulls in `oxideav-mjpeg` so that Compression=7 (JPEG-in-TIFF
+# per TIFF Tech Note 2) strips/tiles can be decoded through the
+# workspace's JPEG codec; without this feature the JPEG-in-TIFF path
+# returns `Error::Unsupported` rather than a silent fallback.
+registry = ["dep:oxideav-core", "dep:oxideav-mjpeg"]

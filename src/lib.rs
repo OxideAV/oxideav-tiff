@@ -15,7 +15,9 @@
 //! * Photometric: WhiteIsZero / BlackIsZero / RGB / Palette / CMYK / YCbCr
 //! * Bit depths: 1, 4, 8, 16 (per-strip and per-tile)
 //! * Compression: 1 None / 2 CCITT Modified Huffman / 3 CCITT T.4 1-D /
-//!   32773 PackBits / 5 LZW / 8 Deflate (zlib)
+//!   32773 PackBits / 5 LZW / 8 Deflate (zlib) /
+//!   7 JPEG-in-TIFF (TIFF Tech Note 2; routes each strip/tile through
+//!   `oxideav-mjpeg`)
 //! * Predictor: 1 (none) and 2 (horizontal differencing,
 //!   per-component for SamplesPerPixel > 1)
 //! * Strip OR tile layout
@@ -34,9 +36,11 @@
 //! Out of scope for this round (next-round backlog): CCITT T.4 2-D
 //! and T.6 / Group 4 (Compression=3 with T4Options bit 0 set, and
 //! Compression=4 — the 2-D mode codes are not in the TIFF 6.0
-//! spec, which defers to CCITT Rec. T.4 / T.6), JPEG-in-TIFF
-//! (Compression=6/7), CIELab photometric, BigTIFF write, tile
-//! write, predictor encoding, planar (non-chunky) layout.
+//! spec, which defers to CCITT Rec. T.4 / T.6), the deprecated
+//! TIFF 6.0 §22 old-style JPEG (Compression=6), CIELab photometric,
+//! BigTIFF write, tile write, predictor encoding, planar (non-chunky)
+//! layout. Compression=7 (new-style JPEG-in-TIFF, per TIFF Tech
+//! Note 2) is decoded as of round 92.
 //!
 //! ## Standalone vs registry-integrated
 //!
@@ -59,6 +63,9 @@ pub mod types;
 
 #[cfg(feature = "registry")]
 pub mod container;
+
+#[cfg(feature = "registry")]
+pub mod jpeg;
 
 #[cfg(feature = "registry")]
 pub mod registry;

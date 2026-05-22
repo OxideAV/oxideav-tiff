@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decoder: JPEG-in-TIFF (`Compression = 7`, per TIFF Technical
+  Note 2 "DRAFT 17-Mar-95"). Each strip or tile is decoded as a
+  freestanding ISO JPEG datastream by merging the optional
+  `JPEGTables` (tag 347) abbreviated-table-specification body in
+  front of the segment body and feeding the result through
+  `oxideav-mjpeg`'s public `Decoder` trait surface. Supported
+  combinations:
+  * `PhotometricInterpretation = 1` (BlackIsZero) or `0`
+    (WhiteIsZero) with `SamplesPerPixel = 1` → 1-plane Gray8 JPEG
+    composited into `Gray8` output (WhiteIsZero applies the 255-x
+    polarity inversion that matches the rest of the bilevel paths).
+  * `PhotometricInterpretation = 2` (RGB) with `SamplesPerPixel = 3`
+    → 3-plane full-resolution JPEG (no chroma subsampling)
+    interleaved into `Rgb24`. Matches what
+    `convert -compress jpeg` produces by default from PPM input.
+  * `PhotometricInterpretation = 6` (YCbCr) with
+    `SamplesPerPixel = 3` → 3-plane planar YCbCr JPEG with chroma
+    subsampling reflected in the JPEG sampling factors (4:4:4 /
+    4:2:2 / 4:2:0 / 4:1:1 all handled). Composited to `Rgb24`
+    using the BT.601 matrix matching TN2's default
+    `ReferenceBlackWhite = [0,255,128,255,128,255]`. Matches what
+    `tiffcp -c jpeg` produces.
+
+  Both strip and tile layouts are walked; tile-edge clipping is
+  handled in the compositor. `Compression = 6` (the deprecated
+  old-style JPEG-in-TIFF design described in TIFF 6.0 §22) is
+  rejected with a precise `Error::Unsupported`. JPEG-in-TIFF
+  requires the default-on `registry` Cargo feature (the JPEG codec
+  lives in `oxideav-mjpeg`); with `default-features = false`,
+  `Compression = 7` returns `Error::Unsupported`.
+
+  Three new ImageMagick / tiffcp integration tests exercise the
+  three supported photometric paths against an MSE-bounded RGB /
+  Gray reconstruction tolerance (since JPEG is lossy); seven new
+  `merge_jpeg_segment` unit tests cover the SOI/EOI handling
+  contract on both the `JPEGTables` blob and per-segment data.
+
 - Encoder: CCITT Modified Huffman (`Compression = 2`) and CCITT
   T.4 1-D (`Compression = 3`, optional `T4Options` bit 2
   byte-aligned EOLs) writers, sharing the same `WHITE` / `BLACK`

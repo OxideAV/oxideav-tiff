@@ -80,6 +80,19 @@ pub const TAG_TILE_BYTE_COUNTS: u16 = 325;
 pub const TAG_T4_OPTIONS: u16 = 292;
 pub const TAG_T6_OPTIONS: u16 = 293;
 
+// --- JPEG-in-TIFF tag (TIFF Tech Note 2 §"JPEGTables field") ------------
+//
+// Tag 347, type UNDEFINED. Optional. When present, holds a JPEG
+// "abbreviated table specification" datastream (SOI + DQT/DHT/DRI
+// markers + EOI) whose tables apply by reference to every image
+// segment (strip or tile) in the IFD. Each segment is itself a
+// complete JPEG datastream (SOI..EOI), so the decoder synthesises a
+// per-segment input by splicing the table bytes (between the tables
+// stream's SOI and EOI) in front of the segment's image bytes
+// (between the segment's SOI and EOI) and prepending one SOI + one
+// EOI around the merged result.
+pub const TAG_JPEG_TABLES: u16 = 347;
+
 // T4Options bits (Section 11):
 pub const T4OPT_2D_CODING: u32 = 1 << 0;
 pub const T4OPT_UNCOMPRESSED: u32 = 1 << 1;

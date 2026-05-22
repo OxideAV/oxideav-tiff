@@ -174,6 +174,44 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         .transpose()?
         .unwrap_or(0);
 
+    // JPEG-in-TIFF (Compression = 7) takes its own path. Each strip
+    // or tile is a freestanding JPEG datastream; merging the optional
+    // `JPEGTables` blob in front and feeding the result to the JPEG
+    // codec gives us decoded planes directly, so the strip / tile
+    // walker bypasses the chunky `pixel_buf` intermediate entirely.
+    #[cfg(feature = "registry")]
+    if compression == COMPRESSION_JPEG_NEW {
+        return decode_ifd_jpeg(
+            input,
+            entries,
+            bo,
+            width,
+            height,
+            samples_per_pixel,
+            bps_first,
+            photometric,
+        );
+    }
+    // Without the `registry` feature, JPEG-in-TIFF is unavailable —
+    // the JPEG codec lives in `oxideav-mjpeg`, which is gated on the
+    // same feature. Fail with a precise error rather than silently
+    // mis-decoding.
+    #[cfg(not(feature = "registry"))]
+    if compression == COMPRESSION_JPEG_NEW {
+        return Err(Error::Unsupported(
+            "TIFF: Compression=7 (JPEG-in-TIFF) requires the `registry` feature".into(),
+        ));
+    }
+    // The TIFF 6.0 §22 "old-style" JPEG (Compression=6) is officially
+    // deprecated by Tech Note 2 and we don't attempt it.
+    if compression == COMPRESSION_JPEG_OLD {
+        return Err(Error::Unsupported(
+            "TIFF: Compression=6 (old-style JPEG) is deprecated by TIFF Tech Note 2; \
+             writers should emit Compression=7 instead"
+                .into(),
+        ));
+    }
+
     let pixel_buf = if find(entries, TAG_TILE_WIDTH).is_some() {
         decode_tiles(
             input,
@@ -1018,4 +1056,337 @@ fn ycbcr_to_rgb(y: i32, cb: i32, cr: i32) -> (u8, u8, u8) {
 
 fn clamp_u8(v: i32) -> u8 {
     v.clamp(0, 255) as u8
+}
+
+// ---------------------------------------------------------------------------
+// JPEG-in-TIFF (Compression = 7) decode, per TIFF Tech Note 2.
+// ---------------------------------------------------------------------------
+
+/// Decode a JPEG-in-TIFF IFD (`Compression = 7`) into a [`TiffImage`].
+/// Lives behind the `registry` feature gate because it reaches into
+/// `oxideav-mjpeg`'s `Decoder` trait surface.
+#[cfg(feature = "registry")]
+#[allow(clippy::too_many_arguments)]
+fn decode_ifd_jpeg(
+    input: &[u8],
+    entries: &[Entry],
+    bo: ByteOrder,
+    width: u32,
+    height: u32,
+    samples_per_pixel: u16,
+    bps_first: u16,
+    photometric: u16,
+) -> Result<TiffImage> {
+    // TN2: SOFn precision must equal BitsPerSample, and 8-bit is the
+    // only baseline-mandatory precision. Reject other depths up-front
+    // so the JPEG decoder doesn't have to.
+    if bps_first != 8 {
+        return Err(Error::Unsupported(format!(
+            "TIFF/JPEG: BitsPerSample={bps_first} (only 8-bit is supported in this build)"
+        )));
+    }
+    // TN2 explicitly forbids palette (3) and transparency-mask (4)
+    // photometrics with Compression=7. Reject any photometric we
+    // don't have a render path for.
+    let want_planes = match (photometric, samples_per_pixel) {
+        (PHOTO_BLACK_IS_ZERO, 1) | (PHOTO_WHITE_IS_ZERO, 1) => 1,
+        (PHOTO_RGB, 3) => 3,
+        (PHOTO_YCBCR, 3) => 3,
+        (PHOTO_CMYK, 4) => {
+            return Err(Error::Unsupported(
+                "TIFF/JPEG: CMYK (4-component) JPEG decode not yet wired up".into(),
+            ));
+        }
+        (p, s) => {
+            return Err(Error::invalid(format!(
+                "TIFF/JPEG: photometric={p} samples_per_pixel={s} not supported"
+            )));
+        }
+    };
+    let _ = want_planes;
+
+    // Optional JPEGTables blob (tag 347). Per TN2 it's type
+    // UNDEFINED, which the IFD parser keeps as raw bytes already; we
+    // only need to slice it out.
+    let tables: Option<&[u8]> = find(entries, TAG_JPEG_TABLES).map(|e| e.data.as_slice());
+
+    // Set up the destination buffer in the *final* output format the
+    // crate emits for this photometric. Currently:
+    //   - PHOTO_BLACK_IS_ZERO / WHITE_IS_ZERO  →  Gray8
+    //   - PHOTO_RGB / PHOTO_YCBCR              →  Rgb24
+    let (pixel_format, dst_row_stride, dst_size) = match photometric {
+        PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO => (
+            TiffPixelFormat::Gray8,
+            width as usize,
+            width as usize * height as usize,
+        ),
+        PHOTO_RGB | PHOTO_YCBCR => (
+            TiffPixelFormat::Rgb24,
+            width as usize * 3,
+            width as usize * 3 * height as usize,
+        ),
+        _ => unreachable!("photometric vetted above"),
+    };
+    let mut dst = vec![0u8; dst_size];
+
+    let invert = photometric == PHOTO_WHITE_IS_ZERO;
+    let want_yuv = photometric == PHOTO_YCBCR;
+
+    // Strip vs tile dispatch (mirrors the non-JPEG path).
+    if find(entries, TAG_TILE_WIDTH).is_some() {
+        decode_ifd_jpeg_tiles(
+            input,
+            entries,
+            bo,
+            width,
+            height,
+            photometric,
+            tables,
+            invert,
+            want_yuv,
+            &mut dst,
+            dst_row_stride,
+        )?;
+    } else {
+        decode_ifd_jpeg_strips(
+            input,
+            entries,
+            bo,
+            width,
+            height,
+            photometric,
+            tables,
+            invert,
+            want_yuv,
+            &mut dst,
+            dst_row_stride,
+        )?;
+    }
+
+    Ok(TiffImage {
+        width,
+        height,
+        pixel_format,
+        planes: vec![TiffPlane {
+            stride: dst_row_stride,
+            data: dst,
+        }],
+    })
+}
+
+#[cfg(feature = "registry")]
+#[allow(clippy::too_many_arguments)]
+fn decode_ifd_jpeg_strips(
+    input: &[u8],
+    entries: &[Entry],
+    bo: ByteOrder,
+    width: u32,
+    height: u32,
+    photometric: u16,
+    tables: Option<&[u8]>,
+    invert: bool,
+    want_yuv: bool,
+    dst: &mut [u8],
+    dst_row_stride: usize,
+) -> Result<()> {
+    use crate::jpeg::decode_segment;
+
+    let rows_per_strip = find(entries, TAG_ROWS_PER_STRIP)
+        .map(|e| e.as_u32(bo))
+        .transpose()?
+        .unwrap_or(height);
+    let strip_offsets = find(entries, TAG_STRIP_OFFSETS)
+        .ok_or_else(|| Error::invalid("TIFF: missing StripOffsets"))?
+        .as_u64_vec(bo)?;
+    let strip_byte_counts = find(entries, TAG_STRIP_BYTE_COUNTS)
+        .ok_or_else(|| Error::invalid("TIFF: missing StripByteCounts"))?
+        .as_u64_vec(bo)?;
+    if strip_offsets.len() != strip_byte_counts.len() {
+        return Err(Error::invalid(
+            "TIFF/JPEG: StripOffsets / StripByteCounts length mismatch",
+        ));
+    }
+
+    let mut rows_done: u32 = 0;
+    for (i, (&offset, &byte_count)) in strip_offsets
+        .iter()
+        .zip(strip_byte_counts.iter())
+        .enumerate()
+    {
+        let start = offset as usize;
+        let end = start
+            .checked_add(byte_count as usize)
+            .ok_or_else(|| Error::invalid(format!("TIFF: strip {i} length overflow")))?;
+        if end > input.len() {
+            return Err(Error::invalid(format!("TIFF: strip {i} extends past EOF")));
+        }
+        let raw = &input[start..end];
+        let rows_this_strip = rows_per_strip.min(height - rows_done);
+
+        let seg = decode_segment(tables, raw, width, rows_this_strip, photometric)?;
+        composite_segment(
+            &seg,
+            width,
+            rows_this_strip,
+            dst,
+            dst_row_stride,
+            0,
+            rows_done,
+            invert,
+            want_yuv,
+            photometric,
+        )?;
+        rows_done += rows_this_strip;
+        if rows_done >= height {
+            break;
+        }
+    }
+    if rows_done < height {
+        return Err(Error::invalid("TIFF/JPEG: strips did not cover full image"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "registry")]
+#[allow(clippy::too_many_arguments)]
+fn decode_ifd_jpeg_tiles(
+    input: &[u8],
+    entries: &[Entry],
+    bo: ByteOrder,
+    width: u32,
+    height: u32,
+    photometric: u16,
+    tables: Option<&[u8]>,
+    invert: bool,
+    want_yuv: bool,
+    dst: &mut [u8],
+    dst_row_stride: usize,
+) -> Result<()> {
+    use crate::jpeg::decode_segment;
+
+    let tile_w = find(entries, TAG_TILE_WIDTH)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileWidth"))?
+        .as_u32(bo)?;
+    let tile_h = find(entries, TAG_TILE_LENGTH)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileLength"))?
+        .as_u32(bo)?;
+    if tile_w == 0 || tile_h == 0 {
+        return Err(Error::invalid("TIFF: zero tile dimension"));
+    }
+    let tile_offsets = find(entries, TAG_TILE_OFFSETS)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileOffsets"))?
+        .as_u64_vec(bo)?;
+    let tile_byte_counts = find(entries, TAG_TILE_BYTE_COUNTS)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileByteCounts"))?
+        .as_u64_vec(bo)?;
+    if tile_offsets.len() != tile_byte_counts.len() {
+        return Err(Error::invalid(
+            "TIFF/JPEG: TileOffsets / TileByteCounts length mismatch",
+        ));
+    }
+    let tiles_across = (width as u64).div_ceil(tile_w as u64) as u32;
+    let tiles_down = (height as u64).div_ceil(tile_h as u64) as u32;
+    let expected_tiles = (tiles_across as usize) * (tiles_down as usize);
+    if tile_offsets.len() != expected_tiles {
+        return Err(Error::invalid(format!(
+            "TIFF/JPEG: TileOffsets length {} != expected {expected_tiles}",
+            tile_offsets.len()
+        )));
+    }
+
+    for ty in 0..tiles_down {
+        for tx in 0..tiles_across {
+            let idx = (ty * tiles_across + tx) as usize;
+            let off = tile_offsets[idx] as usize;
+            let bc = tile_byte_counts[idx] as usize;
+            let end = off
+                .checked_add(bc)
+                .ok_or_else(|| Error::invalid("TIFF/JPEG: tile length overflow"))?;
+            if end > input.len() {
+                return Err(Error::invalid("TIFF/JPEG: tile extends past EOF"));
+            }
+            let raw = &input[off..end];
+            let seg = decode_segment(tables, raw, tile_w, tile_h, photometric)?;
+            let visible_w = ((width as i64) - (tx as i64) * (tile_w as i64))
+                .min(tile_w as i64)
+                .max(0) as u32;
+            let visible_h = ((height as i64) - (ty as i64) * (tile_h as i64))
+                .min(tile_h as i64)
+                .max(0) as u32;
+            composite_segment(
+                &seg,
+                visible_w,
+                visible_h,
+                dst,
+                dst_row_stride,
+                tx * tile_w,
+                ty * tile_h,
+                invert,
+                want_yuv,
+                photometric,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Composite one decoded JPEG segment into the destination buffer
+/// using the format-appropriate path.
+#[cfg(feature = "registry")]
+#[allow(clippy::too_many_arguments)]
+fn composite_segment(
+    seg: &crate::jpeg::JpegSegment,
+    visible_w: u32,
+    visible_h: u32,
+    dst: &mut [u8],
+    dst_row_stride: usize,
+    dst_x: u32,
+    dst_y: u32,
+    invert: bool,
+    want_yuv: bool,
+    photometric: u16,
+) -> Result<()> {
+    use crate::jpeg::{
+        composite_gray, composite_rgb_planar, composite_yuv_to_rgb, JpegPixelFormat,
+    };
+    match seg.pixel_format {
+        JpegPixelFormat::Gray8 => composite_gray(
+            seg,
+            visible_w,
+            visible_h,
+            dst,
+            dst_row_stride,
+            dst_x,
+            dst_y,
+            invert,
+        ),
+        JpegPixelFormat::Yuv444P
+        | JpegPixelFormat::Yuv422P
+        | JpegPixelFormat::Yuv420P
+        | JpegPixelFormat::Yuv411P => {
+            if !want_yuv && photometric != PHOTO_RGB {
+                return Err(Error::invalid(format!(
+                    "TIFF/JPEG: YUV-output JPEG segment but TIFF photometric={photometric}"
+                )));
+            }
+            // YCbCr photometric → matrix to RGB. PHOTO_RGB with a
+            // YUV-output JPEG segment is theoretically possible if a
+            // writer mistakenly attached `Sf` factors implying chroma
+            // subsampling but kept the photometric tag at 2; we treat
+            // that as a writer error.
+            if want_yuv {
+                composite_yuv_to_rgb(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+            } else {
+                composite_rgb_planar(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+            }
+        }
+        JpegPixelFormat::Rgb24 => {
+            if photometric != PHOTO_RGB {
+                return Err(Error::invalid(format!(
+                    "TIFF/JPEG: RGB-output JPEG but TIFF photometric={photometric}"
+                )));
+            }
+            composite_rgb_planar(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+        }
+    }
 }

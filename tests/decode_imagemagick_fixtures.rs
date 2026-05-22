@@ -274,6 +274,234 @@ fn probe_recognises_minimal_be_tiff() {
     assert_eq!(name, "tiff");
 }
 
+/// JPEG-in-TIFF (Compression=7, per TIFF Tech Note 2): each strip is
+/// itself a freestanding JPEG datastream with the optional
+/// `JPEGTables` (tag 347) holding shared DQT/DHT tables.
+/// ImageMagick's default for `-compress jpeg` from a PPM is
+/// `Photometric=RGB` (no chroma subsampling). JPEG is lossy so we
+/// compare with a generous PSNR-like tolerance rather than asserting
+/// bit-exactness.
+#[test]
+fn decode_64x64_rgb_jpeg_imagemagick() {
+    if !convert_available() {
+        eprintln!("skipping: `convert` binary not found");
+        return;
+    }
+    let pixels = rgb_pattern_64();
+    let ppm = make_ppm_rgb(64, 64, &pixels);
+    // `-quality 95` to keep the lossy reconstruction close to the
+    // input; we still allow per-channel slop below.
+    let tiff = match convert_to_tiff(&ppm, "ppm", &["-compress", "jpeg", "-quality", "95"]) {
+        Some(b) => b,
+        None => {
+            eprintln!("skipping: convert failed to produce JPEG-TIFF");
+            return;
+        }
+    };
+    let d = decode_tiff(&tiff).expect("decode_tiff (JPEG-in-TIFF, RGB) failed");
+    assert_eq!((d.width, d.height), (64, 64));
+    let got = frame_to_rgb24_bytes(&d);
+    let mse = mean_squared_error(&got, &pixels);
+    assert!(
+        mse < 200.0,
+        "RGB JPEG-in-TIFF reconstruction too far from input: MSE={mse}"
+    );
+}
+
+/// Grayscale JPEG-in-TIFF (Photometric=BlackIsZero, SamplesPerPixel=1).
+/// ImageMagick produces this for a `-compress jpeg` PGM input.
+#[test]
+fn decode_64x64_gray_jpeg_imagemagick() {
+    if !convert_available() {
+        eprintln!("skipping: `convert` binary not found");
+        return;
+    }
+    let mut pixels = Vec::with_capacity(64 * 64);
+    for y in 0u8..64 {
+        for x in 0u8..64 {
+            pixels.push(x.wrapping_add(y).wrapping_mul(2));
+        }
+    }
+    let pgm = make_pgm_gray(64, 64, &pixels);
+    let tiff = match convert_to_tiff(&pgm, "pgm", &["-compress", "jpeg", "-quality", "95"]) {
+        Some(b) => b,
+        None => {
+            eprintln!("skipping: convert failed to produce JPEG-TIFF");
+            return;
+        }
+    };
+    let d = decode_tiff(&tiff).expect("decode_tiff (JPEG-in-TIFF, gray) failed");
+    assert_eq!((d.width, d.height), (64, 64));
+    let got = frame_to_gray8_bytes(&d);
+    let mse = mean_squared_error(&got, &pixels);
+    assert!(
+        mse < 200.0,
+        "Gray JPEG-in-TIFF reconstruction too far from input: MSE={mse}"
+    );
+}
+
+/// YCbCr JPEG-in-TIFF (Photometric=YCbCr, SamplesPerPixel=3,
+/// JPEGTables present). Produced by `tiffcp -c jpeg` on an
+/// uncompressed RGB TIFF — that path picks the YCbCr photometric +
+/// the default 2:2 chroma subsampling, which exercises our 4:2:0
+/// composite path.
+#[test]
+fn decode_64x64_ycbcr_jpeg_tiffcp() {
+    if !convert_available() {
+        eprintln!("skipping: `convert` binary not found");
+        return;
+    }
+    if Command::new("tiffcp")
+        .arg("-h")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(true)
+    {
+        // tiffcp returns non-zero for -h; fall back to checking
+        // version probe which exits 0.
+        if Command::new("tiffcp")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping: `tiffcp` not available");
+            return;
+        }
+    }
+    let pixels = rgb_pattern_64();
+    let ppm = make_ppm_rgb(64, 64, &pixels);
+    let uncompressed = match convert_to_tiff(&ppm, "ppm", &["-compress", "none"]) {
+        Some(b) => b,
+        None => {
+            eprintln!("skipping: convert failed to produce uncompressed TIFF");
+            return;
+        }
+    };
+
+    // Stage the uncompressed TIFF in a tmp dir, run `tiffcp -c jpeg`,
+    // read back the result.
+    let dir = std::env::temp_dir().join(format!(
+        "oxideav-tiff-jpeg-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let in_path = dir.join("in.tiff");
+    let out_path = dir.join("out.tiff");
+    std::fs::write(&in_path, &uncompressed).unwrap();
+    let status = Command::new("tiffcp")
+        .args(["-c", "jpeg"])
+        .arg(&in_path)
+        .arg(&out_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok();
+    let Some(s) = status else {
+        let _ = std::fs::remove_dir_all(&dir);
+        eprintln!("skipping: tiffcp invocation failed");
+        return;
+    };
+    if !s.success() {
+        let _ = std::fs::remove_dir_all(&dir);
+        eprintln!("skipping: tiffcp -c jpeg failed");
+        return;
+    }
+    let tiff = std::fs::read(&out_path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let d = decode_tiff(&tiff).expect("decode_tiff (YCbCr JPEG-in-TIFF) failed");
+    assert_eq!((d.width, d.height), (64, 64));
+    let got = frame_to_rgb24_bytes(&d);
+    // Default tiffcp quality + 2:2 chroma subsampling: looser
+    // tolerance than the RGB-JPEG path because chroma is downsampled.
+    let mse = mean_squared_error(&got, &pixels);
+    assert!(
+        mse < 1500.0,
+        "YCbCr JPEG-in-TIFF reconstruction too far from input: MSE={mse}"
+    );
+}
+
+/// Verify we reject Compression=6 (deprecated old-style JPEG per
+/// TN2) with a precise Unsupported error rather than mis-decoding.
+#[test]
+fn reject_old_style_jpeg_compression_6() {
+    use oxideav_tiff::types::COMPRESSION_JPEG_OLD;
+    // Hand-build the minimum IFD that just sets Compression=6 plus
+    // the other mandatory tags. We don't even need real pixel data —
+    // the IFD walker should bail out before reaching strip decode.
+    let tiff = build_compression_only_tiff(COMPRESSION_JPEG_OLD);
+    match decode_tiff(&tiff) {
+        Ok(_) => panic!("Compression=6 should be rejected, decode succeeded"),
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("Compression=6") || msg.contains("old-style") || msg.contains("JPEG"),
+                "expected Compression=6 error, got {msg}"
+            );
+        }
+    }
+}
+
+/// Sum of squared per-byte differences divided by the byte count —
+/// suitable for "is the reconstruction close enough?" assertions
+/// without dragging in a real PSNR library.
+fn mean_squared_error(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len(), "MSE inputs must be the same length");
+    let mut acc: u64 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let d = *x as i32 - *y as i32;
+        acc += (d * d) as u64;
+    }
+    acc as f64 / a.len() as f64
+}
+
+/// Build a minimal valid TIFF file (1x1 image, RGB, 8 bps) with the
+/// given Compression value. Used only to drive the compression-tag
+/// validation in the decoder; the strip data is intentionally bogus
+/// because we expect to bail before touching it.
+fn build_compression_only_tiff(compression: u16) -> Vec<u8> {
+    use oxideav_tiff::types::*;
+    // Build a tiny IFD with: ImageWidth=1, ImageLength=1,
+    // BitsPerSample=8, Compression=<value>, Photometric=RGB(2),
+    // SamplesPerPixel=3, StripOffsets, StripByteCounts.
+    // TIFF entries must be sorted by tag.
+    let mut v: Vec<u8> = Vec::new();
+    v.extend_from_slice(b"II");
+    v.extend_from_slice(&42u16.to_le_bytes());
+    v.extend_from_slice(&8u32.to_le_bytes());
+    // Single-channel BlackIsZero(1) so we can use a single BPS entry.
+    let entries: &[(u16, u16, u32, u32)] = &[
+        (TAG_IMAGE_WIDTH, TYPE_SHORT, 1, 1),
+        (TAG_IMAGE_LENGTH, TYPE_SHORT, 1, 1),
+        (TAG_BITS_PER_SAMPLE, TYPE_SHORT, 1, 8),
+        (TAG_COMPRESSION, TYPE_SHORT, 1, compression as u32),
+        (TAG_PHOTOMETRIC_INTERPRETATION, TYPE_SHORT, 1, 1),
+        (TAG_STRIP_OFFSETS, TYPE_LONG, 1, 0),
+        (TAG_SAMPLES_PER_PIXEL, TYPE_SHORT, 1, 1),
+        (TAG_ROWS_PER_STRIP, TYPE_SHORT, 1, 1),
+        (TAG_STRIP_BYTE_COUNTS, TYPE_LONG, 1, 0),
+    ];
+    v.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for &(tag, ty, cnt, val) in entries {
+        v.extend_from_slice(&tag.to_le_bytes());
+        v.extend_from_slice(&ty.to_le_bytes());
+        v.extend_from_slice(&cnt.to_le_bytes());
+        // SHORT values use the low 2 bytes; LONG uses all 4.
+        if ty == TYPE_SHORT {
+            v.extend_from_slice(&(val as u16).to_le_bytes());
+            v.extend_from_slice(&[0u8, 0u8]);
+        } else {
+            v.extend_from_slice(&val.to_le_bytes());
+        }
+    }
+    v.extend_from_slice(&0u32.to_le_bytes()); // next-IFD
+    v
+}
+
 /// Silence the unused PathBuf import warning when the file is read
 /// without all tests being enabled (PathBuf is genuinely useful for
 /// debugging when one of the convert calls fails in CI logs).
