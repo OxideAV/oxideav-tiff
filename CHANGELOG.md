@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encoder: horizontal-differencing predictor (`Predictor = 2`, TIFF 6.0
+  §14) via the new `EncodePage::predictor` flag. When set, the encoder
+  replaces each component with its first difference from the previous
+  pixel of the same component before compression — §14's "subtract red
+  from red, green from green, and blue from blue" with an offset of
+  `SamplesPerPixel` for chunky multi-sample data — and writes the
+  `Predictor` tag (317, SHORT). This is the exact inverse of the
+  decoder's cumulative left-to-right add: the encoder differences
+  right-to-left so each "previous" sample keeps its original magnitude,
+  and relies on two's-complement `wrapping_sub` for the §14 "ignore the
+  overflow bits" property. Supported on the lossless byte-aligned
+  formats whose decode path already reverses it: `Gray8` (8-bit),
+  `Gray16Le` (16-bit, II little-endian), `Rgb24` (8-bit × 3), and
+  `Palette8` (8-bit indices). §14 ties the predictor to the LZW family,
+  so combining `Predictor = 2` with a bilevel CCITT scheme
+  (`Compression = 2 / 3`) or with `Bilevel` input is rejected with a
+  precise error. The tag is omitted entirely when the flag is off (the
+  decoder defaults to `Predictor = 1`).
+
+  Validated by self-roundtrip across Gray8 / Gray16Le / Rgb24 /
+  Palette8 under None / PackBits / LZW / Deflate, a unit check that
+  forward differencing is the exact inverse of the decoder's add, and
+  IFD-tag inspection (tag 317 present iff the flag is set). External
+  black-box validation: `tiffinfo` reports
+  `Predictor: horizontal differencing 2 (0x2)`; `tiffcp -c none`
+  transcodes our `Predictor = 2` LZW / Deflate streams back to
+  uncompressed TIFFs that re-decode to the original pixels (proving
+  libtiff reverses our first-differences); and ImageMagick's reader
+  round-trips Gray8 and RGB `Predictor = 2` output bit-exactly.
+
 - Decoder: `PlanarConfiguration = 2` (separate component planes), per
   TIFF 6.0 §"PlanarConfiguration" (page 38) and the strip / tile
   count formulas in §"StripOffsets" / §"TileOffsets" (pages 67 / 71).

@@ -140,6 +140,7 @@ fn encoder_gray8_lzw_roundtrips_through_convert() {
         height: 32,
         kind: EncodePixelFormat::Gray8 { pixels: &pixels },
         compression: TiffCompression::Lzw,
+        predictor: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     // Round-trip through our own decoder first.
@@ -161,6 +162,7 @@ fn encoder_rgb24_packbits_roundtrips_through_convert() {
         height: 30,
         kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
         compression: TiffCompression::PackBits,
+        predictor: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -180,6 +182,7 @@ fn encoder_rgb24_deflate_roundtrips_through_convert() {
         height: 16,
         kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
         compression: TiffCompression::Deflate,
+        predictor: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -204,6 +207,7 @@ fn encoder_palette_roundtrips_through_convert() {
             palette: &palette,
         },
         compression: TiffCompression::None,
+        predictor: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -225,6 +229,7 @@ fn encoder_tiffinfo_reports_expected_metadata() {
         height: 48,
         kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
         compression: TiffCompression::Lzw,
+        predictor: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -265,18 +270,21 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             height: 16,
             kind: EncodePixelFormat::Gray8 { pixels: &p1 },
             compression: TiffCompression::None,
+            predictor: false,
         },
         EncodePage {
             width: 16,
             height: 16,
             kind: EncodePixelFormat::Rgb24 { pixels: &p2 },
             compression: TiffCompression::Lzw,
+            predictor: false,
         },
         EncodePage {
             width: 16,
             height: 16,
             kind: EncodePixelFormat::Gray8 { pixels: &p3 },
             compression: TiffCompression::Deflate,
+            predictor: false,
         },
     ];
     let bytes = encode_tiff_multi(&pages).unwrap();
@@ -497,6 +505,7 @@ fn encoder_ccitt_rle_visible_to_tiffinfo() {
         height: 16,
         kind: EncodePixelFormat::Bilevel { pixels: &packed },
         compression: TiffCompression::CcittRle,
+        predictor: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     // Self-roundtrip first.
@@ -541,6 +550,7 @@ fn encoder_ccitt_t4_1d_decodes_via_tiffcp_to_uncompressed() {
         compression: TiffCompression::CcittT4OneD {
             eol_byte_aligned: false,
         },
+        predictor: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -595,6 +605,7 @@ fn encoder_ccitt_t4_1d_byte_aligned_decodes_via_tiffcp() {
         compression: TiffCompression::CcittT4OneD {
             eol_byte_aligned: true,
         },
+        predictor: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -668,4 +679,144 @@ fn decoder_reads_tiffcp_bigtiff() {
     let d = decode_tiff(&bytes).expect("BigTIFF decode");
     assert_eq!((d.width, d.height), (32, 32));
     assert_eq!(d.frame.planes[0].data, pixels);
+}
+
+// ---- Predictor=2 (horizontal differencing, TIFF 6.0 §14) on encode ----
+
+/// Shared helper: ask `tiffcp -c none` to recompress our Predictor=2
+/// file back to uncompressed (which forces libtiff to reverse the §14
+/// differencing), then decode the result with our reader and assert it
+/// matches the original pixels. A libtiff failure or pixel mismatch
+/// here means our stored differences aren't valid §14 first-differences.
+fn tiffcp_transcode_predictor_matches(tiff_bytes: &[u8], width: u32, height: u32, expected: &[u8]) {
+    let dir = tmp_dir();
+    let in_path = dir.join("pred.tiff");
+    let out_path = dir.join("none.tiff");
+    fs::write(&in_path, tiff_bytes).unwrap();
+    let st = Command::new("tiffcp")
+        .arg("-c")
+        .arg("none")
+        .arg(&in_path)
+        .arg(&out_path)
+        .status();
+    let st = match st {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("tiffcp spawn failed: {e}");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+    if !st.success() {
+        let _ = fs::remove_dir_all(&dir);
+        // A failure to transcode is hard signal our stream is malformed.
+        panic!("tiffcp could not transcode our Predictor=2 output to uncompressed");
+    }
+    let trans = fs::read(&out_path).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
+    assert_eq!((d.width, d.height), (width, height));
+    assert_eq!(
+        d.frame.planes[0].data, expected,
+        "pixel mismatch after Predictor=2 encode + tiffcp -c none"
+    );
+}
+
+#[test]
+fn encoder_predictor_tiffinfo_reports_horizontal_differencing() {
+    let pixels = ramp_gray8(64, 48);
+    let page = EncodePage {
+        width: 64,
+        height: 48,
+        kind: EncodePixelFormat::Gray8 { pixels: &pixels },
+        compression: TiffCompression::Lzw,
+        predictor: true,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    if let Some(info) = run_tiffinfo(&bytes) {
+        assert!(
+            info.to_lowercase().contains("predictor") && info.contains("horizontal differencing"),
+            "tiffinfo missing Predictor=2 line: {info}"
+        );
+    } else {
+        eprintln!("skipping: tiffinfo not available");
+    }
+}
+
+#[test]
+fn encoder_gray8_predictor_lzw_transcodes_via_tiffcp() {
+    if !binary_available("tiffcp") {
+        eprintln!("skipping: tiffcp not available");
+        return;
+    }
+    let pixels = ramp_gray8(50, 30);
+    let page = EncodePage {
+        width: 50,
+        height: 30,
+        kind: EncodePixelFormat::Gray8 { pixels: &pixels },
+        compression: TiffCompression::Lzw,
+        predictor: true,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    tiffcp_transcode_predictor_matches(&bytes, 50, 30, &pixels);
+}
+
+#[test]
+fn encoder_rgb24_predictor_deflate_transcodes_via_tiffcp() {
+    if !binary_available("tiffcp") {
+        eprintln!("skipping: tiffcp not available");
+        return;
+    }
+    // RGB exercises §14's per-component (offset = SamplesPerPixel = 3)
+    // differencing; a wrong offset would make libtiff produce wrong
+    // colours after transcoding.
+    let pixels = pattern_rgb(40, 24);
+    let page = EncodePage {
+        width: 40,
+        height: 24,
+        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+        compression: TiffCompression::Deflate,
+        predictor: true,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    tiffcp_transcode_predictor_matches(&bytes, 40, 24, &pixels);
+}
+
+#[test]
+fn encoder_gray8_predictor_lzw_roundtrips_through_convert() {
+    let pixels = ramp_gray8(36, 20);
+    let page = EncodePage {
+        width: 36,
+        height: 20,
+        kind: EncodePixelFormat::Gray8 { pixels: &pixels },
+        compression: TiffCompression::Lzw,
+        predictor: true,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    // Our own decoder first.
+    let d = decode_tiff(&bytes).unwrap();
+    assert_eq!(d.frame.planes[0].data, pixels);
+    // ImageMagick's reader (which honours the Predictor tag).
+    if let Some(im_bytes) = write_and_decode_with_convert(&bytes, false) {
+        assert_eq!(
+            im_bytes, pixels,
+            "ImageMagick mismatch on Predictor=2 Gray8"
+        );
+    }
+}
+
+#[test]
+fn encoder_rgb24_predictor_lzw_roundtrips_through_convert() {
+    let pixels = pattern_rgb(40, 30);
+    let page = EncodePage {
+        width: 40,
+        height: 30,
+        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+        compression: TiffCompression::Lzw,
+        predictor: true,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
+        assert_eq!(im_bytes, pixels, "ImageMagick mismatch on Predictor=2 RGB");
+    }
 }

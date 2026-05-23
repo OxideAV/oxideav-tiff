@@ -108,6 +108,19 @@ encoders use the same `WHITE` / `BLACK` run-length tables we
 transcribed from the TIFF 6.0 PDF for decode. The CCITT writer
 rejects non-bilevel inputs with a precise error.
 
+The horizontal-differencing predictor (`Predictor = 2`, TIFF 6.0 §14)
+is available on encode via the `EncodePage::predictor` flag. When set,
+the encoder writes first differences (per-component, offset
+`SamplesPerPixel` for chunky multi-sample data) plus the `Predictor`
+tag (317) so the decoder reverses the step — the exact inverse of the
+decoder's cumulative add. It applies to the lossless byte-aligned
+formats whose decode path already supports it (`Gray8`, `Gray16Le`,
+`Rgb24`, `Palette8`); combining it with the bilevel CCITT schemes or
+with `Bilevel` input is rejected. `tiffinfo` reports
+`Predictor: horizontal differencing 2 (0x2)` on the output and
+`tiffcp -c none` transcodes our `Predictor = 2` streams back to
+uncompressed TIFFs that re-decode to the original pixels.
+
 Output is classic II little-endian TIFF, single-IFD via
 [`encode_tiff`] or multi-page via [`encode_tiff_multi`]. Files
 roundtrip through ImageMagick / `tiffinfo` / `tiffcp`; CCITT
@@ -117,7 +130,7 @@ checking the resulting pixels match the original input.
 
 ## Backlog (not yet implemented)
 
-- BigTIFF write, tile write, predictor on encode
+- BigTIFF write, tile write
 - CCITT T.4 2-D coding (`Compression = 3` with `T4Options` bit 0
   set) and T.6 / Group 4 (`Compression = 4`). The 2-D Pass /
   Horizontal / Vertical mode codes are not in the TIFF 6.0 PDF —

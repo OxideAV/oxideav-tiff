@@ -12,8 +12,10 @@
 //! * Single-IFD or multi-IFD chain via [`encode_tiff_multi`]
 //!
 //! BigTIFF write, tile write, T.4 2-D / T.6 (Compression=4) encoding,
-//! JPEG-in-TIFF, YCbCr / CIELab / CMYK output, and predictor encoding
-//! are intentionally out of scope for this round.
+//! JPEG-in-TIFF, and YCbCr / CIELab / CMYK output are intentionally out
+//! of scope for this round. The horizontal-differencing predictor
+//! (`Predictor = 2`, TIFF 6.0 §14) is supported on encode via the
+//! [`EncodePage::predictor`] flag.
 
 use crate::ccitt::{encode_ccitt, CcittVariant, FillOrder};
 use crate::compress::{pack_deflate, pack_lzw, pack_packbits};
@@ -36,6 +38,19 @@ pub struct EncodePage<'a> {
     pub height: u32,
     pub kind: EncodePixelFormat<'a>,
     pub compression: TiffCompression,
+    /// Apply the TIFF 6.0 §14 horizontal-differencing predictor
+    /// (`Predictor = 2`) to the sample data before compression. The
+    /// encoder replaces each component with the difference from the
+    /// previous pixel of the same component (offset `SamplesPerPixel`,
+    /// per §14's "subtract red from red, green from green") and writes
+    /// the `Predictor` tag (317) so the decoder reverses the step. Only
+    /// meaningful for the lossless byte-aligned photometrics whose
+    /// decode path supports it — `Gray8` (8-bit), `Gray16Le` (16-bit),
+    /// `Rgb24` (8-bit × 3), and `Palette8` (8-bit indices). §14 ties
+    /// the predictor to LZW/Deflate; combining it with the bilevel
+    /// CCITT schemes (`Compression = 2 / 3`) or with `Bilevel` input is
+    /// rejected with a precise error.
+    pub predictor: bool,
 }
 
 /// Pixel layouts the encoder knows how to write.
@@ -343,7 +358,27 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
         ));
     }
 
-    let (samples_per_pixel, bits_per_sample, photometric, raw_pixels, color_map_words) =
+    // The §14 horizontal-differencing predictor operates on whole
+    // sample components; it has no meaning for bit-packed bilevel data,
+    // and §14 only defines it for the LZW-family lossless coders. Reject
+    // the impossible combinations up front so they surface precisely
+    // rather than producing a file the decoder can't reverse.
+    if p.predictor {
+        if matches!(p.kind, EncodePixelFormat::Bilevel { .. }) {
+            return Err(Error::invalid(
+                "TIFF encode: Predictor=2 (horizontal differencing) is undefined for Bilevel \
+                 (1-bit) input — TIFF 6.0 §14 differences whole sample components",
+            ));
+        }
+        if p.compression.is_ccitt() {
+            return Err(Error::invalid(
+                "TIFF encode: Predictor=2 cannot combine with CCITT compression \
+                 (Compression=2/3); TIFF 6.0 §14 ties the predictor to the LZW family",
+            ));
+        }
+    }
+
+    let (samples_per_pixel, bits_per_sample, photometric, mut raw_pixels, color_map_words) =
         match &p.kind {
             EncodePixelFormat::Bilevel { pixels } => {
                 let row_bytes = (p.width as usize).div_ceil(8);
@@ -431,6 +466,24 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
                 (1u16, vec![8u16], PHOTO_PALETTE, indices.to_vec(), Some(cm))
             }
         };
+
+    // Apply the §14 horizontal-differencing predictor *before*
+    // compression. The encoder stores first differences; the decoder's
+    // cumulative left-to-right add reverses it exactly. Strip layout is
+    // single-strip-per-page and chunky, so `row_bytes` is the packed
+    // sample stride and the whole image is one differencing region.
+    if p.predictor {
+        let bps = bits_per_sample[0] as usize;
+        let row_bytes = (p.width as usize) * (samples_per_pixel as usize) * (bps / 8);
+        forward_horizontal_predictor(
+            &mut raw_pixels,
+            p.width as usize,
+            p.height as usize,
+            samples_per_pixel as usize,
+            bps,
+            row_bytes,
+        )?;
+    }
 
     let compressed = p.compression.pack(&raw_pixels, p.width, p.height)?;
 
@@ -548,6 +601,17 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
             value: IfdValue::Inline(flags.to_le_bytes().to_vec()),
         });
     }
+    // 317 Predictor (SHORT) — only when horizontal differencing is on.
+    // Default (Predictor=1, no prediction) is omitted; the decoder
+    // treats an absent tag as 1.
+    if p.predictor {
+        entries.push(PageIfdEntry {
+            tag: TAG_PREDICTOR,
+            field_type: TYPE_SHORT,
+            count: 1,
+            value: IfdValue::Inline(PREDICTOR_HORIZONTAL.to_le_bytes().to_vec()),
+        });
+    }
     // 320 ColorMap (SHORT, 3*2^bps) — palette only.
     if let Some(cm) = color_map_words {
         let bytes: Vec<u8> = cm.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -563,7 +627,7 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
 
     // Spec: entries must be in ascending tag order. The pushes
     // above are already sorted (254/256/257/258/259/262/273/277/
-    // 278/279/284/320), but assert defensively.
+    // 278/279/284/292?/317?/320?), but assert defensively.
     debug_assert!(entries.windows(2).all(|w| w[0].tag <= w[1].tag));
 
     Ok(PlannedPage {
@@ -571,6 +635,70 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
         ifd: PageIfd { entries },
         externals,
     })
+}
+
+/// Forward horizontal-differencing predictor (TIFF 6.0 §14): replace
+/// each component with the difference from the previous pixel of the
+/// same component, in place. The inverse of the decoder's
+/// `apply_horizontal_predictor`: that routine adds left-to-right, so
+/// the encoder subtracts right-to-left to keep each "previous" value
+/// at its *original* magnitude while the difference is taken. §14:
+/// "we will do our horizontal differences with an offset of
+/// SamplesPerPixel ... subtract red from red, green from green, and
+/// blue from blue." Encoder output is always II (little-endian), so
+/// 16-bit components are read/written little-endian.
+///
+/// `row_bytes` is the packed sample stride (chunky, single-strip). The
+/// "ignore the overflow bits" wrap-around §14 relies on is exactly
+/// two's-complement `wrapping_sub`.
+fn forward_horizontal_predictor(
+    buf: &mut [u8],
+    width: usize,
+    rows: usize,
+    samples: usize,
+    bps: usize,
+    row_bytes: usize,
+) -> Result<()> {
+    if width == 0 || rows == 0 {
+        return Ok(());
+    }
+    match bps {
+        8 => {
+            for r in 0..rows {
+                let row = &mut buf[r * row_bytes..r * row_bytes + width * samples];
+                // Right-to-left so row[x - samples] is still the
+                // original sample when we difference row[x].
+                for x in (samples..(width * samples)).rev() {
+                    row[x] = row[x].wrapping_sub(row[x - samples]);
+                }
+            }
+        }
+        16 => {
+            for r in 0..rows {
+                let row = &mut buf[r * row_bytes..r * row_bytes + width * samples * 2];
+                let pixels = width * samples;
+                for x in (samples..pixels).rev() {
+                    let cur_off = x * 2;
+                    let prev_off = (x - samples) * 2;
+                    let cur = u16::from_le_bytes([row[cur_off], row[cur_off + 1]]);
+                    let prev = u16::from_le_bytes([row[prev_off], row[prev_off + 1]]);
+                    let new = cur.wrapping_sub(prev);
+                    let bytes = new.to_le_bytes();
+                    row[cur_off] = bytes[0];
+                    row[cur_off + 1] = bytes[1];
+                }
+            }
+        }
+        _ => {
+            // The encoder only emits 8- and 16-bit components, so this
+            // is unreachable from the public API; keep the precise
+            // error for defensiveness / future bit depths.
+            return Err(Error::invalid(format!(
+                "TIFF encode: Predictor=2 at bits_per_sample={bps} unsupported"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -608,6 +736,7 @@ mod tests {
             height: 32,
             kind: EncodePixelFormat::Gray8 { pixels: &pixels },
             compression: TiffCompression::None,
+            predictor: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -629,6 +758,7 @@ mod tests {
             height: 16,
             kind: EncodePixelFormat::Gray16Le { pixels: &pixels },
             compression: TiffCompression::PackBits,
+            predictor: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -644,6 +774,7 @@ mod tests {
             height: 20,
             kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
             compression: TiffCompression::Lzw,
+            predictor: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -659,6 +790,7 @@ mod tests {
             height: 24,
             kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
             compression: TiffCompression::Deflate,
+            predictor: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -684,6 +816,7 @@ mod tests {
                 palette: &palette,
             },
             compression: TiffCompression::None,
+            predictor: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -753,6 +886,7 @@ mod tests {
             height: 16,
             kind: EncodePixelFormat::Bilevel { pixels: &packed },
             compression: TiffCompression::None,
+            predictor: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -769,6 +903,7 @@ mod tests {
             height: 8,
             kind: EncodePixelFormat::Bilevel { pixels: &packed },
             compression: TiffCompression::CcittRle,
+            predictor: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -787,6 +922,7 @@ mod tests {
             height: 4,
             kind: EncodePixelFormat::Bilevel { pixels: &packed },
             compression: TiffCompression::CcittRle,
+            predictor: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -804,6 +940,7 @@ mod tests {
             compression: TiffCompression::CcittT4OneD {
                 eol_byte_aligned: false,
             },
+            predictor: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -823,6 +960,7 @@ mod tests {
             compression: TiffCompression::CcittT4OneD {
                 eol_byte_aligned: true,
             },
+            predictor: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -840,6 +978,7 @@ mod tests {
             height: 8,
             kind: EncodePixelFormat::Gray8 { pixels: &pixels },
             compression: TiffCompression::CcittRle,
+            predictor: false,
         };
         let r = encode_tiff(&page);
         assert!(r.is_err());
@@ -855,12 +994,14 @@ mod tests {
                 height: 8,
                 kind: EncodePixelFormat::Gray8 { pixels: &p1 },
                 compression: TiffCompression::None,
+                predictor: false,
             },
             EncodePage {
                 width: 8,
                 height: 8,
                 kind: EncodePixelFormat::Rgb24 { pixels: &p2 },
                 compression: TiffCompression::Lzw,
+                predictor: false,
             },
         ];
         let bytes = encode_tiff_multi(&pages).unwrap();
@@ -870,5 +1011,267 @@ mod tests {
         assert_eq!(imgs[0].planes[0].data, p1);
         assert_eq!(imgs[1].width, 8);
         assert_eq!(imgs[1].planes[0].data, p2);
+    }
+
+    // ---- Predictor=2 (horizontal differencing, TIFF 6.0 §14) ----
+
+    fn pattern_gray16(w: u32, h: u32) -> Vec<u8> {
+        let mut v = Vec::with_capacity((w * h * 2) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                // Smoothly-varying so differences are small; the
+                // predictor's correctness is independent of magnitude
+                // (two's-complement wrap), but a ramp is the realistic
+                // case §14 targets.
+                let s = (x.wrapping_mul(311)).wrapping_add(y.wrapping_mul(101)) as u16;
+                v.extend_from_slice(&s.to_le_bytes());
+            }
+        }
+        v
+    }
+
+    /// Helper: encode `kind` with Predictor=2 + `comp`, decode, and
+    /// assert the round-trip is bit-exact.
+    fn predictor_roundtrip(
+        width: u32,
+        height: u32,
+        kind: EncodePixelFormat<'_>,
+        comp: TiffCompression,
+    ) -> Vec<u8> {
+        let page = EncodePage {
+            width,
+            height,
+            kind,
+            compression: comp,
+            predictor: true,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        assert_eq!((d.width, d.height), (width, height));
+        d.frame.planes[0].data.clone()
+    }
+
+    #[test]
+    fn encode_gray8_predictor_lzw_roundtrip() {
+        let pixels = ramp_gray8(40, 24);
+        let out = predictor_roundtrip(
+            40,
+            24,
+            EncodePixelFormat::Gray8 { pixels: &pixels },
+            TiffCompression::Lzw,
+        );
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn encode_gray8_predictor_deflate_roundtrip() {
+        let pixels = ramp_gray8(33, 17);
+        let out = predictor_roundtrip(
+            33,
+            17,
+            EncodePixelFormat::Gray8 { pixels: &pixels },
+            TiffCompression::Deflate,
+        );
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn encode_gray8_predictor_none_roundtrip() {
+        // §14 ties the predictor to LZW, but the tag is orthogonal to
+        // the compressor; Compression=1 + Predictor=2 must still
+        // round-trip (the decoder reverses the differencing regardless).
+        let pixels = ramp_gray8(16, 16);
+        let out = predictor_roundtrip(
+            16,
+            16,
+            EncodePixelFormat::Gray8 { pixels: &pixels },
+            TiffCompression::None,
+        );
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn encode_gray16_predictor_lzw_roundtrip() {
+        let pixels = pattern_gray16(24, 20);
+        let out = predictor_roundtrip(
+            24,
+            20,
+            EncodePixelFormat::Gray16Le { pixels: &pixels },
+            TiffCompression::Lzw,
+        );
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn encode_gray16_predictor_deflate_roundtrip() {
+        let pixels = pattern_gray16(15, 9);
+        let out = predictor_roundtrip(
+            15,
+            9,
+            EncodePixelFormat::Gray16Le { pixels: &pixels },
+            TiffCompression::Deflate,
+        );
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn encode_rgb24_predictor_lzw_roundtrip() {
+        // §14: per-component differencing with an offset of
+        // SamplesPerPixel (3). A pattern where R/G/B differ ensures a
+        // plane swap or wrong offset would corrupt the round-trip.
+        let pixels = pattern_rgb(28, 19);
+        let out = predictor_roundtrip(
+            28,
+            19,
+            EncodePixelFormat::Rgb24 { pixels: &pixels },
+            TiffCompression::Lzw,
+        );
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn encode_rgb24_predictor_deflate_roundtrip() {
+        let pixels = pattern_rgb(11, 13);
+        let out = predictor_roundtrip(
+            11,
+            13,
+            EncodePixelFormat::Rgb24 { pixels: &pixels },
+            TiffCompression::Deflate,
+        );
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn encode_rgb24_predictor_packbits_roundtrip() {
+        let pixels = pattern_rgb(9, 7);
+        let out = predictor_roundtrip(
+            9,
+            7,
+            EncodePixelFormat::Rgb24 { pixels: &pixels },
+            TiffCompression::PackBits,
+        );
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn encode_palette_predictor_roundtrip() {
+        // Palette indices are single-component 8-bit values; §14
+        // differencing applies as for grayscale. The decoder expands
+        // the (reversed) indices through the colormap to Rgb24.
+        let palette = vec![[0, 0, 0], [255, 0, 0], [0, 255, 0], [255, 255, 255]];
+        let mut indices = Vec::with_capacity(12 * 8);
+        for y in 0..8u32 {
+            for x in 0..12u32 {
+                indices.push(((x + y) & 0x3) as u8);
+            }
+        }
+        let page = EncodePage {
+            width: 12,
+            height: 8,
+            kind: EncodePixelFormat::Palette8 {
+                indices: &indices,
+                palette: &palette,
+            },
+            compression: TiffCompression::Lzw,
+            predictor: true,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        let mut want = Vec::with_capacity(12 * 8 * 3);
+        for &idx in &indices {
+            want.extend_from_slice(&palette[idx as usize]);
+        }
+        assert_eq!(d.frame.planes[0].data, want);
+    }
+
+    #[test]
+    fn encode_predictor_emits_tag_317() {
+        // The encoded file must carry Predictor=2 (tag 317, SHORT) so a
+        // third-party reader reverses the differencing. Walk the
+        // single IFD looking for the 12-byte entry whose tag is 317.
+        let pixels = ramp_gray8(8, 8);
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::Gray8 { pixels: &pixels },
+            compression: TiffCompression::Lzw,
+            predictor: true,
+        };
+        let b = encode_tiff(&page).unwrap();
+        let ifd_off = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
+        let count = u16::from_le_bytes([b[ifd_off], b[ifd_off + 1]]) as usize;
+        let mut found = None;
+        for k in 0..count {
+            let e = ifd_off + 2 + k * 12;
+            let tag = u16::from_le_bytes([b[e], b[e + 1]]);
+            if tag == TAG_PREDICTOR {
+                let ty = u16::from_le_bytes([b[e + 2], b[e + 3]]);
+                let val = u16::from_le_bytes([b[e + 8], b[e + 9]]);
+                found = Some((ty, val));
+            }
+        }
+        assert_eq!(found, Some((TYPE_SHORT, PREDICTOR_HORIZONTAL)));
+
+        // No-predictor encode must omit the tag entirely (decoder
+        // defaults to Predictor=1).
+        let page2 = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::Gray8 { pixels: &pixels },
+            compression: TiffCompression::Lzw,
+            predictor: false,
+        };
+        let b2 = encode_tiff(&page2).unwrap();
+        let ifd2 = u32::from_le_bytes([b2[4], b2[5], b2[6], b2[7]]) as usize;
+        let count2 = u16::from_le_bytes([b2[ifd2], b2[ifd2 + 1]]) as usize;
+        for k in 0..count2 {
+            let e = ifd2 + 2 + k * 12;
+            let tag = u16::from_le_bytes([b2[e], b2[e + 1]]);
+            assert_ne!(tag, TAG_PREDICTOR);
+        }
+    }
+
+    #[test]
+    fn encode_predictor_rejects_bilevel() {
+        let packed = bilevel_checkerboard(16, 8);
+        let page = EncodePage {
+            width: 16,
+            height: 8,
+            kind: EncodePixelFormat::Bilevel { pixels: &packed },
+            compression: TiffCompression::Lzw,
+            predictor: true,
+        };
+        assert!(encode_tiff(&page).is_err());
+    }
+
+    #[test]
+    fn encode_predictor_rejects_ccitt() {
+        let packed = bilevel_checkerboard(16, 8);
+        let page = EncodePage {
+            width: 16,
+            height: 8,
+            kind: EncodePixelFormat::Bilevel { pixels: &packed },
+            compression: TiffCompression::CcittRle,
+            predictor: true,
+        };
+        assert!(encode_tiff(&page).is_err());
+    }
+
+    #[test]
+    fn forward_predictor_inverts_decoder_add_gray8() {
+        // Direct unit check that forward differencing is the exact
+        // inverse of the decoder's cumulative add for a known row.
+        let mut row = vec![10u8, 12, 9, 9, 200, 201];
+        let orig = row.clone();
+        forward_horizontal_predictor(&mut row, 6, 1, 1, 8, 6).unwrap();
+        // First sample unchanged; rest are first differences.
+        assert_eq!(row[0], 10);
+        assert_eq!(row[1], 12u8.wrapping_sub(10));
+        assert_eq!(row[5], 201u8.wrapping_sub(200));
+        // Reverse via the decoder's algorithm (left-to-right add).
+        for x in 1..6 {
+            row[x] = row[x].wrapping_add(row[x - 1]);
+        }
+        assert_eq!(row, orig);
     }
 }

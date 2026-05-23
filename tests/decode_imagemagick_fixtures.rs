@@ -281,6 +281,12 @@ fn probe_recognises_minimal_be_tiff() {
 /// `Photometric=RGB` (no chroma subsampling). JPEG is lossy so we
 /// compare with a generous PSNR-like tolerance rather than asserting
 /// bit-exactness.
+///
+/// JPEG-in-TIFF decode lives behind the `registry` feature (the JPEG
+/// codec is `oxideav-mjpeg`); without it `decode_tiff` returns
+/// `Error::Unsupported` for Compression=7, so this test only applies
+/// to the default (registry-on) build.
+#[cfg(feature = "registry")]
 #[test]
 fn decode_64x64_rgb_jpeg_imagemagick() {
     if !convert_available() {
@@ -310,6 +316,8 @@ fn decode_64x64_rgb_jpeg_imagemagick() {
 
 /// Grayscale JPEG-in-TIFF (Photometric=BlackIsZero, SamplesPerPixel=1).
 /// ImageMagick produces this for a `-compress jpeg` PGM input.
+/// Registry-gated like the RGB-JPEG case above.
+#[cfg(feature = "registry")]
 #[test]
 fn decode_64x64_gray_jpeg_imagemagick() {
     if !convert_available() {
@@ -344,7 +352,8 @@ fn decode_64x64_gray_jpeg_imagemagick() {
 /// JPEGTables present). Produced by `tiffcp -c jpeg` on an
 /// uncompressed RGB TIFF — that path picks the YCbCr photometric +
 /// the default 2:2 chroma subsampling, which exercises our 4:2:0
-/// composite path.
+/// composite path. Registry-gated like the other JPEG-in-TIFF cases.
+#[cfg(feature = "registry")]
 #[test]
 fn decode_64x64_ycbcr_jpeg_tiffcp() {
     if !convert_available() {
@@ -448,7 +457,9 @@ fn reject_old_style_jpeg_compression_6() {
 
 /// Sum of squared per-byte differences divided by the byte count —
 /// suitable for "is the reconstruction close enough?" assertions
-/// without dragging in a real PSNR library.
+/// without dragging in a real PSNR library. Only the (registry-gated)
+/// lossy JPEG-in-TIFF tests need it.
+#[cfg(feature = "registry")]
 fn mean_squared_error(a: &[u8], b: &[u8]) -> f64 {
     assert_eq!(a.len(), b.len(), "MSE inputs must be the same length");
     let mut acc: u64 = 0;
