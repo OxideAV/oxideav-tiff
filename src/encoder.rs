@@ -8,14 +8,18 @@
 //! * Compression: 1 None, 2 CCITT Modified Huffman, 3 CCITT T.4 1-D
 //!   (with optional T4Options bit 2 byte-aligned EOLs), 5 LZW,
 //!   8 Deflate, 32773 PackBits
-//! * Strip layout (single strip per page)
+//! * Strip layout — a single strip for chunky pages, or one strip per
+//!   component plane for `PlanarConfiguration = 2` pages (see
+//!   [`EncodePage::planar`])
 //! * Single-IFD or multi-IFD chain via [`encode_tiff_multi`]
 //!
 //! BigTIFF write, tile write, T.4 2-D / T.6 (Compression=4) encoding,
 //! JPEG-in-TIFF, and YCbCr / CIELab / CMYK output are intentionally out
 //! of scope for this round. The horizontal-differencing predictor
 //! (`Predictor = 2`, TIFF 6.0 §14) is supported on encode via the
-//! [`EncodePage::predictor`] flag.
+//! [`EncodePage::predictor`] flag, and `PlanarConfiguration = 2`
+//! (separate component planes, §"PlanarConfiguration") via
+//! [`EncodePage::planar`].
 
 use crate::ccitt::{encode_ccitt, CcittVariant, FillOrder};
 use crate::compress::{pack_deflate, pack_lzw, pack_packbits};
@@ -51,6 +55,22 @@ pub struct EncodePage<'a> {
     /// CCITT schemes (`Compression = 2 / 3`) or with `Bilevel` input is
     /// rejected with a precise error.
     pub predictor: bool,
+    /// Write the image in `PlanarConfiguration = 2` (separate component
+    /// planes) layout per TIFF 6.0 §"PlanarConfiguration" (page 38).
+    /// When set, each sample component is stored in its own
+    /// full-resolution strip (one strip per plane), and `StripOffsets`
+    /// / `StripByteCounts` carry `SamplesPerPixel` entries ordered
+    /// component-0, component-1, … — the spec's "SamplesPerPixel rows
+    /// and StripsPerImage columns" array with StripsPerImage = 1. Only
+    /// meaningful for multi-sample formats (`Rgb24`); §"PlanarConfiguration"
+    /// notes the field "is irrelevant" when SamplesPerPixel is 1, so
+    /// `planar` combined with a single-sample format (`Gray8` /
+    /// `Gray16Le` / `Palette8` / `Bilevel`) is rejected with a precise
+    /// error. The §14 predictor still applies when both flags are set:
+    /// §14 says "If PlanarConfiguration is 2 … Differencing works the
+    /// same as it does for grayscale data," so each plane is differenced
+    /// independently with an offset of 1 sample.
+    pub planar: bool,
 }
 
 /// Pixel layouts the encoder knows how to write.
@@ -150,10 +170,16 @@ impl TiffCompression {
     }
 }
 
-/// One planned page with compressed bytes, IFD, and any external
+/// One planned page with its compressed strip(s), IFD, and any external
 /// blobs (BitsPerSample / ColorMap arrays that don't fit inline).
+///
+/// `strips` holds one entry for chunky pages and `SamplesPerPixel`
+/// entries (one per component plane) for `PlanarConfiguration = 2`
+/// pages, in plane order (component 0 first). The on-disk
+/// `StripOffsets` / `StripByteCounts` arrays index into this list in
+/// the same order.
 struct PlannedPage {
-    compressed: Vec<u8>,
+    strips: Vec<Vec<u8>>,
     ifd: PageIfd,
     externals: Vec<(BlobId, Vec<u8>)>,
 }
@@ -196,23 +222,35 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
     // ---- Address assignment ----
     //
     // Start at byte 8 (after the header). For each page we lay out:
-    // [compressed strip][external blobs][IFD].
+    // [compressed strip(s)][external blobs][StripOffsets/ByteCounts
+    // LONG arrays, only when >1 strip][IFD].
     //
     // We need to know the IFD offset *before* writing it (it goes in
     // the previous IFD's next-IFD slot or in the header for the
-    // first page), so we walk pages once to assign byte ranges.
+    // first page), so we walk pages once to assign byte ranges. The
+    // StripOffsets / StripByteCounts arrays are written out-of-line
+    // only for multi-strip (planar) pages; a single-strip chunky page
+    // keeps both LONGs inline in the IFD value slot.
     let mut cursor: u64 = 8;
     struct PlannedPageAddr {
-        strip_offset: u64,
-        strip_size: u64,
+        // One (offset, size) per strip, in plane order. For chunky
+        // pages this has length 1.
+        strips: Vec<(u64, u64)>,
         externals: Vec<(BlobId, u64, u64)>, // (id, offset, size)
+        // File offsets of the out-of-line StripOffsets / StripByteCounts
+        // LONG arrays (only Some when the page has >1 strip).
+        strip_offsets_array: Option<u64>,
+        strip_byte_counts_array: Option<u64>,
         ifd_offset: u64,
     }
     let mut addrs: Vec<PlannedPageAddr> = Vec::with_capacity(planned.len());
     for plan in &planned {
-        let strip_offset = cursor;
-        let strip_size = plan.compressed.len() as u64;
-        cursor += strip_size;
+        // Strip payloads, laid out contiguously in plane order.
+        let mut strip_addrs = Vec::with_capacity(plan.strips.len());
+        for strip in &plan.strips {
+            strip_addrs.push((cursor, strip.len() as u64));
+            cursor += strip.len() as u64;
+        }
         let mut ext_addrs = Vec::with_capacity(plan.externals.len());
         for (id, blob) in &plan.externals {
             // SHORT/LONG arrays must be 2-/4-byte aligned. Align
@@ -225,6 +263,21 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
             ext_addrs.push((*id, cursor, blob.len() as u64));
             cursor += blob.len() as u64;
         }
+        // Out-of-line StripOffsets / StripByteCounts arrays for
+        // multi-strip (planar) pages. Both are LONG arrays, so align
+        // to 4 bytes. Each holds `strips.len()` LONGs.
+        let (strip_offsets_array, strip_byte_counts_array) = if plan.strips.len() > 1 {
+            if cursor % 4 != 0 {
+                cursor += 4 - (cursor % 4);
+            }
+            let so = cursor;
+            cursor += 4 * plan.strips.len() as u64;
+            let sbc = cursor;
+            cursor += 4 * plan.strips.len() as u64;
+            (Some(so), Some(sbc))
+        } else {
+            (None, None)
+        };
         // IFD must be 2-byte aligned (entries are u16/u32 mixes).
         if cursor % 2 != 0 {
             cursor += 1;
@@ -234,9 +287,10 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
         let ifd_size = 2 + (plan.ifd.entries.len() as u64) * 12 + 4;
         cursor += ifd_size;
         addrs.push(PlannedPageAddr {
-            strip_offset,
-            strip_size,
+            strips: strip_addrs,
             externals: ext_addrs,
+            strip_offsets_array,
+            strip_byte_counts_array,
             ifd_offset,
         });
         if ifd_offset > u32::MAX as u64 || cursor > u32::MAX as u64 {
@@ -256,15 +310,32 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
     out[4..8].copy_from_slice(&(addrs[0].ifd_offset as u32).to_le_bytes());
 
     for (i, (plan, addr)) in planned.iter().zip(addrs.iter()).enumerate() {
-        // Strip payload.
-        out[addr.strip_offset as usize..(addr.strip_offset + addr.strip_size) as usize]
-            .copy_from_slice(&plan.compressed);
+        // Strip payload(s), one per plane for planar pages.
+        for (strip, (off, size)) in plan.strips.iter().zip(addr.strips.iter()) {
+            assert_eq!(strip.len() as u64, *size);
+            out[*off as usize..(*off + *size) as usize].copy_from_slice(strip);
+        }
         // External blobs.
         for (j, (id, off, size)) in addr.externals.iter().enumerate() {
             assert_eq!(*id, plan.externals[j].0);
             let blob = &plan.externals[j].1;
             assert_eq!(blob.len() as u64, *size);
             out[*off as usize..(*off + *size) as usize].copy_from_slice(blob);
+        }
+        // Out-of-line StripOffsets / StripByteCounts LONG arrays (only
+        // present for multi-strip planar pages). Each entry is the
+        // corresponding strip's file offset / compressed length.
+        if let Some(so) = addr.strip_offsets_array {
+            for (k, (off, _)) in addr.strips.iter().enumerate() {
+                let slot = so as usize + k * 4;
+                out[slot..slot + 4].copy_from_slice(&(*off as u32).to_le_bytes());
+            }
+        }
+        if let Some(sbc) = addr.strip_byte_counts_array {
+            for (k, (_, size)) in addr.strips.iter().enumerate() {
+                let slot = sbc as usize + k * 4;
+                out[slot..slot + 4].copy_from_slice(&(*size as u32).to_le_bytes());
+            }
         }
         // IFD.
         let ifd_off = addr.ifd_offset as usize;
@@ -288,11 +359,22 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
                         }
                     }
                 }
-                IfdValue::StripOffset => {
-                    slot.copy_from_slice(&(addr.strip_offset as u32).to_le_bytes());
+                IfdValue::StripOffsets => {
+                    if let Some(so) = addr.strip_offsets_array {
+                        // >1 strip: value slot holds the file offset of
+                        // the out-of-line LONG array.
+                        slot.copy_from_slice(&(so as u32).to_le_bytes());
+                    } else {
+                        // Single strip: the LONG offset fits inline.
+                        slot.copy_from_slice(&(addr.strips[0].0 as u32).to_le_bytes());
+                    }
                 }
-                IfdValue::StripByteCount => {
-                    slot.copy_from_slice(&(addr.strip_size as u32).to_le_bytes());
+                IfdValue::StripByteCounts => {
+                    if let Some(sbc) = addr.strip_byte_counts_array {
+                        slot.copy_from_slice(&(sbc as u32).to_le_bytes());
+                    } else {
+                        slot.copy_from_slice(&(addr.strips[0].1 as u32).to_le_bytes());
+                    }
                 }
                 IfdValue::ExternalBlob(id) => {
                     let (_, off, _) = addr
@@ -327,12 +409,15 @@ enum BlobId {
 enum IfdValue {
     /// Up to 4 bytes packed inline into the value/offset slot.
     Inline(Vec<u8>),
-    /// Fixed value resolved at write time: offset of this page's
-    /// strip data.
-    StripOffset,
-    /// Fixed value resolved at write time: size of this page's
-    /// compressed strip.
-    StripByteCount,
+    /// Resolved at write time: the page's `StripOffsets` array. For a
+    /// single strip (chunky) the LONG fits inline; for
+    /// `PlanarConfiguration = 2` the per-plane offsets are written as a
+    /// LONG array out-of-line and this slot holds its file offset.
+    StripOffsets,
+    /// Resolved at write time: the page's `StripByteCounts` array,
+    /// inline for a single strip or an out-of-line LONG array for
+    /// multiple strips.
+    StripByteCounts,
     /// Reference to an external blob attached to this page.
     ExternalBlob(BlobId),
 }
@@ -357,6 +442,22 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
             "TIFF encode: CCITT compression (Compression=2/3) requires Bilevel input",
         ));
     }
+
+    // PlanarConfiguration=2 (separate component planes) is only
+    // meaningful when there is more than one sample per pixel; TIFF 6.0
+    // §"PlanarConfiguration" (page 38): "If SamplesPerPixel is 1,
+    // PlanarConfiguration is irrelevant." Reject the single-sample
+    // formats and the bit-packed bilevel format up front. The only
+    // multi-sample format the encoder writes is Rgb24 (SPP=3).
+    if p.planar && !matches!(p.kind, EncodePixelFormat::Rgb24 { .. }) {
+        return Err(Error::invalid(
+            "TIFF encode: PlanarConfiguration=2 (separate planes) requires a multi-sample \
+             format; TIFF 6.0 §\"PlanarConfiguration\" says the field is irrelevant when \
+             SamplesPerPixel is 1 (Gray8 / Gray16Le / Palette8 / Bilevel)",
+        ));
+    }
+    // CCITT schemes are bilevel-only (rejected above) so they never
+    // reach the planar path; the predictor is handled per-plane below.
 
     // The §14 horizontal-differencing predictor operates on whole
     // sample components; it has no meaning for bit-packed bilevel data,
@@ -467,25 +568,72 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
             }
         };
 
-    // Apply the §14 horizontal-differencing predictor *before*
-    // compression. The encoder stores first differences; the decoder's
-    // cumulative left-to-right add reverses it exactly. Strip layout is
-    // single-strip-per-page and chunky, so `row_bytes` is the packed
-    // sample stride and the whole image is one differencing region.
-    if p.predictor {
-        let bps = bits_per_sample[0] as usize;
-        let row_bytes = (p.width as usize) * (samples_per_pixel as usize) * (bps / 8);
-        forward_horizontal_predictor(
-            &mut raw_pixels,
-            p.width as usize,
-            p.height as usize,
-            samples_per_pixel as usize,
-            bps,
-            row_bytes,
-        )?;
-    }
-
-    let compressed = p.compression.pack(&raw_pixels, p.width, p.height)?;
+    // Build the page's compressed strip(s). Chunky pages are a single
+    // strip over the interleaved data; PlanarConfiguration=2 pages emit
+    // one strip per component plane (full image height), in plane order
+    // (component 0 first), matching the decoder's planar walker.
+    let bps = bits_per_sample[0] as usize;
+    let strips: Vec<Vec<u8>> = if p.planar {
+        // De-interleave chunky RGBRGB… into separate R / G / B planes
+        // (TIFF 6.0 §"PlanarConfiguration": "Red components in one
+        // component plane, the Green in another, and the Blue in
+        // another"). Only Rgb24 (SPP=3, 8 bits) reaches here.
+        let spp = samples_per_pixel as usize;
+        let bytes_per_sample = bps / 8;
+        let pixels = (p.width as usize) * (p.height as usize);
+        let plane_len = pixels * bytes_per_sample;
+        let mut out_strips = Vec::with_capacity(spp);
+        for plane in 0..spp {
+            let mut plane_buf = vec![0u8; plane_len];
+            for px in 0..pixels {
+                let src = (px * spp + plane) * bytes_per_sample;
+                let dst = px * bytes_per_sample;
+                plane_buf[dst..dst + bytes_per_sample]
+                    .copy_from_slice(&raw_pixels[src..src + bytes_per_sample]);
+            }
+            // §14: "If PlanarConfiguration is 2 … Differencing works the
+            // same as it does for grayscale data." Each plane is a
+            // single-component image, so the predictor runs with an
+            // offset of one sample.
+            if p.predictor {
+                let plane_row_bytes = (p.width as usize) * bytes_per_sample;
+                forward_horizontal_predictor(
+                    &mut plane_buf,
+                    p.width as usize,
+                    p.height as usize,
+                    1,
+                    bps,
+                    plane_row_bytes,
+                )?;
+            }
+            out_strips.push(p.compression.pack(&plane_buf, p.width, p.height)?);
+        }
+        out_strips
+    } else {
+        // Apply the §14 horizontal-differencing predictor *before*
+        // compression. The encoder stores first differences; the
+        // decoder's cumulative left-to-right add reverses it exactly.
+        // Chunky single-strip layout, so `row_bytes` is the packed
+        // sample stride and the whole image is one differencing region.
+        if p.predictor {
+            let row_bytes = (p.width as usize) * (samples_per_pixel as usize) * (bps / 8);
+            forward_horizontal_predictor(
+                &mut raw_pixels,
+                p.width as usize,
+                p.height as usize,
+                samples_per_pixel as usize,
+                bps,
+                row_bytes,
+            )?;
+        }
+        vec![p.compression.pack(&raw_pixels, p.width, p.height)?]
+    };
+    let planar_config = if p.planar {
+        PLANAR_SEPARATE
+    } else {
+        PLANAR_CHUNKY
+    };
+    let strip_count = strips.len() as u32;
 
     // Build the IFD entry list. Tags must appear in ascending order
     // per spec.
@@ -550,12 +698,13 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
         count: 1,
         value: IfdValue::Inline(photometric.to_le_bytes().to_vec()),
     });
-    // 273 StripOffsets (LONG, count=1)
+    // 273 StripOffsets (LONG). count=1 for chunky (one strip), or
+    // SamplesPerPixel for PlanarConfiguration=2 (one strip per plane).
     entries.push(PageIfdEntry {
         tag: TAG_STRIP_OFFSETS,
         field_type: TYPE_LONG,
-        count: 1,
-        value: IfdValue::StripOffset,
+        count: strip_count,
+        value: IfdValue::StripOffsets,
     });
     // 277 SamplesPerPixel (SHORT)
     entries.push(PageIfdEntry {
@@ -571,19 +720,20 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
         count: 1,
         value: IfdValue::Inline(p.height.to_le_bytes().to_vec()),
     });
-    // 279 StripByteCounts (LONG, count=1)
+    // 279 StripByteCounts (LONG). count matches StripOffsets.
     entries.push(PageIfdEntry {
         tag: TAG_STRIP_BYTE_COUNTS,
         field_type: TYPE_LONG,
-        count: 1,
-        value: IfdValue::StripByteCount,
+        count: strip_count,
+        value: IfdValue::StripByteCounts,
     });
-    // 284 PlanarConfiguration (SHORT) = 1 (chunky)
+    // 284 PlanarConfiguration (SHORT) — 1 (chunky) or 2 (separate
+    // planes) per the page's `planar` flag.
     entries.push(PageIfdEntry {
         tag: TAG_PLANAR_CONFIGURATION,
         field_type: TYPE_SHORT,
         count: 1,
-        value: IfdValue::Inline(PLANAR_CHUNKY.to_le_bytes().to_vec()),
+        value: IfdValue::Inline(planar_config.to_le_bytes().to_vec()),
     });
     // 292 T4Options (LONG) — only for Compression=3. Bit 0 (2D) and
     // bit 1 (uncompressed mode) are always clear for this encoder;
@@ -631,7 +781,7 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
     debug_assert!(entries.windows(2).all(|w| w[0].tag <= w[1].tag));
 
     Ok(PlannedPage {
-        compressed,
+        strips,
         ifd: PageIfd { entries },
         externals,
     })
@@ -737,6 +887,7 @@ mod tests {
             kind: EncodePixelFormat::Gray8 { pixels: &pixels },
             compression: TiffCompression::None,
             predictor: false,
+            planar: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -759,6 +910,7 @@ mod tests {
             kind: EncodePixelFormat::Gray16Le { pixels: &pixels },
             compression: TiffCompression::PackBits,
             predictor: false,
+            planar: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -775,6 +927,7 @@ mod tests {
             kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
             compression: TiffCompression::Lzw,
             predictor: false,
+            planar: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -791,6 +944,7 @@ mod tests {
             kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
             compression: TiffCompression::Deflate,
             predictor: false,
+            planar: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -817,6 +971,7 @@ mod tests {
             },
             compression: TiffCompression::None,
             predictor: false,
+            planar: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -887,6 +1042,7 @@ mod tests {
             kind: EncodePixelFormat::Bilevel { pixels: &packed },
             compression: TiffCompression::None,
             predictor: false,
+            planar: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -904,6 +1060,7 @@ mod tests {
             kind: EncodePixelFormat::Bilevel { pixels: &packed },
             compression: TiffCompression::CcittRle,
             predictor: false,
+            planar: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -923,6 +1080,7 @@ mod tests {
             kind: EncodePixelFormat::Bilevel { pixels: &packed },
             compression: TiffCompression::CcittRle,
             predictor: false,
+            planar: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -941,6 +1099,7 @@ mod tests {
                 eol_byte_aligned: false,
             },
             predictor: false,
+            planar: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -961,6 +1120,7 @@ mod tests {
                 eol_byte_aligned: true,
             },
             predictor: false,
+            planar: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -979,6 +1139,7 @@ mod tests {
             kind: EncodePixelFormat::Gray8 { pixels: &pixels },
             compression: TiffCompression::CcittRle,
             predictor: false,
+            planar: false,
         };
         let r = encode_tiff(&page);
         assert!(r.is_err());
@@ -995,6 +1156,7 @@ mod tests {
                 kind: EncodePixelFormat::Gray8 { pixels: &p1 },
                 compression: TiffCompression::None,
                 predictor: false,
+                planar: false,
             },
             EncodePage {
                 width: 8,
@@ -1002,6 +1164,7 @@ mod tests {
                 kind: EncodePixelFormat::Rgb24 { pixels: &p2 },
                 compression: TiffCompression::Lzw,
                 predictor: false,
+                planar: false,
             },
         ];
         let bytes = encode_tiff_multi(&pages).unwrap();
@@ -1044,6 +1207,7 @@ mod tests {
             kind,
             compression: comp,
             predictor: true,
+            planar: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1174,6 +1338,7 @@ mod tests {
             },
             compression: TiffCompression::Lzw,
             predictor: true,
+            planar: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1196,6 +1361,7 @@ mod tests {
             kind: EncodePixelFormat::Gray8 { pixels: &pixels },
             compression: TiffCompression::Lzw,
             predictor: true,
+            planar: false,
         };
         let b = encode_tiff(&page).unwrap();
         let ifd_off = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
@@ -1220,6 +1386,7 @@ mod tests {
             kind: EncodePixelFormat::Gray8 { pixels: &pixels },
             compression: TiffCompression::Lzw,
             predictor: false,
+            planar: false,
         };
         let b2 = encode_tiff(&page2).unwrap();
         let ifd2 = u32::from_le_bytes([b2[4], b2[5], b2[6], b2[7]]) as usize;
@@ -1240,6 +1407,7 @@ mod tests {
             kind: EncodePixelFormat::Bilevel { pixels: &packed },
             compression: TiffCompression::Lzw,
             predictor: true,
+            planar: false,
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -1253,6 +1421,7 @@ mod tests {
             kind: EncodePixelFormat::Bilevel { pixels: &packed },
             compression: TiffCompression::CcittRle,
             predictor: true,
+            planar: false,
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -1273,5 +1442,165 @@ mod tests {
             row[x] = row[x].wrapping_add(row[x - 1]);
         }
         assert_eq!(row, orig);
+    }
+
+    // ---- PlanarConfiguration = 2 (separate planes) encode ----
+
+    fn planar_roundtrip(w: u32, h: u32, compression: TiffCompression, predictor: bool) {
+        let pixels = pattern_rgb(w, h);
+        let page = EncodePage {
+            width: w,
+            height: h,
+            kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+            compression,
+            predictor,
+            planar: true,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        assert_eq!((d.width, d.height), (w, h));
+        // Decoder re-interleaves the planes into chunky order, so the
+        // output must match the original chunky RGB input bit-exactly.
+        assert_eq!(d.frame.planes[0].data, pixels);
+    }
+
+    #[test]
+    fn encode_rgb24_planar_none_roundtrip() {
+        planar_roundtrip(20, 16, TiffCompression::None, false);
+    }
+
+    #[test]
+    fn encode_rgb24_planar_packbits_roundtrip() {
+        planar_roundtrip(33, 9, TiffCompression::PackBits, false);
+    }
+
+    #[test]
+    fn encode_rgb24_planar_lzw_roundtrip() {
+        planar_roundtrip(48, 24, TiffCompression::Lzw, false);
+    }
+
+    #[test]
+    fn encode_rgb24_planar_deflate_roundtrip() {
+        planar_roundtrip(17, 31, TiffCompression::Deflate, false);
+    }
+
+    #[test]
+    fn encode_rgb24_planar_predictor_lzw_roundtrip() {
+        // §14 + PlanarConfiguration=2: each plane is differenced
+        // independently with an offset of one sample.
+        planar_roundtrip(40, 20, TiffCompression::Lzw, true);
+    }
+
+    #[test]
+    fn encode_rgb24_planar_predictor_deflate_roundtrip() {
+        planar_roundtrip(28, 28, TiffCompression::Deflate, true);
+    }
+
+    /// Inspect the encoded IFD: PlanarConfiguration must read 2, and
+    /// StripOffsets / StripByteCounts must each carry SamplesPerPixel
+    /// (= 3) entries — the spec's "SamplesPerPixel rows and
+    /// StripsPerImage columns" array with StripsPerImage = 1.
+    #[test]
+    fn encode_planar_emits_three_strips_and_config_2() {
+        let pixels = pattern_rgb(16, 8);
+        let page = EncodePage {
+            width: 16,
+            height: 8,
+            kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: true,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+
+        // Walk the IFD by hand (II classic TIFF).
+        assert_eq!(&bytes[0..2], b"II");
+        let ifd_off = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        let count = u16::from_le_bytes([bytes[ifd_off], bytes[ifd_off + 1]]) as usize;
+        let mut planar_cfg = None;
+        let mut strip_offsets_count = None;
+        let mut strip_byte_counts_count = None;
+        for k in 0..count {
+            let e = ifd_off + 2 + k * 12;
+            let tag = u16::from_le_bytes([bytes[e], bytes[e + 1]]);
+            let cnt = u32::from_le_bytes([bytes[e + 4], bytes[e + 5], bytes[e + 6], bytes[e + 7]]);
+            match tag {
+                TAG_PLANAR_CONFIGURATION => {
+                    planar_cfg = Some(u16::from_le_bytes([bytes[e + 8], bytes[e + 9]]));
+                }
+                TAG_STRIP_OFFSETS => strip_offsets_count = Some(cnt),
+                TAG_STRIP_BYTE_COUNTS => strip_byte_counts_count = Some(cnt),
+                _ => {}
+            }
+        }
+        assert_eq!(planar_cfg, Some(PLANAR_SEPARATE));
+        assert_eq!(strip_offsets_count, Some(3));
+        assert_eq!(strip_byte_counts_count, Some(3));
+    }
+
+    /// `planar = true` requires a multi-sample format; the single-sample
+    /// formats (where the spec says PlanarConfiguration is irrelevant)
+    /// must be rejected with a precise error rather than silently
+    /// emitting a meaningless `PlanarConfiguration = 2`.
+    #[test]
+    fn encode_planar_rejects_single_sample_formats() {
+        let g = ramp_gray8(8, 8);
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::Gray8 { pixels: &g },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: true,
+        };
+        assert!(encode_tiff(&page).is_err());
+
+        let palette = vec![[0u8, 0, 0], [255, 255, 255]];
+        let indices = vec![0u8; 64];
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::Palette8 {
+                indices: &indices,
+                palette: &palette,
+            },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: true,
+        };
+        assert!(encode_tiff(&page).is_err());
+    }
+
+    /// Chunky output stays single-strip (PlanarConfiguration = 1) when
+    /// `planar` is off — the planar refactor must not regress the
+    /// default layout.
+    #[test]
+    fn encode_chunky_still_single_strip_config_1() {
+        let pixels = pattern_rgb(12, 6);
+        let page = EncodePage {
+            width: 12,
+            height: 6,
+            kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let ifd_off = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        let count = u16::from_le_bytes([bytes[ifd_off], bytes[ifd_off + 1]]) as usize;
+        for k in 0..count {
+            let e = ifd_off + 2 + k * 12;
+            let tag = u16::from_le_bytes([bytes[e], bytes[e + 1]]);
+            let cnt = u32::from_le_bytes([bytes[e + 4], bytes[e + 5], bytes[e + 6], bytes[e + 7]]);
+            if tag == TAG_PLANAR_CONFIGURATION {
+                assert_eq!(
+                    u16::from_le_bytes([bytes[e + 8], bytes[e + 9]]),
+                    PLANAR_CHUNKY
+                );
+            }
+            if tag == TAG_STRIP_OFFSETS || tag == TAG_STRIP_BYTE_COUNTS {
+                assert_eq!(cnt, 1);
+            }
+        }
     }
 }

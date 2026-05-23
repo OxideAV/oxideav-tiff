@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encoder: `PlanarConfiguration = 2` (separate component planes), per
+  TIFF 6.0 §"PlanarConfiguration" (page 38) and the §"StripOffsets"
+  count formula (page 67), via the new `EncodePage::planar` flag. When
+  set on an `Rgb24` page the encoder de-interleaves the chunky
+  `RGBRGB…` data into one full-resolution strip per component plane and
+  writes `StripOffsets` / `StripByteCounts` as `SamplesPerPixel`-entry
+  LONG arrays in plane order (component 0, then 1, then 2) — the spec's
+  "SamplesPerPixel rows and StripsPerImage columns" array with
+  `StripsPerImage = 1`. Both arrays are emitted out-of-line as LONG
+  blobs when the count exceeds 1; the chunky single-strip path keeps
+  them inline, so the default layout is unchanged. `PlanarConfiguration`
+  (tag 284) is written as 2. It composes with the §14 predictor: §14
+  says "If PlanarConfiguration is 2 … Differencing works the same as it
+  does for grayscale data," so each plane is differenced independently
+  with an offset of one sample. The flag is rejected on the
+  single-sample formats (`Gray8` / `Gray16Le` / `Palette8` /
+  `Bilevel`), where §"PlanarConfiguration" says the field "is
+  irrelevant."
+
+  Validated by self-roundtrip across None / PackBits / LZW / Deflate
+  (with and without `Predictor = 2`) through our own decoder's planar
+  walker, an IFD-tag inspection (PlanarConfiguration reads 2 and
+  StripOffsets / StripByteCounts carry 3 entries), and a regression
+  check that chunky output stays single-strip with
+  PlanarConfiguration = 1. External black-box validation: `tiffcp -c
+  none` transcodes our planar (and planar + predictor) output back to
+  uncompressed TIFFs that re-decode to the original chunky pixels
+  (proving libtiff reverses the plane split + per-plane offsets), and
+  ImageMagick reads our `PlanarConfiguration = 2` RGB bit-exactly.
+
 - Encoder: horizontal-differencing predictor (`Predictor = 2`, TIFF 6.0
   §14) via the new `EncodePage::predictor` flag. When set, the encoder
   replaces each component with its first difference from the previous

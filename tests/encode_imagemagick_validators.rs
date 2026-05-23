@@ -141,6 +141,7 @@ fn encoder_gray8_lzw_roundtrips_through_convert() {
         kind: EncodePixelFormat::Gray8 { pixels: &pixels },
         compression: TiffCompression::Lzw,
         predictor: false,
+        planar: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     // Round-trip through our own decoder first.
@@ -163,6 +164,7 @@ fn encoder_rgb24_packbits_roundtrips_through_convert() {
         kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
         compression: TiffCompression::PackBits,
         predictor: false,
+        planar: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -183,6 +185,7 @@ fn encoder_rgb24_deflate_roundtrips_through_convert() {
         kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
         compression: TiffCompression::Deflate,
         predictor: false,
+        planar: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -208,6 +211,7 @@ fn encoder_palette_roundtrips_through_convert() {
         },
         compression: TiffCompression::None,
         predictor: false,
+        planar: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -230,6 +234,7 @@ fn encoder_tiffinfo_reports_expected_metadata() {
         kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
         compression: TiffCompression::Lzw,
         predictor: false,
+        planar: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -271,6 +276,7 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             kind: EncodePixelFormat::Gray8 { pixels: &p1 },
             compression: TiffCompression::None,
             predictor: false,
+            planar: false,
         },
         EncodePage {
             width: 16,
@@ -278,6 +284,7 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             kind: EncodePixelFormat::Rgb24 { pixels: &p2 },
             compression: TiffCompression::Lzw,
             predictor: false,
+            planar: false,
         },
         EncodePage {
             width: 16,
@@ -285,6 +292,7 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             kind: EncodePixelFormat::Gray8 { pixels: &p3 },
             compression: TiffCompression::Deflate,
             predictor: false,
+            planar: false,
         },
     ];
     let bytes = encode_tiff_multi(&pages).unwrap();
@@ -506,6 +514,7 @@ fn encoder_ccitt_rle_visible_to_tiffinfo() {
         kind: EncodePixelFormat::Bilevel { pixels: &packed },
         compression: TiffCompression::CcittRle,
         predictor: false,
+        planar: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     // Self-roundtrip first.
@@ -551,6 +560,7 @@ fn encoder_ccitt_t4_1d_decodes_via_tiffcp_to_uncompressed() {
             eol_byte_aligned: false,
         },
         predictor: false,
+        planar: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -606,6 +616,7 @@ fn encoder_ccitt_t4_1d_byte_aligned_decodes_via_tiffcp() {
             eol_byte_aligned: true,
         },
         predictor: false,
+        planar: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -731,6 +742,7 @@ fn encoder_predictor_tiffinfo_reports_horizontal_differencing() {
         kind: EncodePixelFormat::Gray8 { pixels: &pixels },
         compression: TiffCompression::Lzw,
         predictor: true,
+        planar: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -756,6 +768,7 @@ fn encoder_gray8_predictor_lzw_transcodes_via_tiffcp() {
         kind: EncodePixelFormat::Gray8 { pixels: &pixels },
         compression: TiffCompression::Lzw,
         predictor: true,
+        planar: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_predictor_matches(&bytes, 50, 30, &pixels);
@@ -777,6 +790,7 @@ fn encoder_rgb24_predictor_deflate_transcodes_via_tiffcp() {
         kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
         compression: TiffCompression::Deflate,
         predictor: true,
+        planar: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_predictor_matches(&bytes, 40, 24, &pixels);
@@ -791,6 +805,7 @@ fn encoder_gray8_predictor_lzw_roundtrips_through_convert() {
         kind: EncodePixelFormat::Gray8 { pixels: &pixels },
         compression: TiffCompression::Lzw,
         predictor: true,
+        planar: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     // Our own decoder first.
@@ -814,9 +829,162 @@ fn encoder_rgb24_predictor_lzw_roundtrips_through_convert() {
         kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
         compression: TiffCompression::Lzw,
         predictor: true,
+        planar: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         assert_eq!(im_bytes, pixels, "ImageMagick mismatch on Predictor=2 RGB");
+    }
+}
+
+// ---- PlanarConfiguration = 2 (separate component planes) encode ----
+
+/// `tiffcp -c none` re-arranges a `PlanarConfiguration = 2` input into
+/// whatever default layout libtiff prefers; either way it must read
+/// our separate R / G / B planes correctly. Decoding the transcoded
+/// output back must reproduce the original chunky pixels, proving
+/// libtiff reverses our planar split (plane order + per-plane strip
+/// offsets) exactly.
+#[test]
+fn encoder_planar_rgb_transcodes_via_tiffcp() {
+    if !binary_available("tiffcp") {
+        eprintln!("skipping: tiffcp not available");
+        return;
+    }
+    let pixels = pattern_rgb(40, 24);
+    let page = EncodePage {
+        width: 40,
+        height: 24,
+        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+        compression: TiffCompression::None,
+        predictor: false,
+        planar: true,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    let dir = tmp_dir();
+    let in_path = dir.join("planar.tiff");
+    let out_path = dir.join("none.tiff");
+    fs::write(&in_path, &bytes).unwrap();
+    let st = Command::new("tiffcp")
+        .arg("-c")
+        .arg("none")
+        .arg(&in_path)
+        .arg(&out_path)
+        .status();
+    match st {
+        Ok(s) if s.success() => {}
+        Ok(_) => {
+            let _ = fs::remove_dir_all(&dir);
+            panic!("tiffcp could not transcode our PlanarConfiguration=2 output");
+        }
+        Err(e) => {
+            eprintln!("tiffcp spawn failed: {e}");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    }
+    let trans = fs::read(&out_path).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded planar TIFF");
+    assert_eq!((d.width, d.height), (40, 24));
+    assert_eq!(
+        d.frame.planes[0].data, pixels,
+        "pixel mismatch after PlanarConfiguration=2 encode + tiffcp -c none"
+    );
+}
+
+/// `tiffcp -p separate -c lzw` re-reads our planar LZW output and we
+/// re-decode the transcoded result; combined with the predictor this
+/// exercises the per-plane (offset = 1 sample) §14 differencing path.
+#[test]
+fn encoder_planar_predictor_lzw_transcodes_via_tiffcp() {
+    if !binary_available("tiffcp") {
+        eprintln!("skipping: tiffcp not available");
+        return;
+    }
+    let pixels = pattern_rgb(48, 32);
+    let page = EncodePage {
+        width: 48,
+        height: 32,
+        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+        compression: TiffCompression::Lzw,
+        predictor: true,
+        planar: true,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    let dir = tmp_dir();
+    let in_path = dir.join("planar.tiff");
+    let out_path = dir.join("none.tiff");
+    fs::write(&in_path, &bytes).unwrap();
+    let st = Command::new("tiffcp")
+        .arg("-c")
+        .arg("none")
+        .arg(&in_path)
+        .arg(&out_path)
+        .status();
+    match st {
+        Ok(s) if s.success() => {}
+        Ok(_) => {
+            let _ = fs::remove_dir_all(&dir);
+            panic!("tiffcp could not transcode our planar Predictor=2 output");
+        }
+        Err(e) => {
+            eprintln!("tiffcp spawn failed: {e}");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    }
+    let trans = fs::read(&out_path).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded planar+predictor TIFF");
+    assert_eq!(
+        d.frame.planes[0].data, pixels,
+        "pixel mismatch after planar Predictor=2 encode + tiffcp -c none"
+    );
+}
+
+/// ImageMagick reads our `PlanarConfiguration = 2` RGB output and must
+/// reconstruct the original chunky pixels bit-exactly.
+#[test]
+fn encoder_planar_rgb_roundtrips_through_convert() {
+    let pixels = pattern_rgb(40, 30);
+    let page = EncodePage {
+        width: 40,
+        height: 30,
+        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+        compression: TiffCompression::Deflate,
+        predictor: false,
+        planar: true,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
+        assert_eq!(
+            im_bytes, pixels,
+            "ImageMagick mismatch on PlanarConfiguration=2 RGB"
+        );
+    }
+}
+
+/// `tiffinfo` reports the planar configuration on our output.
+#[test]
+fn encoder_planar_tiffinfo_reports_separate_planes() {
+    let pixels = pattern_rgb(32, 16);
+    let page = EncodePage {
+        width: 32,
+        height: 16,
+        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+        compression: TiffCompression::None,
+        predictor: false,
+        planar: true,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    if let Some(info) = run_tiffinfo(&bytes) {
+        let lc = info.to_lowercase();
+        assert!(
+            lc.contains("separate") || lc.contains("planarconfig"),
+            "tiffinfo missing PlanarConfiguration=2 line: {info}"
+        );
+    } else {
+        eprintln!("skipping: tiffinfo not available");
     }
 }

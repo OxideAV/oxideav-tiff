@@ -121,6 +121,23 @@ with `Bilevel` input is rejected. `tiffinfo` reports
 `tiffcp -c none` transcodes our `Predictor = 2` streams back to
 uncompressed TIFFs that re-decode to the original pixels.
 
+`PlanarConfiguration = 2` (separate component planes, TIFF 6.0
+§"PlanarConfiguration") is available on encode via the
+`EncodePage::planar` flag. When set on an `Rgb24` page the encoder
+de-interleaves the chunky `RGBRGB…` data into one full-resolution
+strip per component plane and writes `StripOffsets` / `StripByteCounts`
+as `SamplesPerPixel`-entry arrays in plane order — the spec's
+"SamplesPerPixel rows and StripsPerImage columns" layout with
+`StripsPerImage = 1`. It composes with `Predictor = 2`: §14 says
+differencing on a planar image "works the same as it does for
+grayscale data," so each plane is differenced independently with an
+offset of one sample. The flag is rejected on the single-sample
+formats (`Gray8` / `Gray16Le` / `Palette8` / `Bilevel`), where the
+spec says the field is irrelevant. Works under None / PackBits / LZW /
+Deflate. `tiffcp -c none` transcodes our planar output back to an
+uncompressed TIFF that re-decodes to the original pixels, and
+ImageMagick reads it bit-exactly.
+
 Output is classic II little-endian TIFF, single-IFD via
 [`encode_tiff`] or multi-page via [`encode_tiff_multi`]. Files
 roundtrip through ImageMagick / `tiffinfo` / `tiffcp`; CCITT
@@ -144,9 +161,11 @@ checking the resulting pixels match the original input.
   CMYK JPEG, and `PlanarConfiguration = 2` JPEG remain unsupported.
 - CIELab / Transparency-mask photometric interpretations
 - DNG / GeoTIFF / EXIF blob extraction
-- Encoder-side planar (`PlanarConfiguration = 2`) writing — decode
-  is now supported across uncompressed / PackBits / LZW / Deflate
-  strips and tiles, but the encoder still emits chunky only
+- Encoder-side planar (`PlanarConfiguration = 2`) writing is now
+  supported for `Rgb24` under None / PackBits / LZW / Deflate (with or
+  without `Predictor = 2`); decode covers the same plus tiles and
+  CCITT. The remaining gap is planar write for tiled output and for
+  the not-yet-encodable photometrics (CMYK / YCbCr)
 
 ## Registration
 
