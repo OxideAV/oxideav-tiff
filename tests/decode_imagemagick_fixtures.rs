@@ -434,6 +434,71 @@ fn decode_64x64_ycbcr_jpeg_tiffcp() {
     );
 }
 
+/// CMYK JPEG-in-TIFF (Photometric=CMYK (5), SamplesPerPixel=4).
+/// `convert -colorspace CMYK -compress jpeg` produces a 4-component
+/// JPEG datastream wrapped in TIFF (per TN2: "A JPEG-compressed TIFF
+/// file will typically have PhotometricInterpretation = YCbCr ...
+/// unless the source data was grayscale or CMYK"). `oxideav-mjpeg`
+/// produces a single packed CMYK plane; the TIFF compositor converts
+/// to Rgb24 using the same additive-RGB formula the uncompressed
+/// CMYK path uses (TIFF 6.0 §16, InkSet=1). The round-trip is lossy
+/// (JPEG quantisation + CMYK→RGB colour conversion in ImageMagick)
+/// so we only assert (a) decode succeeds, (b) output dimensions
+/// match, (c) output is Rgb24-sized, and (d) sanity-check that the
+/// result isn't all-zero / all-saturated.
+#[cfg(feature = "registry")]
+#[test]
+fn decode_64x64_cmyk_jpeg_imagemagick() {
+    if !convert_available() {
+        eprintln!("skipping: `convert` binary not found");
+        return;
+    }
+    let pixels = rgb_pattern_64();
+    let ppm = make_ppm_rgb(64, 64, &pixels);
+    // -colorspace CMYK + -compress jpeg: ImageMagick converts to a
+    // 4-component CMYK image then JPEG-compresses (typically without
+    // chroma subsampling for CMYK).
+    let tiff = match convert_to_tiff(
+        &ppm,
+        "ppm",
+        &["-colorspace", "CMYK", "-compress", "jpeg", "-quality", "90"],
+    ) {
+        Some(b) => b,
+        None => {
+            eprintln!("skipping: convert failed to produce CMYK JPEG-TIFF");
+            return;
+        }
+    };
+    let d = decode_tiff(&tiff).expect("decode_tiff (CMYK JPEG-in-TIFF) failed");
+    assert_eq!((d.width, d.height), (64, 64));
+    // Output is Rgb24 (CMYK -> additive RGB).
+    let got = frame_to_rgb24_bytes(&d);
+    assert_eq!(got.len(), 64 * 64 * 3);
+    // Sanity: not all-zero (would indicate decode failure or
+    // all-ink composite collapse to black).
+    let nonzero = got.iter().filter(|&&b| b != 0).count();
+    assert!(
+        nonzero > got.len() / 10,
+        "CMYK JPEG decode produced suspiciously many zeros: {nonzero}/{}",
+        got.len()
+    );
+    // Sanity: not all-saturated.
+    let unsat = got.iter().filter(|&&b| b != 255).count();
+    assert!(
+        unsat > got.len() / 10,
+        "CMYK JPEG decode produced suspiciously many 255s: {unsat}/{}",
+        got.len()
+    );
+    // Compare to the round-tripped pixels with a very loose
+    // tolerance — CMYK colour conversion + JPEG quant adds
+    // ImageMagick-side variation we cannot match exactly.
+    let mse = mean_squared_error(&got, &pixels);
+    assert!(
+        mse < 6000.0,
+        "CMYK JPEG-in-TIFF reconstruction too far from input: MSE={mse}"
+    );
+}
+
 /// Verify we reject Compression=6 (deprecated old-style JPEG per
 /// TN2) with a precise Unsupported error rather than mis-decoding.
 #[test]

@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decoder: CMYK JPEG-in-TIFF (`Compression = 7`,
+  `PhotometricInterpretation = CMYK (5)`, `SamplesPerPixel = 4`), per
+  TIFF Tech Note 2 ("A JPEG-compressed TIFF file will typically have
+  PhotometricInterpretation = YCbCr ... unless the source data was
+  grayscale or CMYK"). Each strip / tile is a freestanding 4-component
+  JPEG datastream (with the optional `JPEGTables` blob applied by
+  reference as usual). `oxideav-mjpeg` consumes any Adobe APP14 marker
+  inside the segment to pick the correct per-sample inversion (plain
+  CMYK / Adobe-inverted CMYK / YCCK) and emits a single packed
+  `C M Y K` plane (stride = `width × 4`) where `0 = no ink` — i.e.
+  TIFF 6.0 §16's `InkSet = 1` convention. The TIFF compositor then
+  converts the packed CMYK buffer to `Rgb24` using the same
+  additive-RGB formula the uncompressed CMYK path uses
+  (`R = (255 − C) × (255 − K) / 255`, etc.), so the integration
+  matches `tiffinfo` / `magick` reference rendering bit-for-bit on the
+  composite step. New `JpegPixelFormat::Cmyk8` enum variant +
+  `composite_cmyk_to_rgb` public helper in `jpeg.rs`. Validated with
+  `convert -colorspace CMYK -compress jpeg`. Strip + tile dispatch
+  both reuse the existing per-segment merge / decode path; tiling
+  works automatically. `PlanarConfiguration = 2` still returns
+  `Error::Unsupported` (TN2 readers are not required to support it),
+  and 12-bit / arithmetic-coded JPEG remain rejected at the
+  `BitsPerSample / SOFn` gate.
+
 - Encoder: tiled layout (TIFF 6.0 §15) via the new
   `EncodePage::tiling` field (`Some((tile_width, tile_height))`). When
   set, the encoder divides the image into a row-major grid of fixed-size

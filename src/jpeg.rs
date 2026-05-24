@@ -72,6 +72,16 @@ pub enum JpegPixelFormat {
     /// when `PhotometricInterpretation = RGB (2)` and `Sf` is 1h1v
     /// for every component.
     Rgb24,
+    /// 4-component CMYK delivered as a single packed plane of
+    /// `C M Y K` bytes (4 bytes / pixel). Used when
+    /// `PhotometricInterpretation = CMYK (5)` and `SamplesPerPixel = 4`.
+    /// `oxideav-mjpeg` consumes the optional Adobe APP14 marker inside
+    /// the JPEG stream to pick the correct sample inversion (plain CMYK
+    /// / Adobe-inverted CMYK / YCCK) and emits "regular" CMYK where
+    /// `0 = no ink`, per TIFF 6.0 §16's `InkSet = 1` (CMYK) convention.
+    /// The TIFF compositor only needs to walk the packed buffer and
+    /// apply the additive-RGB conversion `R=(1-C)(1-K)` etc.
+    Cmyk8,
 }
 
 /// One plane of segment pixels.
@@ -181,14 +191,32 @@ fn classify(vf: &VideoFrame, seg_w: u32, seg_h: u32, photometric: u16) -> Result
     let np = vf.planes.len();
     match np {
         1 => {
-            // Single plane: grayscale, full-resolution.
+            // Single plane: either grayscale (`stride ≈ width`) or
+            // packed CMYK (`stride ≈ width * 4`, photometric must be
+            // CMYK). Pick by stride.
+            let p = &vf.planes[0];
+            let w = seg_w as usize;
+            let h = seg_h as usize;
+            // CMYK detection: oxideav-mjpeg packs 4 components into
+            // one plane with stride == width * 4. The TIFF spec
+            // requires `PhotometricInterpretation = CMYK (5)` for that
+            // layout per TN2 ("PhotometricInterpretation and related
+            // fields shall describe the color space actually stored
+            // in the file").
+            if p.stride >= w.saturating_mul(4) && p.data.len() >= p.stride * h {
+                if photometric != PHOTO_CMYK {
+                    return Err(Error::invalid(format!(
+                        "TIFF/JPEG: 1-plane packed-4 JPEG but photometric={photometric} (expected 5/CMYK)"
+                    )));
+                }
+                return Ok(JpegPixelFormat::Cmyk8);
+            }
             if photometric != PHOTO_BLACK_IS_ZERO && photometric != PHOTO_WHITE_IS_ZERO {
                 return Err(Error::invalid(format!(
                     "TIFF/JPEG: 1-plane JPEG but photometric={photometric} (expected 0 or 1)"
                 )));
             }
-            let p = &vf.planes[0];
-            if p.stride < seg_w as usize || p.data.len() < p.stride * seg_h as usize {
+            if p.stride < w || p.data.len() < p.stride * h {
                 return Err(Error::invalid(format!(
                     "TIFF/JPEG: gray plane too small: stride={} data={} expected w={seg_w} h={seg_h}",
                     p.stride,
@@ -307,6 +335,11 @@ fn plane_dims(pf: JpegPixelFormat, seg_w: u32, seg_h: u32, i: usize) -> (u32, u3
         JpegPixelFormat::Yuv422P => (seg_w.div_ceil(2), seg_h),
         JpegPixelFormat::Yuv420P => (seg_w.div_ceil(2), seg_h.div_ceil(2)),
         JpegPixelFormat::Yuv411P => (seg_w.div_ceil(4), seg_h),
+        // CMYK is a single packed plane; we never index by component
+        // index > 0 for this layout (the compositor walks the packed
+        // bytes directly), so the dims are reported as the segment
+        // dims for completeness.
+        JpegPixelFormat::Cmyk8 => (seg_w, seg_h),
     }
 }
 
@@ -334,6 +367,7 @@ pub fn composite_yuv_to_rgb(
     let (sh, sv) = match seg.pixel_format {
         JpegPixelFormat::Gray8 => return Err(Error::invalid("composite_yuv_to_rgb on Gray8")),
         JpegPixelFormat::Rgb24 => return Err(Error::invalid("composite_yuv_to_rgb on Rgb24")),
+        JpegPixelFormat::Cmyk8 => return Err(Error::invalid("composite_yuv_to_rgb on Cmyk8")),
         JpegPixelFormat::Yuv444P => (1u32, 1u32),
         JpegPixelFormat::Yuv422P => (2, 1),
         JpegPixelFormat::Yuv420P => (2, 2),
@@ -427,6 +461,59 @@ pub fn composite_rgb_planar(
     Ok(())
 }
 
+/// Composite a packed-CMYK JPEG segment into an `Rgb24` destination.
+///
+/// The single segment plane is the `C M Y K` byte stream produced by
+/// `oxideav-mjpeg` for a 4-component JPEG. The conversion is the same
+/// additive-RGB formula the uncompressed CMYK path
+/// (`build_rgb24_from_cmyk` in `decoder.rs`) uses, matching TIFF 6.0
+/// §16 (`InkSet = 1`) and what `tiffinfo` / `magick` reference
+/// rendering produces:
+///
+/// * `R = (255 − C) × (255 − K) / 255`
+/// * `G = (255 − M) × (255 − K) / 255`
+/// * `B = (255 − Y) × (255 − K) / 255`
+///
+/// (Per the spec, stored CMYK values are the *amount of dye*: larger
+/// = darker. mjpeg has already consumed any Adobe APP14 transform
+/// marker and emits "regular" CMYK where `0 = no ink`, so no further
+/// per-sample inversion is needed here.)
+pub fn composite_cmyk_to_rgb(
+    seg: &JpegSegment,
+    visible_w: u32,
+    visible_h: u32,
+    dst: &mut [u8],
+    dst_row_stride: usize,
+    dst_x: u32,
+    dst_y: u32,
+) -> Result<()> {
+    if seg.pixel_format != JpegPixelFormat::Cmyk8 {
+        return Err(Error::invalid(
+            "composite_cmyk_to_rgb called with non-Cmyk8 segment",
+        ));
+    }
+    let p = &seg.planes[0];
+    for y in 0..visible_h as usize {
+        let dy = dst_y as usize + y;
+        let src_off = y * p.stride;
+        for x in 0..visible_w as usize {
+            let s = src_off + x * 4;
+            let c = p.data[s] as u32;
+            let m = p.data[s + 1] as u32;
+            let yy = p.data[s + 2] as u32;
+            let k = p.data[s + 3] as u32;
+            let r = ((255 - c) * (255 - k) / 255) as u8;
+            let g = ((255 - m) * (255 - k) / 255) as u8;
+            let b = ((255 - yy) * (255 - k) / 255) as u8;
+            let off = dy * dst_row_stride + (dst_x as usize + x) * 3;
+            dst[off] = r;
+            dst[off + 1] = g;
+            dst[off + 2] = b;
+        }
+    }
+    Ok(())
+}
+
 fn ycbcr_to_rgb(y: i32, cb: i32, cr: i32) -> (u8, u8, u8) {
     let cb = cb - 128;
     let cr = cr - 128;
@@ -507,5 +594,86 @@ mod tests {
         // Mostly a smoke test that the enum compiles + Eq is wired.
         assert_ne!(JpegPixelFormat::Gray8, JpegPixelFormat::Yuv420P);
         assert_ne!(JpegPixelFormat::Yuv422P, JpegPixelFormat::Yuv444P);
+        assert_ne!(JpegPixelFormat::Cmyk8, JpegPixelFormat::Gray8);
+        assert_ne!(JpegPixelFormat::Cmyk8, JpegPixelFormat::Rgb24);
+    }
+
+    /// `composite_cmyk_to_rgb` should apply the additive-RGB inverse
+    /// of `R = (1-C)(1-K)`, etc., so:
+    ///
+    /// - (C=0, M=0, Y=0, K=0)     → (255, 255, 255)  pure white
+    /// - (C=255, M=0, Y=0, K=0)   → (  0, 255, 255)  pure cyan
+    /// - (C=0, M=255, Y=0, K=0)   → (255,   0, 255)  pure magenta
+    /// - (C=0, M=0, Y=255, K=0)   → (255, 255,   0)  pure yellow
+    /// - (C=0, M=0, Y=0, K=255)   → (  0,   0,   0)  pure black
+    /// - (C=128, M=128, Y=128, K=128) → mid-gray-ish
+    ///
+    /// Tests both interior and edge pixels; checks the segment stride
+    /// path is honoured (stride > width*4).
+    #[test]
+    fn composite_cmyk_to_rgb_known_values() {
+        // 4×1 segment with one of each spec pixel.
+        let plane_w = 4u32;
+        let plane_h = 1u32;
+        let stride = plane_w as usize * 4 + 3; // extra padding to exercise stride
+        let mut data = vec![0xAAu8; stride * plane_h as usize];
+        // pixel 0: white
+        data[0] = 0;
+        data[1] = 0;
+        data[2] = 0;
+        data[3] = 0;
+        // pixel 1: cyan
+        data[4] = 255;
+        data[5] = 0;
+        data[6] = 0;
+        data[7] = 0;
+        // pixel 2: yellow
+        data[8] = 0;
+        data[9] = 0;
+        data[10] = 255;
+        data[11] = 0;
+        // pixel 3: pure-K black
+        data[12] = 0;
+        data[13] = 0;
+        data[14] = 0;
+        data[15] = 255;
+
+        let seg = JpegSegment {
+            width: plane_w,
+            height: plane_h,
+            planes: vec![Plane {
+                stride,
+                width: plane_w,
+                height: plane_h,
+                data,
+            }],
+            pixel_format: JpegPixelFormat::Cmyk8,
+        };
+        let dst_stride = plane_w as usize * 3;
+        let mut dst = vec![0u8; dst_stride * plane_h as usize];
+        composite_cmyk_to_rgb(&seg, plane_w, plane_h, &mut dst, dst_stride, 0, 0).unwrap();
+        assert_eq!(&dst[0..3], &[255, 255, 255], "white pixel");
+        assert_eq!(&dst[3..6], &[0, 255, 255], "cyan pixel");
+        assert_eq!(&dst[6..9], &[255, 255, 0], "yellow pixel");
+        assert_eq!(&dst[9..12], &[0, 0, 0], "pure-K black pixel");
+    }
+
+    /// CMYK composite to a non-Cmyk segment must error.
+    #[test]
+    fn composite_cmyk_rejects_non_cmyk_segment() {
+        let seg = JpegSegment {
+            width: 1,
+            height: 1,
+            planes: vec![Plane {
+                stride: 1,
+                width: 1,
+                height: 1,
+                data: vec![0u8],
+            }],
+            pixel_format: JpegPixelFormat::Gray8,
+        };
+        let mut dst = vec![0u8; 3];
+        let r = composite_cmyk_to_rgb(&seg, 1, 1, &mut dst, 3, 0, 0);
+        assert!(r.is_err());
     }
 }

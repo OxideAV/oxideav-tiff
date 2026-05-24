@@ -1493,11 +1493,14 @@ fn decode_ifd_jpeg(
         (PHOTO_BLACK_IS_ZERO, 1) | (PHOTO_WHITE_IS_ZERO, 1) => 1,
         (PHOTO_RGB, 3) => 3,
         (PHOTO_YCBCR, 3) => 3,
-        (PHOTO_CMYK, 4) => {
-            return Err(Error::Unsupported(
-                "TIFF/JPEG: CMYK (4-component) JPEG decode not yet wired up".into(),
-            ));
-        }
+        // CMYK JPEG-in-TIFF: mjpeg packs the 4 components into one
+        // plane (stride = width × 4) and consumes any Adobe APP14
+        // marker before handing the bytes back. Per TN2: "A
+        // JPEG-compressed TIFF file will typically have
+        // PhotometricInterpretation = YCbCr ... unless the source
+        // data was grayscale or CMYK" — CMYK is an explicitly
+        // permitted photometric for Compression=7.
+        (PHOTO_CMYK, 4) => 1,
         (p, s) => {
             return Err(Error::invalid(format!(
                 "TIFF/JPEG: photometric={p} samples_per_pixel={s} not supported"
@@ -1514,14 +1517,17 @@ fn decode_ifd_jpeg(
     // Set up the destination buffer in the *final* output format the
     // crate emits for this photometric. Currently:
     //   - PHOTO_BLACK_IS_ZERO / WHITE_IS_ZERO  →  Gray8
-    //   - PHOTO_RGB / PHOTO_YCBCR              →  Rgb24
+    //   - PHOTO_RGB / PHOTO_YCBCR / PHOTO_CMYK →  Rgb24
+    //   (CMYK is collapsed to Rgb24 by the same additive-RGB
+    //    conversion the uncompressed CMYK path uses — see
+    //    `build_rgb24_from_cmyk` / `composite_cmyk_to_rgb`.)
     let (pixel_format, dst_row_stride, dst_size) = match photometric {
         PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO => (
             TiffPixelFormat::Gray8,
             width as usize,
             width as usize * height as usize,
         ),
-        PHOTO_RGB | PHOTO_YCBCR => (
+        PHOTO_RGB | PHOTO_YCBCR | PHOTO_CMYK => (
             TiffPixelFormat::Rgb24,
             width as usize * 3,
             width as usize * 3 * height as usize,
@@ -1748,7 +1754,8 @@ fn composite_segment(
     photometric: u16,
 ) -> Result<()> {
     use crate::jpeg::{
-        composite_gray, composite_rgb_planar, composite_yuv_to_rgb, JpegPixelFormat,
+        composite_cmyk_to_rgb, composite_gray, composite_rgb_planar, composite_yuv_to_rgb,
+        JpegPixelFormat,
     };
     match seg.pixel_format {
         JpegPixelFormat::Gray8 => composite_gray(
@@ -1788,6 +1795,14 @@ fn composite_segment(
                 )));
             }
             composite_rgb_planar(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+        }
+        JpegPixelFormat::Cmyk8 => {
+            if photometric != PHOTO_CMYK {
+                return Err(Error::invalid(format!(
+                    "TIFF/JPEG: CMYK-output JPEG but TIFF photometric={photometric}"
+                )));
+            }
+            composite_cmyk_to_rgb(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
         }
     }
 }

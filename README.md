@@ -26,6 +26,7 @@ source was consulted.
 | YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **JPEG-in-TIFF** (Compression=7) | `Rgb24`      |
 | RGB (3 chan)   | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
 | BlackIsZero / WhiteIsZero | 8   | **JPEG-in-TIFF** (Compression=7)   | `Gray8`      |
+| CMYK (4 chan)  | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
 
 `Predictor = 1` (no prediction) and `Predictor = 2` (horizontal
 differencing, per-component for `SamplesPerPixel > 1`) are both
@@ -72,13 +73,21 @@ Supported photometric / sampling combinations:
   composited to `Rgb24` via the BT.601 matrix matching TN2's default
   `ReferenceBlackWhite = [0,255,128,255,128,255]`. This is the layout
   `tiffcp -c jpeg` produces.
+* `PhotometricInterpretation = 5` (CMYK) with `SamplesPerPixel = 4`:
+  4-component JPEG datastream — `oxideav-mjpeg` reads any optional
+  Adobe APP14 marker inside the segment to select the per-sample
+  inversion (plain CMYK / Adobe-inverted CMYK / YCCK) and hands back
+  packed `C M Y K` bytes (`0 = no ink`). The TIFF compositor then
+  converts to `Rgb24` using the same additive-RGB formula the
+  uncompressed CMYK path uses (`R = (255 − C) × (255 − K) / 255`,
+  etc., TIFF 6.0 §16 `InkSet = 1`). This is the layout
+  `convert -colorspace CMYK -compress jpeg` produces.
 
 Out of scope in this round (return precise `Error::Unsupported`):
-12-bit (SOF1 with `P = 12`), arithmetic (SOF9 / SOF11), CMYK
-(`PhotometricInterpretation = 5`), `PlanarConfiguration = 2`
-(`Compression = 7` only; the non-JPEG compressors do accept planar
-layout — see above), and the deprecated TIFF 6.0 §22 "old-style"
-JPEG (`Compression = 6`).
+12-bit (SOF1 with `P = 12`), arithmetic (SOF9 / SOF11),
+`PlanarConfiguration = 2` (`Compression = 7` only; the non-JPEG
+compressors do accept planar layout — see above), and the
+deprecated TIFF 6.0 §22 "old-style" JPEG (`Compression = 6`).
 JPEG-in-TIFF requires the default-on `registry` Cargo feature; with
 `default-features = false` the JPEG path returns
 `Error::Unsupported`.
@@ -202,9 +211,10 @@ checking the resulting pixels match the original input.
   `docs/image/tiff/` first.
 - JPEG-in-TIFF Compression = 6 (old-style, deprecated by TIFF Tech
   Note 2; decoder returns precise `Error::Unsupported`).
-  Compression = 7 (new-style) **decodes** as of this round; 12-bit
-  precision (SOF1 with `P = 12`), arithmetic coding (SOF9 / SOF11),
-  CMYK JPEG, and `PlanarConfiguration = 2` JPEG remain unsupported.
+  Compression = 7 (new-style) **decodes** as of this round across
+  Gray / RGB / YCbCr / CMYK photometrics; 12-bit precision (SOF1 with
+  `P = 12`), arithmetic coding (SOF9 / SOF11), and
+  `PlanarConfiguration = 2` JPEG remain unsupported.
 - CIELab / Transparency-mask photometric interpretations
 - DNG / GeoTIFF / EXIF blob extraction
 - Encoder-side planar (`PlanarConfiguration = 2`) writing is now
