@@ -138,6 +138,26 @@ Deflate. `tiffcp -c none` transcodes our planar output back to an
 uncompressed TIFF that re-decodes to the original pixels, and
 ImageMagick reads it bit-exactly.
 
+Tiled layout (`TileWidth` / `TileLength` / `TileOffsets` /
+`TileByteCounts`, TIFF 6.0 §15) is available on encode via the
+`EncodePage::tiling` flag (`Some((tile_width, tile_height))`). When set,
+the encoder splits the image into a row-major grid of fixed-size tiles,
+compresses each independently, and writes the tile fields in place of
+the strip fields (§15: the tile fields "replace the StripOffsets,
+StripByteCounts, and RowsPerStrip fields"; "Do not use both
+strip-oriented and tile-oriented fields in the same TIFF file"). Both
+tile dimensions must be a non-zero multiple of 16 per §15's `TileWidth` /
+`TileLength` requirement. Boundary tiles are padded out to the tile
+geometry by replicating the last visible column / row (§15 "Padding"), so
+every tile is the same size before compression; the decoder displays only
+the `ImageWidth × ImageLength` region and ignores the padding. Works for
+the byte-aligned chunky formats (`Gray8` / `Gray16Le` / `Rgb24` /
+`Palette8`) under None / PackBits / LZW / Deflate, with or without
+`Predictor = 2` (applied per-tile). Tiling is rejected on `Bilevel`
+input, the CCITT compressors, and (for now) `planar = true`. `tiffcp -c
+none` transcodes our tiled output back to an uncompressed TIFF that
+re-decodes to the original pixels, and ImageMagick reads it bit-exactly.
+
 Output is classic II little-endian TIFF, single-IFD via
 [`encode_tiff`] or multi-page via [`encode_tiff_multi`]. Files
 roundtrip through ImageMagick / `tiffinfo` / `tiffcp`; CCITT
@@ -147,7 +167,7 @@ checking the resulting pixels match the original input.
 
 ## Backlog (not yet implemented)
 
-- BigTIFF write, tile write
+- BigTIFF write
 - CCITT T.4 2-D coding (`Compression = 3` with `T4Options` bit 0
   set) and T.6 / Group 4 (`Compression = 4`). The 2-D Pass /
   Horizontal / Vertical mode codes are not in the TIFF 6.0 PDF —
@@ -164,8 +184,11 @@ checking the resulting pixels match the original input.
 - Encoder-side planar (`PlanarConfiguration = 2`) writing is now
   supported for `Rgb24` under None / PackBits / LZW / Deflate (with or
   without `Predictor = 2`); decode covers the same plus tiles and
-  CCITT. The remaining gap is planar write for tiled output and for
-  the not-yet-encodable photometrics (CMYK / YCbCr)
+  CCITT. Tiled write (chunky, §15) now covers `Gray8` / `Gray16Le` /
+  `Rgb24` / `Palette8` under None / PackBits / LZW / Deflate with the
+  optional `Predictor = 2`. The remaining gaps are tiled planar write
+  (one tile grid per component plane) and planar / tiled write for the
+  not-yet-encodable photometrics (CMYK / YCbCr)
 
 ## Registration
 

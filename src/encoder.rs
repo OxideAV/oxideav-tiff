@@ -71,6 +71,28 @@ pub struct EncodePage<'a> {
     /// same as it does for grayscale data," so each plane is differenced
     /// independently with an offset of 1 sample.
     pub planar: bool,
+    /// Write the image in tiled layout (TIFF 6.0 §15) instead of a
+    /// single strip. `Some((tile_width, tile_height))` divides the image
+    /// into a grid of fixed-size tiles, each compressed independently,
+    /// and writes the `TileWidth` / `TileLength` / `TileOffsets` /
+    /// `TileByteCounts` fields (tags 322 / 323 / 324 / 325) in place of
+    /// the strip fields (§15: "When the tiling fields ... are used, they
+    /// replace the StripOffsets, StripByteCounts, and RowsPerStrip
+    /// fields ... Do not use both strip-oriented and tile-oriented
+    /// fields in the same TIFF file"). Both dimensions must be a multiple
+    /// of 16 per §15's `TileWidth` / `TileLength` requirement. Boundary
+    /// tiles are padded out to the tile geometry (§15 "Padding":
+    /// replicating the last column / row so the padded areas compress
+    /// well); the decoder displays only the `ImageWidth x ImageLength`
+    /// region and ignores the padding. Tiles are laid out left-to-right
+    /// then top-to-bottom (§15 `TileOffsets`). Supported on the
+    /// byte-aligned chunky formats (`Gray8` / `Gray16Le` / `Rgb24` /
+    /// `Palette8`) under None / PackBits / LZW / Deflate, with or without
+    /// the §14 predictor (applied per-tile, matching the decoder). Tiling
+    /// is rejected on `Bilevel` (sub-byte tile slicing is not implemented
+    /// on either side) and on CCITT compression. It does not currently
+    /// compose with `planar = true` (planar tile write is a follow-up).
+    pub tiling: Option<(u32, u32)>,
 }
 
 /// Pixel layouts the encoder knows how to write.
@@ -170,14 +192,15 @@ impl TiffCompression {
     }
 }
 
-/// One planned page with its compressed strip(s), IFD, and any external
-/// blobs (BitsPerSample / ColorMap arrays that don't fit inline).
-///
-/// `strips` holds one entry for chunky pages and `SamplesPerPixel`
-/// entries (one per component plane) for `PlanarConfiguration = 2`
-/// pages, in plane order (component 0 first). The on-disk
-/// `StripOffsets` / `StripByteCounts` arrays index into this list in
-/// the same order.
+/// One planned page's compressed image segments plus its IFD and any
+/// out-of-line value blobs. `strips` is the segment payload list — one
+/// entry for a chunky single-strip page, `SamplesPerPixel` entries for
+/// `PlanarConfiguration = 2`, or one entry per tile (row-major) for a
+/// tiled page (TIFF 6.0 §15). The on-disk offset / byte-count arrays
+/// (`StripOffsets` / `StripByteCounts` or `TileOffsets` /
+/// `TileByteCounts`, depending on which tags the IFD carries) index
+/// into this list in storage order, so the address-assignment pass is
+/// identical for strips and tiles.
 struct PlannedPage {
     strips: Vec<Vec<u8>>,
     ifd: PageIfd,
@@ -459,6 +482,42 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
     // CCITT schemes are bilevel-only (rejected above) so they never
     // reach the planar path; the predictor is handled per-plane below.
 
+    // Tiled layout (TIFF 6.0 §15). Validate the geometry up front.
+    if let Some((tw, th)) = p.tiling {
+        // §15 TileWidth / TileLength: "TileWidth must be a multiple of
+        // 16 … TileLength must be a multiple of 16 for compatibility
+        // with compression schemes such as JPEG."
+        if tw == 0 || th == 0 || tw % 16 != 0 || th % 16 != 0 {
+            return Err(Error::invalid(format!(
+                "TIFF encode: tile dimensions must be non-zero multiples of 16 \
+                 (TIFF 6.0 §15 TileWidth / TileLength); got {tw}x{th}"
+            )));
+        }
+        // Bilevel tiles need sub-byte tile-row slicing the decoder
+        // rejects, and the CCITT coders are bilevel-only, so tiling is
+        // restricted to the byte-aligned chunky formats.
+        if matches!(p.kind, EncodePixelFormat::Bilevel { .. }) {
+            return Err(Error::invalid(
+                "TIFF encode: tiled layout (TIFF 6.0 §15) is not supported for Bilevel \
+                 (1-bit) input — sub-byte tile slicing is unimplemented on both sides",
+            ));
+        }
+        if p.compression.is_ccitt() {
+            return Err(Error::invalid(
+                "TIFF encode: tiled layout cannot combine with CCITT compression \
+                 (Compression=2/3), which is bilevel-only",
+            ));
+        }
+        // Planar tile write (one tile grid per component plane) is a
+        // separate follow-up; chunky tiling only for now.
+        if p.planar {
+            return Err(Error::invalid(
+                "TIFF encode: tiled PlanarConfiguration=2 output is not yet supported; \
+                 use chunky tiling (planar = false) or strip-based planar output",
+            ));
+        }
+    }
+
     // The §14 horizontal-differencing predictor operates on whole
     // sample components; it has no meaning for bit-packed bilevel data,
     // and §14 only defines it for the LZW-family lossless coders. Reject
@@ -568,12 +627,35 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
             }
         };
 
-    // Build the page's compressed strip(s). Chunky pages are a single
-    // strip over the interleaved data; PlanarConfiguration=2 pages emit
-    // one strip per component plane (full image height), in plane order
-    // (component 0 first), matching the decoder's planar walker.
+    // Build the page's compressed image segments. Chunky pages are a
+    // single strip over the interleaved data; PlanarConfiguration=2
+    // pages emit one strip per component plane (full image height), in
+    // plane order (component 0 first), matching the decoder's planar
+    // walker; tiled pages emit one segment per tile (row-major, TIFF 6.0
+    // §15), each independently compressed.
     let bps = bits_per_sample[0] as usize;
-    let strips: Vec<Vec<u8>> = if p.planar {
+    let strips: Vec<Vec<u8>> = if let Some((tile_w, tile_h)) = p.tiling {
+        // Tiled layout (TIFF 6.0 §15), chunky only (validated above).
+        // Split the interleaved chunky raster into a row-major grid of
+        // tile_w x tile_h tiles, padding boundary tiles by replicating
+        // the last visible column / row (§15 "Padding": "Some
+        // compression schemes work best if the padding is accomplished
+        // by replicating the last column and last row"). Each tile is
+        // differenced (when the predictor is on) and compressed
+        // independently — §15: "Tiles are compressed individually, just
+        // as strips are compressed."
+        build_tiles(
+            &raw_pixels,
+            p.width as usize,
+            p.height as usize,
+            tile_w as usize,
+            tile_h as usize,
+            samples_per_pixel as usize,
+            bps,
+            p.predictor,
+            p.compression,
+        )?
+    } else if p.planar {
         // De-interleave chunky RGBRGB… into separate R / G / B planes
         // (TIFF 6.0 §"PlanarConfiguration": "Red components in one
         // component plane, the Green in another, and the Blue in
@@ -698,14 +780,20 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
         count: 1,
         value: IfdValue::Inline(photometric.to_le_bytes().to_vec()),
     });
-    // 273 StripOffsets (LONG). count=1 for chunky (one strip), or
-    // SamplesPerPixel for PlanarConfiguration=2 (one strip per plane).
-    entries.push(PageIfdEntry {
-        tag: TAG_STRIP_OFFSETS,
-        field_type: TYPE_LONG,
-        count: strip_count,
-        value: IfdValue::StripOffsets,
-    });
+    // 273 StripOffsets (LONG). Omitted entirely for tiled pages — §15:
+    // "When the tiling fields … are used, they replace the StripOffsets,
+    // StripByteCounts, and RowsPerStrip fields … Do not use both
+    // strip-oriented and tile-oriented fields in the same TIFF file."
+    // count=1 for chunky (one strip), or SamplesPerPixel for
+    // PlanarConfiguration=2 (one strip per plane).
+    if p.tiling.is_none() {
+        entries.push(PageIfdEntry {
+            tag: TAG_STRIP_OFFSETS,
+            field_type: TYPE_LONG,
+            count: strip_count,
+            value: IfdValue::StripOffsets,
+        });
+    }
     // 277 SamplesPerPixel (SHORT)
     entries.push(PageIfdEntry {
         tag: TAG_SAMPLES_PER_PIXEL,
@@ -713,20 +801,26 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
         count: 1,
         value: IfdValue::Inline(samples_per_pixel.to_le_bytes().to_vec()),
     });
-    // 278 RowsPerStrip (LONG)
-    entries.push(PageIfdEntry {
-        tag: TAG_ROWS_PER_STRIP,
-        field_type: TYPE_LONG,
-        count: 1,
-        value: IfdValue::Inline(p.height.to_le_bytes().to_vec()),
-    });
-    // 279 StripByteCounts (LONG). count matches StripOffsets.
-    entries.push(PageIfdEntry {
-        tag: TAG_STRIP_BYTE_COUNTS,
-        field_type: TYPE_LONG,
-        count: strip_count,
-        value: IfdValue::StripByteCounts,
-    });
+    // 278 RowsPerStrip (LONG). Omitted for tiled pages (§15: TileLength
+    // "Replaces RowsPerStrip in tiled TIFF files").
+    if p.tiling.is_none() {
+        entries.push(PageIfdEntry {
+            tag: TAG_ROWS_PER_STRIP,
+            field_type: TYPE_LONG,
+            count: 1,
+            value: IfdValue::Inline(p.height.to_le_bytes().to_vec()),
+        });
+    }
+    // 279 StripByteCounts (LONG). count matches StripOffsets. Omitted
+    // for tiled pages (replaced by TileByteCounts).
+    if p.tiling.is_none() {
+        entries.push(PageIfdEntry {
+            tag: TAG_STRIP_BYTE_COUNTS,
+            field_type: TYPE_LONG,
+            count: strip_count,
+            value: IfdValue::StripByteCounts,
+        });
+    }
     // 284 PlanarConfiguration (SHORT) — 1 (chunky) or 2 (separate
     // planes) per the page's `planar` flag.
     entries.push(PageIfdEntry {
@@ -774,10 +868,47 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
             value: IfdValue::ExternalBlob(BlobId::ColorMapWords),
         });
     }
+    // 322/323/324/325 Tile fields (TIFF 6.0 §15) — only for tiled pages.
+    // These come after ColorMap (320) in ascending tag order. TileWidth
+    // / TileLength carry the grid geometry; TileOffsets / TileByteCounts
+    // index the per-tile payloads in `strips` (row-major), reusing the
+    // same out-of-line LONG-array machinery the strip arrays use when
+    // count > 1.
+    if let Some((tile_w, tile_h)) = p.tiling {
+        // 322 TileWidth (LONG)
+        entries.push(PageIfdEntry {
+            tag: TAG_TILE_WIDTH,
+            field_type: TYPE_LONG,
+            count: 1,
+            value: IfdValue::Inline(tile_w.to_le_bytes().to_vec()),
+        });
+        // 323 TileLength (LONG)
+        entries.push(PageIfdEntry {
+            tag: TAG_TILE_LENGTH,
+            field_type: TYPE_LONG,
+            count: 1,
+            value: IfdValue::Inline(tile_h.to_le_bytes().to_vec()),
+        });
+        // 324 TileOffsets (LONG, N = TilesPerImage for chunky).
+        entries.push(PageIfdEntry {
+            tag: TAG_TILE_OFFSETS,
+            field_type: TYPE_LONG,
+            count: strip_count,
+            value: IfdValue::StripOffsets,
+        });
+        // 325 TileByteCounts (LONG, N = TilesPerImage for chunky).
+        entries.push(PageIfdEntry {
+            tag: TAG_TILE_BYTE_COUNTS,
+            field_type: TYPE_LONG,
+            count: strip_count,
+            value: IfdValue::StripByteCounts,
+        });
+    }
 
     // Spec: entries must be in ascending tag order. The pushes
-    // above are already sorted (254/256/257/258/259/262/273/277/
-    // 278/279/284/292?/317?/320?), but assert defensively.
+    // above are already sorted (254/256/257/258/259/262/273?/277/
+    // 278?/279?/284/292?/317?/320?/322?/323?/324?/325?), but assert
+    // defensively.
     debug_assert!(entries.windows(2).all(|w| w[0].tag <= w[1].tag));
 
     Ok(PlannedPage {
@@ -785,6 +916,91 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
         ifd: PageIfd { entries },
         externals,
     })
+}
+
+/// Split a chunky raster into a row-major grid of `tile_w x tile_h`
+/// tiles, padding boundary tiles by replicating the last visible
+/// column / row, then (optionally) difference and compress each tile
+/// independently. Returns one compressed payload per tile, ordered
+/// left-to-right then top-to-bottom (TIFF 6.0 §15 `TileOffsets`).
+///
+/// §15 "Padding": "Boundary tiles are padded to the tile boundaries …
+/// It doesn't matter what value is used for padding, because good TIFF
+/// readers display only the pixels defined by ImageWidth and
+/// ImageLength and ignore any padded pixels. Some compression schemes
+/// work best if the padding is accomplished by replicating the last
+/// column and last row instead of padding with 0's." We replicate the
+/// edge samples so the compressed boundary tiles stay small. §15:
+/// "Compression includes any padded areas of the rightmost and bottom
+/// tiles so that all the tiles in an image are the same size when
+/// uncompressed" — every tile is exactly `tile_w x tile_h` before
+/// compression.
+///
+/// `pixels` is the interleaved chunky raster (`samples` components per
+/// pixel, `bps` bits each — only 8 / 16 reach here). The predictor,
+/// when on, is applied per-tile with an offset of `samples`, matching
+/// the decoder's per-tile `apply_horizontal_predictor`.
+#[allow(clippy::too_many_arguments)]
+fn build_tiles(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    tile_w: usize,
+    tile_h: usize,
+    samples: usize,
+    bps: usize,
+    predictor: bool,
+    compression: TiffCompression,
+) -> Result<Vec<Vec<u8>>> {
+    let bytes_per_sample = bps / 8;
+    let pixel_bytes = samples * bytes_per_sample;
+    let image_row_bytes = width * pixel_bytes;
+    let tile_row_bytes = tile_w * pixel_bytes;
+    let tile_size_bytes = tile_row_bytes * tile_h;
+
+    let tiles_across = width.div_ceil(tile_w);
+    let tiles_down = height.div_ceil(tile_h);
+
+    let mut out = Vec::with_capacity(tiles_across * tiles_down);
+    for ty in 0..tiles_down {
+        for tx in 0..tiles_across {
+            // Extract this tile, replicating the last visible column /
+            // row into the padded region (§15 "Padding").
+            let mut tile = vec![0u8; tile_size_bytes];
+            for r in 0..tile_h {
+                // Source image row, clamped to the last visible row.
+                let src_y = (ty * tile_h + r).min(height - 1);
+                for c in 0..tile_w {
+                    // Source image column, clamped to the last visible
+                    // column.
+                    let src_x = (tx * tile_w + c).min(width - 1);
+                    let src_off = src_y * image_row_bytes + src_x * pixel_bytes;
+                    let dst_off = r * tile_row_bytes + c * pixel_bytes;
+                    tile[dst_off..dst_off + pixel_bytes]
+                        .copy_from_slice(&pixels[src_off..src_off + pixel_bytes]);
+                }
+            }
+            // §14 / §15: each tile is a self-contained image for the
+            // predictor — difference per-tile with the tile's own row
+            // stride so the decoder's per-tile cumulative add reverses
+            // it exactly.
+            if predictor {
+                forward_horizontal_predictor(
+                    &mut tile,
+                    tile_w,
+                    tile_h,
+                    samples,
+                    bps,
+                    tile_row_bytes,
+                )?;
+            }
+            // §15: "Tiles are compressed individually, just as strips
+            // are compressed." Pass the tile geometry through (only the
+            // CCITT coders read it, and tiling rejects CCITT upstream).
+            out.push(compression.pack(&tile, tile_w as u32, tile_h as u32)?);
+        }
+    }
+    Ok(out)
 }
 
 /// Forward horizontal-differencing predictor (TIFF 6.0 §14): replace
@@ -888,6 +1104,7 @@ mod tests {
             compression: TiffCompression::None,
             predictor: false,
             planar: false,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -911,6 +1128,7 @@ mod tests {
             compression: TiffCompression::PackBits,
             predictor: false,
             planar: false,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -928,6 +1146,7 @@ mod tests {
             compression: TiffCompression::Lzw,
             predictor: false,
             planar: false,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -945,6 +1164,7 @@ mod tests {
             compression: TiffCompression::Deflate,
             predictor: false,
             planar: false,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -972,6 +1192,7 @@ mod tests {
             compression: TiffCompression::None,
             predictor: false,
             planar: false,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1043,6 +1264,7 @@ mod tests {
             compression: TiffCompression::None,
             predictor: false,
             planar: false,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1061,6 +1283,7 @@ mod tests {
             compression: TiffCompression::CcittRle,
             predictor: false,
             planar: false,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1081,6 +1304,7 @@ mod tests {
             compression: TiffCompression::CcittRle,
             predictor: false,
             planar: false,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1100,6 +1324,7 @@ mod tests {
             },
             predictor: false,
             planar: false,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1121,6 +1346,7 @@ mod tests {
             },
             predictor: false,
             planar: false,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1140,6 +1366,7 @@ mod tests {
             compression: TiffCompression::CcittRle,
             predictor: false,
             planar: false,
+            tiling: None,
         };
         let r = encode_tiff(&page);
         assert!(r.is_err());
@@ -1157,6 +1384,7 @@ mod tests {
                 compression: TiffCompression::None,
                 predictor: false,
                 planar: false,
+                tiling: None,
             },
             EncodePage {
                 width: 8,
@@ -1165,6 +1393,7 @@ mod tests {
                 compression: TiffCompression::Lzw,
                 predictor: false,
                 planar: false,
+                tiling: None,
             },
         ];
         let bytes = encode_tiff_multi(&pages).unwrap();
@@ -1208,6 +1437,7 @@ mod tests {
             compression: comp,
             predictor: true,
             planar: false,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1339,6 +1569,7 @@ mod tests {
             compression: TiffCompression::Lzw,
             predictor: true,
             planar: false,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1362,6 +1593,7 @@ mod tests {
             compression: TiffCompression::Lzw,
             predictor: true,
             planar: false,
+            tiling: None,
         };
         let b = encode_tiff(&page).unwrap();
         let ifd_off = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
@@ -1387,6 +1619,7 @@ mod tests {
             compression: TiffCompression::Lzw,
             predictor: false,
             planar: false,
+            tiling: None,
         };
         let b2 = encode_tiff(&page2).unwrap();
         let ifd2 = u32::from_le_bytes([b2[4], b2[5], b2[6], b2[7]]) as usize;
@@ -1408,6 +1641,7 @@ mod tests {
             compression: TiffCompression::Lzw,
             predictor: true,
             planar: false,
+            tiling: None,
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -1422,6 +1656,7 @@ mod tests {
             compression: TiffCompression::CcittRle,
             predictor: true,
             planar: false,
+            tiling: None,
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -1455,6 +1690,7 @@ mod tests {
             compression,
             predictor,
             planar: true,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1510,6 +1746,7 @@ mod tests {
             compression: TiffCompression::None,
             predictor: false,
             planar: true,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
 
@@ -1552,6 +1789,7 @@ mod tests {
             compression: TiffCompression::None,
             predictor: false,
             planar: true,
+            tiling: None,
         };
         assert!(encode_tiff(&page).is_err());
 
@@ -1567,6 +1805,7 @@ mod tests {
             compression: TiffCompression::None,
             predictor: false,
             planar: true,
+            tiling: None,
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -1584,6 +1823,7 @@ mod tests {
             compression: TiffCompression::None,
             predictor: false,
             planar: false,
+            tiling: None,
         };
         let bytes = encode_tiff(&page).unwrap();
         let ifd_off = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
@@ -1602,5 +1842,326 @@ mod tests {
                 assert_eq!(cnt, 1);
             }
         }
+    }
+
+    // ---- Tiled layout (TIFF 6.0 §15) ----
+
+    /// Encode `kind` with `tiling` + `comp` (+ optional predictor),
+    /// decode through our own tile-reading path, return the decoded
+    /// first plane.
+    fn tile_roundtrip(
+        width: u32,
+        height: u32,
+        kind: EncodePixelFormat<'_>,
+        comp: TiffCompression,
+        tiling: (u32, u32),
+        predictor: bool,
+    ) -> Vec<u8> {
+        let page = EncodePage {
+            width,
+            height,
+            kind,
+            compression: comp,
+            predictor,
+            planar: false,
+            tiling: Some(tiling),
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        assert_eq!((d.width, d.height), (width, height));
+        d.frame.planes[0].data.clone()
+    }
+
+    #[test]
+    fn encode_gray8_tiled_single_tile_roundtrip() {
+        // Image exactly one tile (16x16) — single-tile grid keeps the
+        // TileOffsets / TileByteCounts arrays inline (count = 1).
+        let pixels = ramp_gray8(16, 16);
+        let out = tile_roundtrip(
+            16,
+            16,
+            EncodePixelFormat::Gray8 { pixels: &pixels },
+            TiffCompression::None,
+            (16, 16),
+            false,
+        );
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn encode_gray8_tiled_grid_roundtrip() {
+        // 48x32 image with 16x16 tiles => 3x2 = 6 tiles, exact fit.
+        let pixels = ramp_gray8(48, 32);
+        for comp in [
+            TiffCompression::None,
+            TiffCompression::PackBits,
+            TiffCompression::Lzw,
+            TiffCompression::Deflate,
+        ] {
+            let out = tile_roundtrip(
+                48,
+                32,
+                EncodePixelFormat::Gray8 { pixels: &pixels },
+                comp,
+                (16, 16),
+                false,
+            );
+            assert_eq!(out, pixels, "compression {comp:?}");
+        }
+    }
+
+    #[test]
+    fn encode_gray8_tiled_edge_padding_roundtrip() {
+        // 40x20 image with 16x16 tiles => 3x2 grid, right column and
+        // bottom row are partial (40 = 2*16 + 8, 20 = 16 + 4). The
+        // padded boundary samples must be ignored on decode, so the
+        // visible region round-trips exactly.
+        let pixels = ramp_gray8(40, 20);
+        let out = tile_roundtrip(
+            40,
+            20,
+            EncodePixelFormat::Gray8 { pixels: &pixels },
+            TiffCompression::Lzw,
+            (16, 16),
+            false,
+        );
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn encode_gray16_tiled_roundtrip() {
+        let pixels = pattern_gray16(48, 32);
+        let out = tile_roundtrip(
+            48,
+            32,
+            EncodePixelFormat::Gray16Le { pixels: &pixels },
+            TiffCompression::Deflate,
+            (16, 16),
+            false,
+        );
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn encode_rgb24_tiled_roundtrip() {
+        // Non-square tile (32 wide, 16 tall) with edge padding on both
+        // axes: 50x30 => 2x2 grid with partial right/bottom tiles.
+        let pixels = pattern_rgb(50, 30);
+        for comp in [
+            TiffCompression::None,
+            TiffCompression::PackBits,
+            TiffCompression::Lzw,
+            TiffCompression::Deflate,
+        ] {
+            let out = tile_roundtrip(
+                50,
+                30,
+                EncodePixelFormat::Rgb24 { pixels: &pixels },
+                comp,
+                (32, 16),
+                false,
+            );
+            assert_eq!(out, pixels, "compression {comp:?}");
+        }
+    }
+
+    #[test]
+    fn encode_rgb24_tiled_predictor_roundtrip() {
+        // §14 predictor applied per-tile must reverse exactly through
+        // the decoder's per-tile cumulative add, including across the
+        // padded boundary tiles.
+        let pixels = pattern_rgb(48, 32);
+        let out = tile_roundtrip(
+            48,
+            32,
+            EncodePixelFormat::Rgb24 { pixels: &pixels },
+            TiffCompression::Lzw,
+            (16, 16),
+            true,
+        );
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn encode_gray8_tiled_predictor_edge_roundtrip() {
+        // Predictor + edge padding on a single-component image.
+        let pixels = ramp_gray8(40, 20);
+        let out = tile_roundtrip(
+            40,
+            20,
+            EncodePixelFormat::Gray8 { pixels: &pixels },
+            TiffCompression::Deflate,
+            (16, 16),
+            true,
+        );
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn encode_palette_tiled_roundtrip() {
+        let palette = vec![[0, 0, 0], [255, 0, 0], [0, 255, 0], [255, 255, 255]];
+        let mut indices = Vec::with_capacity(40 * 20);
+        for y in 0..20u32 {
+            for x in 0..40u32 {
+                indices.push(((x + y) & 0x3) as u8);
+            }
+        }
+        let page = EncodePage {
+            width: 40,
+            height: 20,
+            kind: EncodePixelFormat::Palette8 {
+                indices: &indices,
+                palette: &palette,
+            },
+            compression: TiffCompression::Lzw,
+            predictor: false,
+            planar: false,
+            tiling: Some((16, 16)),
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        let mut want = Vec::with_capacity(40 * 20 * 3);
+        for &idx in &indices {
+            want.extend_from_slice(&palette[idx as usize]);
+        }
+        assert_eq!(d.frame.planes[0].data, want);
+    }
+
+    #[test]
+    fn encode_tiled_emits_tile_tags_not_strip_tags() {
+        // A tiled IFD must carry TileWidth/TileLength/TileOffsets/
+        // TileByteCounts and NOT StripOffsets/RowsPerStrip/
+        // StripByteCounts (§15: the tile fields "replace" the strip
+        // fields; "Do not use both … in the same TIFF file").
+        let pixels = ramp_gray8(48, 32);
+        let page = EncodePage {
+            width: 48,
+            height: 32,
+            kind: EncodePixelFormat::Gray8 { pixels: &pixels },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+            tiling: Some((16, 16)),
+        };
+        let b = encode_tiff(&page).unwrap();
+        let ifd_off = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
+        let count = u16::from_le_bytes([b[ifd_off], b[ifd_off + 1]]) as usize;
+        let mut seen = std::collections::HashMap::new();
+        for k in 0..count {
+            let e = ifd_off + 2 + k * 12;
+            let tag = u16::from_le_bytes([b[e], b[e + 1]]);
+            let cnt = u32::from_le_bytes([b[e + 4], b[e + 5], b[e + 6], b[e + 7]]);
+            seen.insert(tag, cnt);
+        }
+        // No strip tags.
+        assert!(!seen.contains_key(&TAG_STRIP_OFFSETS));
+        assert!(!seen.contains_key(&TAG_STRIP_BYTE_COUNTS));
+        assert!(!seen.contains_key(&TAG_ROWS_PER_STRIP));
+        // Tile tags present; TilesPerImage = 3*2 = 6.
+        assert!(seen.contains_key(&TAG_TILE_WIDTH));
+        assert!(seen.contains_key(&TAG_TILE_LENGTH));
+        assert_eq!(seen.get(&TAG_TILE_OFFSETS), Some(&6));
+        assert_eq!(seen.get(&TAG_TILE_BYTE_COUNTS), Some(&6));
+        // Ascending tag order across the whole IFD.
+        let mut prev = 0u16;
+        for k in 0..count {
+            let e = ifd_off + 2 + k * 12;
+            let tag = u16::from_le_bytes([b[e], b[e + 1]]);
+            assert!(tag > prev, "tag {tag} not after {prev}");
+            prev = tag;
+        }
+    }
+
+    #[test]
+    fn encode_tiling_rejects_non_multiple_of_16() {
+        let pixels = ramp_gray8(32, 32);
+        let page = EncodePage {
+            width: 32,
+            height: 32,
+            kind: EncodePixelFormat::Gray8 { pixels: &pixels },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+            tiling: Some((20, 16)),
+        };
+        assert!(encode_tiff(&page).is_err());
+    }
+
+    #[test]
+    fn encode_tiling_rejects_bilevel() {
+        let packed = bilevel_checkerboard(32, 16);
+        let page = EncodePage {
+            width: 32,
+            height: 16,
+            kind: EncodePixelFormat::Bilevel { pixels: &packed },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+            tiling: Some((16, 16)),
+        };
+        assert!(encode_tiff(&page).is_err());
+    }
+
+    #[test]
+    fn encode_tiling_rejects_ccitt() {
+        let packed = bilevel_checkerboard(32, 16);
+        let page = EncodePage {
+            width: 32,
+            height: 16,
+            kind: EncodePixelFormat::Bilevel { pixels: &packed },
+            compression: TiffCompression::CcittRle,
+            predictor: false,
+            planar: false,
+            tiling: Some((16, 16)),
+        };
+        assert!(encode_tiff(&page).is_err());
+    }
+
+    #[test]
+    fn encode_tiling_rejects_planar() {
+        let pixels = pattern_rgb(32, 32);
+        let page = EncodePage {
+            width: 32,
+            height: 32,
+            kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+            compression: TiffCompression::Lzw,
+            predictor: false,
+            planar: true,
+            tiling: Some((16, 16)),
+        };
+        assert!(encode_tiff(&page).is_err());
+    }
+
+    #[test]
+    fn encode_tiled_multi_page_chain() {
+        // Tiled pages must chain correctly in a multi-IFD file, mixed
+        // with strip pages.
+        let p1 = ramp_gray8(48, 32);
+        let p2 = pattern_rgb(16, 16);
+        let pages = vec![
+            EncodePage {
+                width: 48,
+                height: 32,
+                kind: EncodePixelFormat::Gray8 { pixels: &p1 },
+                compression: TiffCompression::Lzw,
+                predictor: false,
+                planar: false,
+                tiling: Some((16, 16)),
+            },
+            EncodePage {
+                width: 16,
+                height: 16,
+                kind: EncodePixelFormat::Rgb24 { pixels: &p2 },
+                compression: TiffCompression::None,
+                predictor: false,
+                planar: false,
+                tiling: None,
+            },
+        ];
+        let bytes = encode_tiff_multi(&pages).unwrap();
+        let imgs = crate::decoder::decode_tiff_all(&bytes).unwrap();
+        assert_eq!(imgs.len(), 2);
+        assert_eq!(imgs[0].planes[0].data, p1);
+        assert_eq!(imgs[1].planes[0].data, p2);
     }
 }

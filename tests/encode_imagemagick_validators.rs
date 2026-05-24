@@ -142,6 +142,7 @@ fn encoder_gray8_lzw_roundtrips_through_convert() {
         compression: TiffCompression::Lzw,
         predictor: false,
         planar: false,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     // Round-trip through our own decoder first.
@@ -165,6 +166,7 @@ fn encoder_rgb24_packbits_roundtrips_through_convert() {
         compression: TiffCompression::PackBits,
         predictor: false,
         planar: false,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -186,6 +188,7 @@ fn encoder_rgb24_deflate_roundtrips_through_convert() {
         compression: TiffCompression::Deflate,
         predictor: false,
         planar: false,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -212,6 +215,7 @@ fn encoder_palette_roundtrips_through_convert() {
         compression: TiffCompression::None,
         predictor: false,
         planar: false,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -235,6 +239,7 @@ fn encoder_tiffinfo_reports_expected_metadata() {
         compression: TiffCompression::Lzw,
         predictor: false,
         planar: false,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -277,6 +282,7 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             compression: TiffCompression::None,
             predictor: false,
             planar: false,
+            tiling: None,
         },
         EncodePage {
             width: 16,
@@ -285,6 +291,7 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             compression: TiffCompression::Lzw,
             predictor: false,
             planar: false,
+            tiling: None,
         },
         EncodePage {
             width: 16,
@@ -293,6 +300,7 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             compression: TiffCompression::Deflate,
             predictor: false,
             planar: false,
+            tiling: None,
         },
     ];
     let bytes = encode_tiff_multi(&pages).unwrap();
@@ -515,6 +523,7 @@ fn encoder_ccitt_rle_visible_to_tiffinfo() {
         compression: TiffCompression::CcittRle,
         predictor: false,
         planar: false,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     // Self-roundtrip first.
@@ -561,6 +570,7 @@ fn encoder_ccitt_t4_1d_decodes_via_tiffcp_to_uncompressed() {
         },
         predictor: false,
         planar: false,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -617,6 +627,7 @@ fn encoder_ccitt_t4_1d_byte_aligned_decodes_via_tiffcp() {
         },
         predictor: false,
         planar: false,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -743,6 +754,7 @@ fn encoder_predictor_tiffinfo_reports_horizontal_differencing() {
         compression: TiffCompression::Lzw,
         predictor: true,
         planar: false,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -769,6 +781,7 @@ fn encoder_gray8_predictor_lzw_transcodes_via_tiffcp() {
         compression: TiffCompression::Lzw,
         predictor: true,
         planar: false,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_predictor_matches(&bytes, 50, 30, &pixels);
@@ -791,6 +804,7 @@ fn encoder_rgb24_predictor_deflate_transcodes_via_tiffcp() {
         compression: TiffCompression::Deflate,
         predictor: true,
         planar: false,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_predictor_matches(&bytes, 40, 24, &pixels);
@@ -806,6 +820,7 @@ fn encoder_gray8_predictor_lzw_roundtrips_through_convert() {
         compression: TiffCompression::Lzw,
         predictor: true,
         planar: false,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     // Our own decoder first.
@@ -830,6 +845,7 @@ fn encoder_rgb24_predictor_lzw_roundtrips_through_convert() {
         compression: TiffCompression::Lzw,
         predictor: true,
         planar: false,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -859,6 +875,7 @@ fn encoder_planar_rgb_transcodes_via_tiffcp() {
         compression: TiffCompression::None,
         predictor: false,
         planar: true,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -910,6 +927,7 @@ fn encoder_planar_predictor_lzw_transcodes_via_tiffcp() {
         compression: TiffCompression::Lzw,
         predictor: true,
         planar: true,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -955,6 +973,7 @@ fn encoder_planar_rgb_roundtrips_through_convert() {
         compression: TiffCompression::Deflate,
         predictor: false,
         planar: true,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -976,6 +995,7 @@ fn encoder_planar_tiffinfo_reports_separate_planes() {
         compression: TiffCompression::None,
         predictor: false,
         planar: true,
+        tiling: None,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -983,6 +1003,134 @@ fn encoder_planar_tiffinfo_reports_separate_planes() {
         assert!(
             lc.contains("separate") || lc.contains("planarconfig"),
             "tiffinfo missing PlanarConfiguration=2 line: {info}"
+        );
+    } else {
+        eprintln!("skipping: tiffinfo not available");
+    }
+}
+
+// ---- Tiled layout (TIFF 6.0 §15) encode ----
+
+/// `tiffcp -c none` transcodes our tiled output back to an
+/// uncompressed file (forcing libtiff to walk our TileOffsets /
+/// TileByteCounts grid and strip the padding). Decoding the result
+/// must reproduce the original visible pixels — proving libtiff reads
+/// our tile geometry, ordering, and boundary padding correctly.
+fn tiffcp_transcode_tiled_matches(tiff_bytes: &[u8], width: u32, height: u32, expected: &[u8]) {
+    let dir = tmp_dir();
+    let in_path = dir.join("tiled.tiff");
+    let out_path = dir.join("none.tiff");
+    fs::write(&in_path, tiff_bytes).unwrap();
+    let st = Command::new("tiffcp")
+        .arg("-c")
+        .arg("none")
+        .arg(&in_path)
+        .arg(&out_path)
+        .status();
+    let st = match st {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("tiffcp spawn failed: {e}");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+    if !st.success() {
+        let _ = fs::remove_dir_all(&dir);
+        panic!("tiffcp could not transcode our tiled output to uncompressed");
+    }
+    let trans = fs::read(&out_path).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
+    assert_eq!((d.width, d.height), (width, height));
+    assert_eq!(
+        d.frame.planes[0].data, expected,
+        "pixel mismatch after tiled encode + tiffcp -c none"
+    );
+}
+
+#[test]
+fn encoder_tiled_gray8_transcodes_via_tiffcp() {
+    if !binary_available("tiffcp") {
+        eprintln!("skipping: tiffcp not available");
+        return;
+    }
+    // 50x30 with 16x16 tiles exercises a 3x2 grid with a partial right
+    // column (50 = 3*16 + 2 visible) and bottom row (30 = 16 + 14) so
+    // the §15 boundary padding gets validated by libtiff.
+    let pixels = ramp_gray8(50, 30);
+    let page = EncodePage {
+        width: 50,
+        height: 30,
+        kind: EncodePixelFormat::Gray8 { pixels: &pixels },
+        compression: TiffCompression::Lzw,
+        predictor: false,
+        planar: false,
+        tiling: Some((16, 16)),
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    tiffcp_transcode_tiled_matches(&bytes, 50, 30, &pixels);
+}
+
+#[test]
+fn encoder_tiled_rgb24_predictor_transcodes_via_tiffcp() {
+    if !binary_available("tiffcp") {
+        eprintln!("skipping: tiffcp not available");
+        return;
+    }
+    // Tiled + Predictor=2: libtiff must reverse the per-tile §14
+    // differencing as well as the tile geometry.
+    let pixels = pattern_rgb(48, 32);
+    let page = EncodePage {
+        width: 48,
+        height: 32,
+        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+        compression: TiffCompression::Deflate,
+        predictor: true,
+        planar: false,
+        tiling: Some((16, 16)),
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    tiffcp_transcode_tiled_matches(&bytes, 48, 32, &pixels);
+}
+
+#[test]
+fn encoder_tiled_rgb24_roundtrips_through_convert() {
+    // ImageMagick reads our tiled RGB and emits the visible pixels.
+    let pixels = pattern_rgb(50, 30);
+    let page = EncodePage {
+        width: 50,
+        height: 30,
+        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+        compression: TiffCompression::Lzw,
+        predictor: false,
+        planar: false,
+        tiling: Some((32, 16)),
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
+        assert_eq!(im_bytes, pixels, "ImageMagick mismatch on tiled RGB");
+    }
+}
+
+#[test]
+fn encoder_tiled_tiffinfo_reports_tile_geometry() {
+    let pixels = pattern_rgb(48, 32);
+    let page = EncodePage {
+        width: 48,
+        height: 32,
+        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+        compression: TiffCompression::None,
+        predictor: false,
+        planar: false,
+        tiling: Some((16, 16)),
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    if let Some(info) = run_tiffinfo(&bytes) {
+        let lc = info.to_lowercase();
+        assert!(
+            lc.contains("tile"),
+            "tiffinfo missing tile geometry line: {info}"
         );
     } else {
         eprintln!("skipping: tiffinfo not available");

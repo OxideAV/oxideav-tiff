@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encoder: tiled layout (TIFF 6.0 §15) via the new
+  `EncodePage::tiling` field (`Some((tile_width, tile_height))`). When
+  set, the encoder divides the image into a row-major grid of fixed-size
+  tiles, compresses each independently (§15: "Tiles are compressed
+  individually, just as strips are compressed"), and writes the
+  `TileWidth` / `TileLength` / `TileOffsets` / `TileByteCounts` fields
+  (tags 322 / 323 / 324 / 325) in place of the strip fields — §15: "When
+  the tiling fields … are used, they replace the StripOffsets,
+  StripByteCounts, and RowsPerStrip fields … Do not use both
+  strip-oriented and tile-oriented fields in the same TIFF file." Both
+  tile dimensions must be a non-zero multiple of 16 (§15's `TileWidth` /
+  `TileLength` requirement); other values are rejected with a precise
+  error. Boundary tiles are padded out to the tile geometry by
+  replicating the last visible column / row (§15 "Padding": "Some
+  compression schemes work best if the padding is accomplished by
+  replicating the last column and last row instead of padding with
+  0's"), so every tile is exactly `tile_w × tile_h` before compression
+  and the decoder — which displays only the `ImageWidth × ImageLength`
+  region — drops the padding. Tiles are emitted left-to-right then
+  top-to-bottom (§15 `TileOffsets`); the `TileOffsets` / `TileByteCounts`
+  LONG arrays go inline for a single-tile image and out-of-line when
+  `TilesPerImage > 1`, reusing the same array machinery as the strip
+  offsets. Supported on the byte-aligned chunky formats (`Gray8` /
+  `Gray16Le` / `Rgb24` / `Palette8`) under None / PackBits / LZW /
+  Deflate, with or without the §14 predictor (applied per-tile, matching
+  the decoder's per-tile cumulative add). Tiling is rejected on
+  `Bilevel` input (sub-byte tile slicing is unimplemented on both
+  sides), on the CCITT compressors (bilevel-only), and — for now — on
+  `planar = true` (tiled `PlanarConfiguration = 2` write is a follow-up).
+
+  Validated by self-roundtrip across Gray8 / Gray16Le / Rgb24 /
+  Palette8 under None / PackBits / LZW / Deflate (single-tile,
+  exact-fit grids, and partial-edge grids on both axes), with and
+  without the predictor, plus a multi-page chain mixing a tiled page
+  with a strip page and an IFD-tag inspection (tile tags present with
+  `count = TilesPerImage`, strip tags absent, ascending tag order).
+  External black-box validation: `tiffcp -c none` transcodes our tiled
+  Gray8 LZW and tiled RGB Deflate + Predictor=2 streams back to
+  uncompressed TIFFs that re-decode to the original visible pixels
+  (proving libtiff walks our tile grid, ordering, boundary padding, and
+  per-tile differencing); ImageMagick reads our tiled RGB bit-exactly;
+  and `tiffinfo` reports the tile geometry.
+
 - Encoder: `PlanarConfiguration = 2` (separate component planes), per
   TIFF 6.0 §"PlanarConfiguration" (page 38) and the §"StripOffsets"
   count formula (page 67), via the new `EncodePage::planar` flag. When

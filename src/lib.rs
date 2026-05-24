@@ -31,6 +31,10 @@
 //!   CCITT Modified Huffman (Compression=2) /
 //!   CCITT T.4 1-D (Compression=3, with optional T4Options bit 2
 //!   byte-aligned EOLs)
+//! * Layout: single strip, `PlanarConfiguration = 2` (separate planes,
+//!   chunky-source), or tiled (TIFF 6.0 §15, chunky) — see
+//!   [`EncodePage::planar`] / [`EncodePage::tiling`]
+//! * Predictor: 2 (horizontal differencing) via [`EncodePage::predictor`]
 //! * Multi-page chain via [`encode_tiff_multi`]
 //!
 //! Out of scope for this round (next-round backlog): CCITT T.4 2-D
@@ -38,9 +42,9 @@
 //! Compression=4 — the 2-D mode codes are not in the TIFF 6.0
 //! spec, which defers to CCITT Rec. T.4 / T.6), the deprecated
 //! TIFF 6.0 §22 old-style JPEG (Compression=6), CIELab photometric,
-//! BigTIFF write, tile write, predictor encoding, planar (non-chunky)
-//! layout. Compression=7 (new-style JPEG-in-TIFF, per TIFF Tech
-//! Note 2) is decoded as of round 92.
+//! BigTIFF write, and tiled `PlanarConfiguration = 2` write.
+//! Compression=7 (new-style JPEG-in-TIFF, per TIFF Tech Note 2) is
+//! decoded as of round 92.
 //!
 //! ## Standalone vs registry-integrated
 //!
