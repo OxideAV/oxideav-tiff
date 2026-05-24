@@ -154,9 +154,22 @@ the `ImageWidth × ImageLength` region and ignores the padding. Works for
 the byte-aligned chunky formats (`Gray8` / `Gray16Le` / `Rgb24` /
 `Palette8`) under None / PackBits / LZW / Deflate, with or without
 `Predictor = 2` (applied per-tile). Tiling is rejected on `Bilevel`
-input, the CCITT compressors, and (for now) `planar = true`. `tiffcp -c
+input and the CCITT compressors. `tiffcp -c
 none` transcodes our tiled output back to an uncompressed TIFF that
 re-decodes to the original pixels, and ImageMagick reads it bit-exactly.
+
+Tiling composes with `planar = true` on `Rgb24`: the encoder writes one
+row-major tile grid per component plane, emitting plane 0's tiles first
+then plane 1's, then plane 2's, per §15 `TileOffsets` ("For
+PlanarConfiguration = 2, the offsets for the first component plane are
+stored first, followed by all the offsets for the second component
+plane, and so on"). `TileOffsets` / `TileByteCounts` therefore carry
+`SamplesPerPixel × TilesPerImage` entries. Each plane is a
+single-component image, so §15 boundary padding and the §14 predictor
+run with an offset of one sample (§14: "If PlanarConfiguration is 2 …
+Differencing works the same as it does for grayscale data"). `tiffcp -c
+none` and ImageMagick both transcode/read the planar-tiled output back
+to the original chunky pixels bit-exactly.
 
 On the read side, the decoder walks the same §15 tile fields, decodes
 each tile, reverses any per-tile `Predictor = 2` differencing, and
@@ -196,11 +209,11 @@ checking the resulting pixels match the original input.
 - DNG / GeoTIFF / EXIF blob extraction
 - Encoder-side planar (`PlanarConfiguration = 2`) writing is now
   supported for `Rgb24` under None / PackBits / LZW / Deflate (with or
-  without `Predictor = 2`); decode covers the same plus tiles and
-  CCITT. Tiled write (chunky, §15) now covers `Gray8` / `Gray16Le` /
-  `Rgb24` / `Palette8` under None / PackBits / LZW / Deflate with the
-  optional `Predictor = 2`. The remaining gaps are tiled planar write
-  (one tile grid per component plane) and planar / tiled write for the
+  without `Predictor = 2`), both strip-based and tiled (one tile grid
+  per component plane, §15); decode covers the same plus CCITT. Tiled
+  write (chunky, §15) covers `Gray8` / `Gray16Le` / `Rgb24` /
+  `Palette8` under None / PackBits / LZW / Deflate with the optional
+  `Predictor = 2`. The remaining gap is planar / tiled write for the
   not-yet-encodable photometrics (CMYK / YCbCr)
 
 ## Registration

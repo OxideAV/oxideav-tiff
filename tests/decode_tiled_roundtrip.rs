@@ -331,6 +331,171 @@ fn tiled_palette8_match_strip() {
     }
 }
 
+// ---- Rgb24 tiled PlanarConfiguration=2 (one tile grid per plane) ----
+//
+// These exercise the planar tile write path (TIFF 6.0 §15 TileOffsets:
+// "For PlanarConfiguration = 2, the offsets for the first component
+// plane are stored first, followed by all the offsets for the second
+// component plane") against two independent oracles: the strip-based
+// *chunky* decode of the same source (catches plane-interleave bugs)
+// and the *chunky-tiled* decode (catches per-plane tile-ordering bugs
+// while sharing the same edge-padding geometry). Both must yield the
+// identical RGB raster.
+
+fn rgb_planar_tiled_page<'a>(
+    w: u32,
+    h: u32,
+    px: &'a [u8],
+    comp: TiffCompression,
+    pred: bool,
+    tile: (u32, u32),
+) -> EncodePage<'a> {
+    EncodePage {
+        width: w,
+        height: h,
+        kind: EncodePixelFormat::Rgb24 { pixels: px },
+        compression: comp,
+        predictor: pred,
+        planar: true,
+        tiling: Some(tile),
+    }
+}
+
+#[test]
+fn tiled_planar_rgb24_partial_edges_match_strip_and_source() {
+    // 50x30 over 16x16 tiles => 4x2 grid with right-column and
+    // bottom-row §15 padding, one such grid per R/G/B plane.
+    let px = pattern_rgb(50, 30);
+    let planar_t = encode_tiff(&rgb_planar_tiled_page(
+        50,
+        30,
+        &px,
+        TiffCompression::Lzw,
+        false,
+        (16, 16),
+    ))
+    .expect("encode planar tiled");
+    let dp = decode_tiff(&planar_t).expect("decode planar tiled");
+    assert_eq!((dp.width, dp.height), (50, 30));
+    assert_eq!(dp.frame.planes[0].data, px, "planar-tiled rgb24 != source");
+}
+
+#[test]
+fn tiled_planar_rgb24_matches_chunky_tiled_all_compressions() {
+    // The planar-tiled raster must equal the chunky-tiled raster of the
+    // same source under every supported compressor: identical pixels,
+    // only the on-disk plane/tile arrangement differs.
+    let px = pattern_rgb(50, 30);
+    for comp in [
+        TiffCompression::None,
+        TiffCompression::PackBits,
+        TiffCompression::Lzw,
+        TiffCompression::Deflate,
+    ] {
+        let planar = encode_tiff(&rgb_planar_tiled_page(50, 30, &px, comp, false, (16, 16)))
+            .expect("encode planar tiled");
+        let chunky = encode_tiff(&EncodePage {
+            planar: false,
+            ..rgb_planar_tiled_page(50, 30, &px, comp, false, (16, 16))
+        })
+        .expect("encode chunky tiled");
+        let dp = decode_tiff(&planar).expect("decode planar tiled");
+        let dc = decode_tiff(&chunky).expect("decode chunky tiled");
+        assert_eq!(
+            dp.frame.planes[0].data, dc.frame.planes[0].data,
+            "planar-tiled != chunky-tiled under {comp:?}"
+        );
+        assert_eq!(
+            dp.frame.planes[0].data, px,
+            "planar-tiled != source under {comp:?}"
+        );
+    }
+}
+
+#[test]
+fn tiled_planar_rgb24_predictor_match_source() {
+    // Predictor=2 on a planar image differences each plane independently
+    // (§14: "If PlanarConfiguration is 2 ... Differencing works the same
+    // as it does for grayscale data"), applied per-tile. The decoder
+    // reverses it per-plane-per-tile.
+    let px = pattern_rgb(48, 32);
+    let planar = encode_tiff(&rgb_planar_tiled_page(
+        48,
+        32,
+        &px,
+        TiffCompression::Deflate,
+        true,
+        (16, 16),
+    ))
+    .expect("encode planar tiled predictor");
+    let dp = decode_tiff(&planar).expect("decode planar tiled predictor");
+    assert_eq!(
+        dp.frame.planes[0].data, px,
+        "planar-tiled predictor != source"
+    );
+}
+
+#[test]
+fn tiled_planar_rgb24_nonsquare_and_oversized_tiles_match_source() {
+    // Non-square tile (32x16) over 50x30, and a single tile larger than
+    // the image (64x32 over 20x12): exercises independent x/y per-plane
+    // boundary padding.
+    let px1 = pattern_rgb(50, 30);
+    let dp1 = decode_tiff(
+        &encode_tiff(&rgb_planar_tiled_page(
+            50,
+            30,
+            &px1,
+            TiffCompression::None,
+            false,
+            (32, 16),
+        ))
+        .expect("encode"),
+    )
+    .expect("decode");
+    assert_eq!(
+        dp1.frame.planes[0].data, px1,
+        "non-square planar tile != source"
+    );
+
+    let px2 = pattern_rgb(20, 12);
+    let dp2 = decode_tiff(
+        &encode_tiff(&rgb_planar_tiled_page(
+            20,
+            12,
+            &px2,
+            TiffCompression::Lzw,
+            false,
+            (64, 32),
+        ))
+        .expect("encode"),
+    )
+    .expect("decode");
+    assert_eq!(
+        dp2.frame.planes[0].data, px2,
+        "oversized planar tile != source"
+    );
+}
+
+#[test]
+fn tiled_planar_rejected_on_single_sample_formats() {
+    // planar=true is irrelevant for 1-sample formats (§"PlanarConfig-
+    // uration": "If SamplesPerPixel is 1, PlanarConfiguration is
+    // irrelevant"); combining it with tiling must still be rejected by
+    // the same single-sample guard, not silently produce a planar grid.
+    let px = ramp_gray8(32, 32);
+    let r = encode_tiff(&EncodePage {
+        width: 32,
+        height: 32,
+        kind: EncodePixelFormat::Gray8 { pixels: &px },
+        compression: TiffCompression::None,
+        predictor: false,
+        planar: true,
+        tiling: Some((16, 16)),
+    });
+    assert!(r.is_err(), "planar tiling on Gray8 must be rejected");
+}
+
 // ---- Single-row / single-column edge cases ----
 
 #[test]

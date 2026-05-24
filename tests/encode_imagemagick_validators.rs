@@ -1136,3 +1136,106 @@ fn encoder_tiled_tiffinfo_reports_tile_geometry() {
         eprintln!("skipping: tiffinfo not available");
     }
 }
+
+// ---- Tiled PlanarConfiguration=2 (one tile grid per plane) encode ----
+//
+// These validate the planar tile write path against libtiff /
+// ImageMagick: a third-party reader must walk our SamplesPerPixel *
+// TilesPerImage TileOffsets array (plane-major, row-major within a
+// plane, per TIFF 6.0 §15 TileOffsets) and reconstruct the original
+// chunky RGB. Self-roundtrip coverage lives in decode_tiled_roundtrip.
+
+#[test]
+fn encoder_tiled_planar_rgb24_transcodes_via_tiffcp() {
+    if !binary_available("tiffcp") {
+        eprintln!("skipping: tiffcp not available");
+        return;
+    }
+    // 50x30 with 16x16 tiles => a 4x2 grid per plane with right-column
+    // (50 = 3*16 + 2) and bottom-row (30 = 16 + 14) §15 padding, three
+    // such grids (R/G/B). tiffcp must walk all 24 tile entries in
+    // plane-major order to transcode.
+    let pixels = pattern_rgb(50, 30);
+    let page = EncodePage {
+        width: 50,
+        height: 30,
+        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+        compression: TiffCompression::Lzw,
+        predictor: false,
+        planar: true,
+        tiling: Some((16, 16)),
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    tiffcp_transcode_tiled_matches(&bytes, 50, 30, &pixels);
+}
+
+#[test]
+fn encoder_tiled_planar_rgb24_predictor_transcodes_via_tiffcp() {
+    if !binary_available("tiffcp") {
+        eprintln!("skipping: tiffcp not available");
+        return;
+    }
+    // Planar + tiled + Predictor=2: libtiff must reverse the per-plane,
+    // per-tile §14 differencing (offset = 1 sample) as well as the tile
+    // geometry.
+    let pixels = pattern_rgb(48, 32);
+    let page = EncodePage {
+        width: 48,
+        height: 32,
+        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+        compression: TiffCompression::Deflate,
+        predictor: true,
+        planar: true,
+        tiling: Some((16, 16)),
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    tiffcp_transcode_tiled_matches(&bytes, 48, 32, &pixels);
+}
+
+#[test]
+fn encoder_tiled_planar_rgb24_roundtrips_through_convert() {
+    // ImageMagick reads our planar-tiled RGB and emits the visible
+    // pixels — independent confirmation of the per-plane tile layout.
+    let pixels = pattern_rgb(50, 30);
+    let page = EncodePage {
+        width: 50,
+        height: 30,
+        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+        compression: TiffCompression::Lzw,
+        predictor: false,
+        planar: true,
+        tiling: Some((32, 16)),
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
+        assert_eq!(im_bytes, pixels, "ImageMagick mismatch on planar-tiled RGB");
+    }
+}
+
+#[test]
+fn encoder_tiled_planar_tiffinfo_reports_tiles_and_separate_planes() {
+    let pixels = pattern_rgb(48, 32);
+    let page = EncodePage {
+        width: 48,
+        height: 32,
+        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
+        compression: TiffCompression::None,
+        predictor: false,
+        planar: true,
+        tiling: Some((16, 16)),
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    if let Some(info) = run_tiffinfo(&bytes) {
+        let lc = info.to_lowercase();
+        assert!(
+            lc.contains("tile"),
+            "tiffinfo missing tile geometry: {info}"
+        );
+        assert!(
+            lc.contains("separate") || lc.contains("planarconfig"),
+            "tiffinfo missing PlanarConfiguration=2 line: {info}"
+        );
+    } else {
+        eprintln!("skipping: tiffinfo not available");
+    }
+}

@@ -90,8 +90,12 @@ pub struct EncodePage<'a> {
     /// `Palette8`) under None / PackBits / LZW / Deflate, with or without
     /// the §14 predictor (applied per-tile, matching the decoder). Tiling
     /// is rejected on `Bilevel` (sub-byte tile slicing is not implemented
-    /// on either side) and on CCITT compression. It does not currently
-    /// compose with `planar = true` (planar tile write is a follow-up).
+    /// on either side) and on CCITT compression. It composes with
+    /// `planar = true` on `Rgb24`: one row-major tile grid per component
+    /// plane, emitted plane-0 first then plane-1, etc., per §15
+    /// TileOffsets ("For PlanarConfiguration = 2, the offsets for the
+    /// first component plane are stored first, followed by all the offsets
+    /// for the second component plane").
     pub tiling: Option<(u32, u32)>,
 }
 
@@ -508,14 +512,13 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
                  (Compression=2/3), which is bilevel-only",
             ));
         }
-        // Planar tile write (one tile grid per component plane) is a
-        // separate follow-up; chunky tiling only for now.
-        if p.planar {
-            return Err(Error::invalid(
-                "TIFF encode: tiled PlanarConfiguration=2 output is not yet supported; \
-                 use chunky tiling (planar = false) or strip-based planar output",
-            ));
-        }
+        // Planar tile write (one tile grid per component plane, TIFF 6.0
+        // §15 TileOffsets: "For PlanarConfiguration = 2, the offsets for
+        // the first component plane are stored first, followed by all the
+        // offsets for the second component plane, and so on") is handled
+        // by `build_tiles_planar` below. It is only meaningful for the
+        // multi-sample format, which `p.planar` already restricts to
+        // Rgb24 (rejected above for single-sample formats).
     }
 
     // The §14 horizontal-differencing predictor operates on whole
@@ -635,26 +638,47 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
     // §15), each independently compressed.
     let bps = bits_per_sample[0] as usize;
     let strips: Vec<Vec<u8>> = if let Some((tile_w, tile_h)) = p.tiling {
-        // Tiled layout (TIFF 6.0 §15), chunky only (validated above).
-        // Split the interleaved chunky raster into a row-major grid of
-        // tile_w x tile_h tiles, padding boundary tiles by replicating
-        // the last visible column / row (§15 "Padding": "Some
-        // compression schemes work best if the padding is accomplished
-        // by replicating the last column and last row"). Each tile is
-        // differenced (when the predictor is on) and compressed
-        // independently — §15: "Tiles are compressed individually, just
-        // as strips are compressed."
-        build_tiles(
-            &raw_pixels,
-            p.width as usize,
-            p.height as usize,
-            tile_w as usize,
-            tile_h as usize,
-            samples_per_pixel as usize,
-            bps,
-            p.predictor,
-            p.compression,
-        )?
+        if p.planar {
+            // Tiled PlanarConfiguration=2 (TIFF 6.0 §15 + §"Planar-
+            // Configuration"): one row-major tile grid per component
+            // plane, emitted plane-0 first then plane-1, etc. — exactly
+            // the order §15 TileOffsets prescribes ("the offsets for the
+            // first component plane are stored first, followed by all the
+            // offsets for the second component plane, and so on"). Only
+            // Rgb24 (SPP=3) reaches here.
+            build_tiles_planar(
+                &raw_pixels,
+                p.width as usize,
+                p.height as usize,
+                tile_w as usize,
+                tile_h as usize,
+                samples_per_pixel as usize,
+                bps,
+                p.predictor,
+                p.compression,
+            )?
+        } else {
+            // Tiled chunky layout (TIFF 6.0 §15). Split the interleaved
+            // chunky raster into a row-major grid of tile_w x tile_h
+            // tiles, padding boundary tiles by replicating the last
+            // visible column / row (§15 "Padding": "Some compression
+            // schemes work best if the padding is accomplished by
+            // replicating the last column and last row"). Each tile is
+            // differenced (when the predictor is on) and compressed
+            // independently — §15: "Tiles are compressed individually,
+            // just as strips are compressed."
+            build_tiles(
+                &raw_pixels,
+                p.width as usize,
+                p.height as usize,
+                tile_w as usize,
+                tile_h as usize,
+                samples_per_pixel as usize,
+                bps,
+                p.predictor,
+                p.compression,
+            )?
+        }
     } else if p.planar {
         // De-interleave chunky RGBRGB… into separate R / G / B planes
         // (TIFF 6.0 §"PlanarConfiguration": "Red components in one
@@ -999,6 +1023,80 @@ fn build_tiles(
             // CCITT coders read it, and tiling rejects CCITT upstream).
             out.push(compression.pack(&tile, tile_w as u32, tile_h as u32)?);
         }
+    }
+    Ok(out)
+}
+
+/// Tiled `PlanarConfiguration = 2` layout (TIFF 6.0 §15 + §"Planar-
+/// Configuration", page 38). De-interleave the chunky raster into one
+/// single-component plane per sample, tile each plane on the same
+/// `tile_w x tile_h` grid as the chunky path, and return the compressed
+/// tiles in plane order: all of plane 0's tiles (row-major,
+/// left-to-right then top-to-bottom) first, then all of plane 1's, etc.
+///
+/// §15 TileOffsets: "For PlanarConfiguration = 2, the offsets for the
+/// first component plane are stored first, followed by all the offsets
+/// for the second component plane, and so on." The per-plane tile grid
+/// is identical to the chunky grid (`TilesPerImage` tiles each), so the
+/// returned vector has `SamplesPerPixel * TilesPerImage` entries —
+/// exactly the `N` §15 specifies for TileOffsets / TileByteCounts under
+/// PlanarConfiguration = 2.
+///
+/// Each plane is a single-component image, so boundary padding (§15
+/// "Padding": replicate the last visible column / row) and the §14
+/// horizontal-differencing predictor both run with `samples = 1` —
+/// §14: "If PlanarConfiguration is 2 … Differencing works the same as
+/// it does for grayscale data." This matches the decoder's
+/// `decode_tiles_planar`, which reverses each tile with an offset of one
+/// sample. Only Rgb24 (SPP=3, 8 bits) reaches here.
+#[allow(clippy::too_many_arguments)]
+fn build_tiles_planar(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    tile_w: usize,
+    tile_h: usize,
+    samples: usize,
+    bps: usize,
+    predictor: bool,
+    compression: TiffCompression,
+) -> Result<Vec<Vec<u8>>> {
+    let bytes_per_sample = bps / 8;
+    let pixel_bytes = samples * bytes_per_sample;
+    let plane_len = width * height * bytes_per_sample;
+    let tiles_across = width.div_ceil(tile_w);
+    let tiles_down = height.div_ceil(tile_h);
+
+    let mut out = Vec::with_capacity(samples * tiles_across * tiles_down);
+    for plane in 0..samples {
+        // De-interleave this component into a full-resolution
+        // single-channel plane (§"PlanarConfiguration": "Red components
+        // in one component plane, the Green in another, and the Blue in
+        // another").
+        let mut plane_buf = vec![0u8; plane_len];
+        let total_pixels = width * height;
+        for px in 0..total_pixels {
+            let src = px * pixel_bytes + plane * bytes_per_sample;
+            let dst = px * bytes_per_sample;
+            plane_buf[dst..dst + bytes_per_sample]
+                .copy_from_slice(&pixels[src..src + bytes_per_sample]);
+        }
+        // Tile the single-component plane exactly like the chunky path
+        // with `samples = 1`, so padding and the per-tile predictor reuse
+        // the same code. The returned tiles are row-major (§15
+        // TileOffsets: "ordered left-to-right and top-to-bottom").
+        let plane_tiles = build_tiles(
+            &plane_buf,
+            width,
+            height,
+            tile_w,
+            tile_h,
+            1,
+            bps,
+            predictor,
+            compression,
+        )?;
+        out.extend(plane_tiles);
     }
     Ok(out)
 }
@@ -2118,7 +2216,10 @@ mod tests {
     }
 
     #[test]
-    fn encode_tiling_rejects_planar() {
+    fn encode_tiling_planar_rgb24_roundtrips() {
+        // Planar + tiled Rgb24 (TIFF 6.0 §15 + §"PlanarConfiguration"):
+        // one tile grid per component plane, plane-major TileOffsets.
+        // Encodes and self-decodes back to the source pixels.
         let pixels = pattern_rgb(32, 32);
         let page = EncodePage {
             width: 32,
@@ -2129,7 +2230,10 @@ mod tests {
             planar: true,
             tiling: Some((16, 16)),
         };
-        assert!(encode_tiff(&page).is_err());
+        let bytes = encode_tiff(&page).expect("planar tiled encode");
+        let d = decode_tiff(&bytes).expect("planar tiled decode");
+        assert_eq!((d.width, d.height), (32, 32));
+        assert_eq!(d.frame.planes[0].data, pixels);
     }
 
     #[test]

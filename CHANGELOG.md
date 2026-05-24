@@ -36,8 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deflate, with or without the §14 predictor (applied per-tile, matching
   the decoder's per-tile cumulative add). Tiling is rejected on
   `Bilevel` input (sub-byte tile slicing is unimplemented on both
-  sides), on the CCITT compressors (bilevel-only), and — for now — on
-  `planar = true` (tiled `PlanarConfiguration = 2` write is a follow-up).
+  sides) and on the CCITT compressors (bilevel-only); it composes with
+  `planar = true` on `Rgb24` (see the tiled-planar entry below).
 
   Validated by self-roundtrip across Gray8 / Gray16Le / Rgb24 /
   Palette8 under None / PackBits / LZW / Deflate (single-tile,
@@ -51,6 +51,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (proving libtiff walks our tile grid, ordering, boundary padding, and
   per-tile differencing); ImageMagick reads our tiled RGB bit-exactly;
   and `tiffinfo` reports the tile geometry.
+
+- Encoder: tiled `PlanarConfiguration = 2` write (`planar = true` +
+  `tiling = Some(..)` on `Rgb24`), per TIFF 6.0 §15 + §"Planar-
+  Configuration" (page 38). The encoder de-interleaves the chunky raster
+  into one single-component plane per sample and tiles each plane on the
+  same `tile_w × tile_h` grid as the chunky path, emitting the compressed
+  tiles plane-major: all of plane 0's tiles (row-major, left-to-right
+  then top-to-bottom) first, then plane 1's, then plane 2's — exactly the
+  order §15 `TileOffsets` prescribes ("For PlanarConfiguration = 2, the
+  offsets for the first component plane are stored first, followed by all
+  the offsets for the second component plane, and so on"). `TileOffsets`
+  / `TileByteCounts` therefore carry `SamplesPerPixel × TilesPerImage`
+  entries (the §15 count formula for PlanarConfiguration = 2). Each plane
+  is a single-component image, so §15 boundary padding (replicate the
+  last visible column / row) and the §14 horizontal-differencing
+  predictor both run with an offset of one sample — §14: "If Planar-
+  Configuration is 2 … Differencing works the same as it does for
+  grayscale data." Matches the decoder's existing `decode_tiles_planar`.
+  Validated by self-roundtrip (planar-tiled vs. chunky-strip and vs.
+  chunky-tiled decode of the same source, across None / PackBits / LZW /
+  Deflate, with and without the predictor, exact-fit / partial-edge /
+  non-square / oversized tile geometries), plus external black-box
+  validation: `tiffcp -c none` transcodes our planar-tiled RGB LZW and
+  RGB Deflate + Predictor=2 streams back to uncompressed TIFFs that
+  re-decode to the original pixels; ImageMagick reads the planar-tiled
+  RGB bit-exactly; and `tiffinfo` reports both the tile geometry and the
+  separate-planes configuration.
 
 - Encoder: `PlanarConfiguration = 2` (separate component planes), per
   TIFF 6.0 §"PlanarConfiguration" (page 38) and the §"StripOffsets"
