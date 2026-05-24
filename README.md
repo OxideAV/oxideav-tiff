@@ -158,6 +158,19 @@ input, the CCITT compressors, and (for now) `planar = true`. `tiffcp -c
 none` transcodes our tiled output back to an uncompressed TIFF that
 re-decodes to the original pixels, and ImageMagick reads it bit-exactly.
 
+On the read side, the decoder walks the same §15 tile fields, decodes
+each tile, reverses any per-tile `Predictor = 2` differencing, and
+reassembles the grid into the full image — dropping the boundary padding
+on right-column / bottom-row tiles. A binary-independent self-roundtrip
+suite encodes the identical pixels both tiled and strip-based, decodes
+both, and asserts the planes are byte-identical, so tile geometry,
+ordering, per-tile predictor reversal, and §15 edge padding are checked
+against the strip decode of the same image across Gray8 / Gray16Le /
+Rgb24 / Palette8 (None / PackBits / LZW / Deflate, with and without the
+predictor) and the full range of edge-tile geometries (exact-fit,
+partial edges, non-square tiles, oversized single tile, 1-pixel
+overhang). Sub-byte (1-/4-bit) tiled images are not yet supported.
+
 Output is classic II little-endian TIFF, single-IFD via
 [`encode_tiff`] or multi-page via [`encode_tiff_multi`]. Files
 roundtrip through ImageMagick / `tiffinfo` / `tiffcp`; CCITT

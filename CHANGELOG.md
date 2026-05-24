@@ -252,6 +252,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Container probe now also recognises the BigTIFF II / MM magic
   bytes (`II 2B 00` / `MM 00 2B`).
 
+### Tests
+
+- Read-side tiled-layout decode (TIFF 6.0 §15) is now validated by a
+  binary-independent self-roundtrip suite
+  (`tests/decode_tiled_roundtrip.rs`). Each case encodes the identical
+  source pixels twice through our writer — once tiled, once strip — then
+  decodes both with `decode_tiff` and asserts the two pixel planes are
+  byte-identical, so the tile path (TileWidth/TileLength +
+  TileOffsets/TileByteCounts parse, per-tile decompression, per-tile §14
+  predictor reversal, and §15 boundary-padding removal during
+  reassembly) is checked against the strip decode of the same image
+  with no external reference. Covers Gray8 / Gray16Le / Rgb24 /
+  Palette8 under None / PackBits / LZW / Deflate, with and without the
+  predictor, across exact-fit grids, partial right-column + bottom-row
+  edges, non-square tiles, an oversized tile padded on both axes, a
+  whole-image-in-one-tile case, and a 1-pixel overhang on each axis.
+  Runs identically with and without the `registry` feature (the tile
+  decode is framework-independent).
+
 ## [0.0.2](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.1...v0.0.2) - 2026-05-04
 
 ### Other
