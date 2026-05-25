@@ -230,14 +230,31 @@ pub fn parse_ifd(
 }
 
 fn parse_ifd_classic(input: &[u8], bo: ByteOrder, offset: u64) -> Result<(Vec<Entry>, u64)> {
+    // Classic TIFF stores `offset` as a 32-bit field, but the
+    // `parse_ifd` public surface widens it to u64; an attacker can
+    // pass `u64::MAX` via the BigTIFF-typed entry path or via a
+    // hand-crafted `decode_tiff` driver, so all `off + N` arithmetic
+    // must go through `checked_add`.
     let off = offset as usize;
-    if off + 2 > input.len() {
+    let off_plus_2 = off
+        .checked_add(2)
+        .ok_or_else(|| Error::invalid("TIFF: IFD offset overflow"))?;
+    if off_plus_2 > input.len() {
         return Err(Error::invalid("TIFF: IFD start past EOF"));
     }
-    let count = bo.read_u16(&input[off..off + 2]) as usize;
-    let entries_start = off + 2;
-    let entries_end = entries_start + count * 12;
-    if entries_end + 4 > input.len() {
+    let count = bo.read_u16(&input[off..off_plus_2]) as usize;
+    let entries_start = off_plus_2;
+    let entries_end = entries_start
+        .checked_add(
+            count
+                .checked_mul(12)
+                .ok_or_else(|| Error::invalid("TIFF: IFD entry count overflow"))?,
+        )
+        .ok_or_else(|| Error::invalid("TIFF: IFD entry length overflow"))?;
+    let entries_end_plus_4 = entries_end
+        .checked_add(4)
+        .ok_or_else(|| Error::invalid("TIFF: IFD next-IFD slot overflow"))?;
+    if entries_end_plus_4 > input.len() {
         return Err(Error::invalid("TIFF: IFD truncated"));
     }
     let mut out = Vec::with_capacity(count);
@@ -254,12 +271,17 @@ fn parse_ifd_classic(input: &[u8], bo: ByteOrder, offset: u64) -> Result<(Vec<En
             // unknown field types gracefully.
             val_off_slot.to_vec()
         } else {
-            let total = ts as u64 * cnt;
-            if total <= 4 {
-                val_off_slot[..total as usize].to_vec()
+            // `cnt` (u32) * `ts` (≤16) fits in u64 without overflow,
+            // but the `as usize` cast can truncate on 32-bit hosts.
+            // Use `usize::try_from` so the truncation case errors out
+            // rather than silently returning a small wrapped length.
+            let total_u64 = (ts as u64) * cnt;
+            if total_u64 <= 4 {
+                val_off_slot[..total_u64 as usize].to_vec()
             } else {
                 let p = bo.read_u32(val_off_slot) as usize;
-                let total = total as usize;
+                let total = usize::try_from(total_u64)
+                    .map_err(|_| Error::invalid("TIFF: entry total bytes exceed usize"))?;
                 if p.checked_add(total).map_or(true, |end| end > input.len()) {
                     return Err(Error::invalid(format!(
                         "TIFF: entry tag={tag} value offset past EOF"
@@ -280,13 +302,20 @@ fn parse_ifd_classic(input: &[u8], bo: ByteOrder, offset: u64) -> Result<(Vec<En
 }
 
 fn parse_ifd_big(input: &[u8], bo: ByteOrder, offset: u64) -> Result<(Vec<Entry>, u64)> {
+    // `offset` is u64 from the BigTIFF header / next-IFD chain; on
+    // 64-bit hosts `u64 as usize` is identity, so the post-cast
+    // checks below must use `checked_add` to catch the attacker
+    // case where `offset == u64::MAX` and `off + 8` would overflow.
     let off = offset as usize;
-    if off + 8 > input.len() {
+    let off_plus_8 = off
+        .checked_add(8)
+        .ok_or_else(|| Error::invalid("BigTIFF: IFD offset overflow"))?;
+    if off_plus_8 > input.len() {
         return Err(Error::invalid("BigTIFF: IFD start past EOF"));
     }
-    let count = bo.read_u64(&input[off..off + 8]);
+    let count = bo.read_u64(&input[off..off_plus_8]);
     let count_us = count as usize;
-    let entries_start = off + 8;
+    let entries_start = off_plus_8;
     let entries_end = entries_start
         .checked_add(
             count_us
@@ -294,10 +323,19 @@ fn parse_ifd_big(input: &[u8], bo: ByteOrder, offset: u64) -> Result<(Vec<Entry>
                 .ok_or_else(|| Error::invalid("BigTIFF: IFD entry count overflow"))?,
         )
         .ok_or_else(|| Error::invalid("BigTIFF: IFD entry length overflow"))?;
-    if entries_end + 8 > input.len() {
+    let entries_end_plus_8 = entries_end
+        .checked_add(8)
+        .ok_or_else(|| Error::invalid("BigTIFF: IFD next-IFD slot overflow"))?;
+    if entries_end_plus_8 > input.len() {
         return Err(Error::invalid("BigTIFF: IFD truncated"));
     }
-    let mut out = Vec::with_capacity(count_us);
+    // Cap the upfront entry-list reservation by the smaller of
+    // `count_us` (attacker-claimed) and what the input could actually
+    // back (each entry is 20 bytes); the loop below will reject any
+    // genuinely-truncated tail anyway, but the cap prevents a
+    // 16-byte BigTIFF header from forcing a multi-GiB reserve.
+    let max_possible = input.len() / 20 + 1;
+    let mut out = Vec::with_capacity(count_us.min(max_possible));
     for i in 0..count_us {
         let base = entries_start + i * 20;
         let tag = bo.read_u16(&input[base..base + 2]);
@@ -308,12 +346,19 @@ fn parse_ifd_big(input: &[u8], bo: ByteOrder, offset: u64) -> Result<(Vec<Entry>
         let data = if ts == 0 {
             val_off_slot.to_vec()
         } else {
-            let total = ts as u64 * cnt;
+            // `ts <= 16` but `cnt` is attacker-controlled u64; use
+            // `checked_mul` so a crafted `cnt == u64::MAX` value
+            // can't wrap to a small number that bypasses the
+            // `<= 8` inline-vs-offset split below.
+            let total = (ts as u64)
+                .checked_mul(cnt)
+                .ok_or_else(|| Error::invalid("BigTIFF: entry total bytes overflow"))?;
             if total <= 8 {
                 val_off_slot[..total as usize].to_vec()
             } else {
                 let p = bo.read_u64(val_off_slot) as usize;
-                let total = total as usize;
+                let total = usize::try_from(total)
+                    .map_err(|_| Error::invalid("BigTIFF: entry total bytes exceed usize"))?;
                 if p.checked_add(total).map_or(true, |end| end > input.len()) {
                     return Err(Error::invalid(format!(
                         "BigTIFF: entry tag={tag} value offset past EOF"
@@ -443,5 +488,54 @@ mod tests {
         let (entries, _next) = parse_ifd(&v, h.byte_order, h.variant, h.first_ifd_offset).unwrap();
         let vs = entries[0].as_u32_vec(h.byte_order).unwrap();
         assert_eq!(vs, vec![100, 200]);
+    }
+
+    #[test]
+    fn bigtiff_ifd_offset_max_does_not_overflow_usize() {
+        // Fuzz reproducer (r126): a BigTIFF header whose
+        // `first_ifd_offset` is `u64::MAX` casts to `usize::MAX` on
+        // 64-bit hosts; the subsequent `off + 8` would debug-panic
+        // with "attempt to add with overflow". Must surface as a
+        // clean `Err`.
+        let mut v = Vec::new();
+        v.extend_from_slice(b"II");
+        v.extend_from_slice(&43u16.to_le_bytes()); // BigTIFF magic
+        v.extend_from_slice(&8u16.to_le_bytes()); // offset bytesize
+        v.extend_from_slice(&0u16.to_le_bytes()); // reserved
+        v.extend_from_slice(&u64::MAX.to_le_bytes()); // first_ifd_offset
+        let h = parse_header(&v).unwrap();
+        let err = parse_ifd(&v, h.byte_order, h.variant, h.first_ifd_offset).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("overflow") || msg.contains("past EOF"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn bigtiff_entry_total_bytes_overflow() {
+        // Fuzz-shape input: BigTIFF entry with `field_type = LONG8`
+        // (size 8) and `count = u64::MAX`. The naive
+        // `ts * cnt` u64 multiply wraps to a small value that
+        // bypasses the `total <= 8` inline check; the fixed
+        // `checked_mul` path must surface this as a clean `Err`.
+        let mut v = Vec::new();
+        v.extend_from_slice(b"II");
+        v.extend_from_slice(&43u16.to_le_bytes()); // BigTIFF magic
+        v.extend_from_slice(&8u16.to_le_bytes()); // offset bytesize
+        v.extend_from_slice(&0u16.to_le_bytes()); // reserved
+        v.extend_from_slice(&16u64.to_le_bytes()); // first_ifd_offset → just after header
+                                                   // IFD at offset 16: 8 bytes count + N*20 entries + 8 bytes next.
+        v.extend_from_slice(&1u64.to_le_bytes()); // count = 1
+                                                  // Entry: tag=0, field_type=16 (LONG8), count=u64::MAX
+        v.extend_from_slice(&0u16.to_le_bytes()); // tag
+        v.extend_from_slice(&16u16.to_le_bytes()); // LONG8
+        v.extend_from_slice(&u64::MAX.to_le_bytes()); // count
+        v.extend_from_slice(&0u64.to_le_bytes()); // value offset slot
+        v.extend_from_slice(&0u64.to_le_bytes()); // next IFD
+        let h = parse_header(&v).unwrap();
+        let err = parse_ifd(&v, h.byte_order, h.variant, h.first_ifd_offset).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("overflow"), "{msg}");
     }
 }

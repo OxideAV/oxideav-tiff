@@ -9,6 +9,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `cargo-fuzz` decoder target at `fuzz/fuzz_targets/decode.rs`
+  driving arbitrary attacker bytes through `decode_tiff`,
+  `decode_tiff_all`, `parse_header`, `parse_ifd`, `unpack_packbits`,
+  `unpack_lzw`, and `unpack_deflate`. Contract: decoder-only
+  panic-freedom (no abort, debug-overflow, OOM, or OOB-index for any
+  input). Mirrors the `mkv` / `flac` / `id3` `decode` /`parse` fuzz
+  shape. Round 126 wall-respected: 7.7 M iterations green after the
+  fix commit; the three crashes the fuzzer caught in its first 5
+  minutes are now regression-tested in
+  `tests/decode_fuzz_regressions.rs` plus inline `compress` and
+  `ifd` test modules.
+
+### Fixed
+
+- `unpack_lzw` first-after-Clear panic: a code `>= 256` emitted
+  before any dictionary entries were added would index into an
+  uninitialised table slot; the next iteration's `KwKwK` /
+  `code == next_code` writer would then set
+  `prefix[next_code] = prev`, forming a self-referential prefix
+  chain that spun the `emit` walk forever (~2 GiB scratch growth
+  before OOM). The decoder now rejects first-after-Clear codes
+  outside the `0..=255` leaf range, and `emit` is hardened with a
+  `LZW_MAX_CODE + 1`-hop chain-length cap as defence-in-depth.
+- `unpack_lzw` / `unpack_packbits` initial-reserve OOM:
+  `Vec::with_capacity(expected_len)` accepted the attacker-claimed
+  per-strip output length directly. Capped at
+  `MAX_INITIAL_RESERVE = 64 KiB` (with per-input upper-bound for
+  `unpack_packbits` based on the file size and PackBits's 128x
+  worst-case expansion ratio). The vector still grows naturally
+  past the cap as decompression progresses.
+- `unpack_deflate` zip-bomb OOM: switched the underlying
+  `miniz_oxide` call from `decompress_to_vec_zlib` (unbounded
+  output) to `decompress_to_vec_zlib_with_limit` capped at
+  `MAX_DEFLATE_OUTPUT = 64 MiB` (clamped further by the IFD's
+  `expected_len`). A malformed stream that claimed to expand a
+  100-byte payload into gigabytes now surfaces as a regular
+  `TiffError` rather than aborting the process.
+- BigTIFF `parse_ifd_big` `off + 8` debug-overflow panic: a
+  malformed header whose `first_ifd_offset = u64::MAX` cast to
+  `usize::MAX` on 64-bit hosts, then `off + 8` debug-panicked with
+  "attempt to add with overflow". All `off + N` arithmetic now goes
+  through `checked_add`. Same fix applied to `parse_ifd_classic`
+  defensively (a hand-crafted `decode_tiff` caller could pass
+  `u64::MAX` even on the classic path).
+- BigTIFF entry `type_size × count` silent u64 overflow:
+  `ts as u64 * cnt` for a malformed `count = u64::MAX` wrapped to a
+  small value that bypassed the `total <= 8` inline-vs-offset
+  check, then read the wrong number of bytes from the value-or-
+  offset slot. Now uses `checked_mul` and `usize::try_from`. The
+  BigTIFF entry-list `Vec::with_capacity(count_us)` is also capped
+  by `input.len() / 20 + 1` so a 16-byte BigTIFF header can't force
+  a multi-GiB upfront reservation.
+- Decoder up-front dimension sanity gate: any IFD claiming
+  `ImageWidth * ImageLength > MAX_IMAGE_PIXELS` (256 megapixels —
+  covers every legitimate single-image TIFF in the wild) is now
+  rejected before any strip / tile / plane buffer is allocated.
+  Prevents an attacker-supplied 16-byte IFD claiming
+  `u32::MAX × u32::MAX` pixels from driving a multi-exabyte
+  `Vec::with_capacity` downstream.
+
 - Decoder: CMYK JPEG-in-TIFF (`Compression = 7`,
   `PhotometricInterpretation = CMYK (5)`, `SamplesPerPixel = 4`), per
   TIFF Tech Note 2 ("A JPEG-compressed TIFF file will typically have

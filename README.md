@@ -233,3 +233,33 @@ let mut codecs = oxideav_core::CodecRegistry::new();
 let mut containers = oxideav_core::ContainerRegistry::new();
 oxideav_tiff::register(&mut codecs, &mut containers);
 ```
+
+## Fuzzing
+
+A `cargo-fuzz` decoder target lives at `fuzz/fuzz_targets/decode.rs`.
+It drives arbitrary bytes through `decode_tiff`, `decode_tiff_all`,
+`parse_header`, `parse_ifd`, and the three public compression
+unpackers (`unpack_packbits` / `unpack_lzw` / `unpack_deflate`). The
+contract under test is decoder-only panic-freedom — every public
+surface must return a `Result` for any input rather than abort,
+debug-overflow, OOM, or OOB-index.
+
+Run with nightly + cargo-fuzz:
+
+```sh
+cargo +nightly fuzz run decode -- -max_total_time=60
+```
+
+Round 126 added the target and fixed three panic vectors it caught
+within the first ~10 M iterations: an LZW first-after-Clear
+non-leaf code that formed a self-referential prefix chain
+(`src/compress.rs`), a BigTIFF `first_ifd_offset = u64::MAX` that
+debug-panicked the `off + 8` slice math (`src/ifd.rs`), and an
+attacker-claimed `ImageWidth * ImageLength` that drove a
+multi-exabyte upfront `Vec::with_capacity` (`src/decoder.rs`
+`MAX_IMAGE_PIXELS` gate). Deflate output is now capped via
+`miniz_oxide`'s `decompress_to_vec_zlib_with_limit` to bound
+zip-bomb expansion. Regression tests live in
+`tests/decode_fuzz_regressions.rs` plus inline `compress` /
+`ifd` test modules so the panic-freedom checks survive in CI even
+when the fuzzer isn't being driven.

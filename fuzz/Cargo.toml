@@ -1,0 +1,69 @@
+[package]
+name = "oxideav-tiff-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# The TIFF decoder is a dense fuzz surface: an 8-byte file header
+# (II/MM + magic 42 or 43) points at an Image File Directory whose
+# 12-byte (classic) or 20-byte (BigTIFF) entries each carry a
+# `type * count` byte payload that can in turn be an attacker-chosen
+# 32-bit or 64-bit offset elsewhere in the file. From there, strip /
+# tile offset+bytecount vectors steer the decompressor into LZW,
+# Deflate, PackBits, CCITT Modified Huffman / T.4 1-D, or JPEG-in-TIFF
+# (TN2, Compression=7), and the predictor + photometric / planar
+# unpacker assembles attacker-sized buffers from `width * height *
+# samples_per_pixel * bits_per_sample`. Classic spots this exercises:
+#
+#   * IFD entry overflow (`type_size * count` in u64 → silent wrap on
+#     BigTIFF, then a non-truncating size check passes).
+#   * Strip / tile byte-count arithmetic (offset + bytecount overflow).
+#   * Predictor decode on under-sized strips.
+#   * LZW dictionary growth (12-bit clear-code-resetting table).
+#   * JPEG-in-TIFF (Compression=7) embedding — each strip is a full
+#     ISO JPEG datastream routed through `oxideav-mjpeg`.
+#   * BigTIFF 64-bit offsets (offset-as-usize cast on 32-bit hosts).
+#
+# Contract under test is decoder-only panic-freedom: every public
+# surface (`decode_tiff`, `decode_tiff_all`, the IFD parsers, the
+# compression unpackers) must return a `Result` for any input rather
+# than panic, abort, integer-overflow in debug, index out of bounds,
+# or attempt an attacker-claimed allocation that exceeds what the
+# input could possibly back. Return values are intentionally
+# discarded.
+#
+# No external library worth dlopen-ing as a cross-decode oracle:
+# workspace policy bars libtiff / image-tiff vendoring or reference
+# read, and the contract here is panic-freedom, not pixel equality.
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-tiff]
+path = ".."
+
+# Prevent this fuzz package from being pulled into the umbrella
+# workspace at `crates/*` glob-resolve time.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+# ------------------------------------------------------------------
+# Fuzz targets.
+# ------------------------------------------------------------------
+
+# Decode arbitrary bytes through every public decoder surface. Mirrors
+# the `ico` / `qoi` / `bmp` / `tta` / `flac` / `id3` / `mkv`
+# panic-free `decode` / `parse` target shape — a single libfuzzer
+# entry funnels the input through `decode_tiff`, `decode_tiff_all`,
+# and the lower-level IFD / compression parsers.
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false

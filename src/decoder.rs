@@ -10,6 +10,18 @@ use crate::ifd::{find, parse_header, parse_ifd, ByteOrder, Entry};
 use crate::image::{TiffImage, TiffPixelFormat, TiffPlane};
 use crate::types::*;
 
+/// Maximum total pixels (`ImageWidth * ImageLength`) the decoder will
+/// accept on a single IFD. Computed up-front from the IFD's
+/// `ImageWidth` / `ImageLength` tags before any strip or tile buffer
+/// is allocated, so a 16-byte attacker-crafted IFD claiming
+/// `4294967295 * 4294967295` pixels can't drive a multi-petabyte
+/// upfront `Vec::with_capacity`. 256 megapixels covers every
+/// legitimate single-image TIFF in the wild (it is ~70% larger than
+/// a "Hubble Ultra-Deep Field" mosaic at full resolution); the cap
+/// can be lifted by a forward-compatible release if a real workflow
+/// ever needs it.
+const MAX_IMAGE_PIXELS: u64 = 256 * 1024 * 1024;
+
 /// Outcome of a successful decode: the image plus the resolved pixel
 /// format and dimensions (handy for tests / containers).
 ///
@@ -78,6 +90,19 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         .as_u32(bo)?;
     if width == 0 || height == 0 {
         return Err(Error::invalid("TIFF: zero dimension"));
+    }
+    // Sanity gate: reject claims that exceed `MAX_IMAGE_PIXELS` up
+    // front so the downstream `row_bytes * height` allocations
+    // can't be steered into multi-gibibyte territory by a 16-byte
+    // attacker-crafted IFD. 256 megapixels covers every legitimate
+    // single-image TIFF (a 16384x16384 RGB16 file is 1.5 GiB raw
+    // but only 268 megapixels) while bounding the worst-case
+    // upfront allocation to ~256 MiB even at 16-bit-per-component
+    // RGB.
+    if (width as u64).saturating_mul(height as u64) > MAX_IMAGE_PIXELS {
+        return Err(Error::invalid(format!(
+            "TIFF: image too large ({width}x{height} > {MAX_IMAGE_PIXELS} pixels)"
+        )));
     }
 
     let compression = find(entries, TAG_COMPRESSION)

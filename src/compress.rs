@@ -7,6 +7,28 @@
 
 use crate::error::{Result, TiffError as Error};
 
+/// Upper bound on the upfront `Vec::with_capacity` reservation made
+/// for a single strip / tile. `expected_len` is derived from
+/// attacker-supplied IFD fields (`ImageWidth * ImageLength *
+/// SamplesPerPixel * BitsPerSample / 8`) and may be many gigabytes
+/// for malformed input; capping the *initial* reservation here
+/// prevents an attacker from forcing a multi-GiB allocation before
+/// the decompressor has even consumed a single byte. The vector
+/// grows naturally past the cap as the actual decompression
+/// progresses, which is bounded by `input.len()` for PackBits / LZW
+/// (the only schemes here whose output is loop-driven from a
+/// per-iteration input read).
+const MAX_INITIAL_RESERVE: usize = 64 * 1024;
+
+/// Upper bound on the *expansion ratio* of a single Deflate strip.
+/// `unpack_deflate` defers to `miniz_oxide`, which has no built-in
+/// bound on output size; without an explicit limit a 100-byte
+/// zlib stream can claim to expand to several gigabytes (a classic
+/// "zip bomb"). The cap is `expected_len` (from the IFD) clamped to
+/// `MAX_DEFLATE_OUTPUT`; both bounds are needed because
+/// `expected_len` itself can be attacker-chosen on a malformed file.
+const MAX_DEFLATE_OUTPUT: usize = 64 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // PackBits — TIFF 6.0 Section 9
 // ---------------------------------------------------------------------------
@@ -26,7 +48,17 @@ use crate::error::{Result, TiffError as Error};
 /// bytes OR when we've consumed all input, whichever comes first
 /// (some encoders pad to even lengths).
 pub fn unpack_packbits(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(expected_len);
+    // Bound the upfront reservation by the smaller of `expected_len`
+    // (the legitimate maximum), `input.len() * 128 + 1` (PackBits's
+    // worst-case 1-byte-header / 128-byte-replicate expansion), and
+    // a hard `MAX_INITIAL_RESERVE`. The vector still grows naturally
+    // up to `expected_len` as decompression proceeds; the cap only
+    // affects how much memory is *pre-reserved* before we've seen
+    // input back the claim.
+    let reserve = expected_len
+        .min(input.len().saturating_mul(128).saturating_add(1))
+        .min(MAX_INITIAL_RESERVE);
+    let mut out = Vec::with_capacity(reserve);
     let mut i = 0;
     while i < input.len() && out.len() < expected_len {
         let n = input[i] as i8;
@@ -125,7 +157,14 @@ impl<'a> LzwBits<'a> {
 /// be entry 2^N - 1).
 pub fn unpack_lzw(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
     let mut bits = LzwBits::new(input);
-    let mut out = Vec::with_capacity(expected_len);
+    // Bound the upfront reservation. LZW's worst-case ratio per
+    // codeword is the longest dictionary string (capped at 4095
+    // codes, so a single 12-bit code can emit at most a few thousand
+    // bytes), times `input.len() * 8 / 9` codewords for a 9-bit
+    // run; we use `MAX_INITIAL_RESERVE` directly because that bound
+    // is already much larger than any realistic single-strip output.
+    let reserve = expected_len.min(MAX_INITIAL_RESERVE);
+    let mut out = Vec::with_capacity(reserve);
 
     // Per-strip table: each entry is the prefix-code + last-byte
     // pair, plus a cached length so we can pre-size on emit.
@@ -153,27 +192,36 @@ pub fn unpack_lzw(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
 
     // Helper: write the string at `code` to `out`, returning its
     // first byte (used as the suffix when adding the new entry).
+    //
+    // Returns `None` if the prefix chain failed to terminate within
+    // `LZW_MAX_CODE + 1` hops — a well-formed TIFF/LZW table has at
+    // most 4096 entries, and each `prefix[c]` walk strictly shortens
+    // the implied string by one byte (the table is built bottom-up
+    // from leaves), so a chain longer than that is a structural
+    // invariant violation (self-cycle or cross-cycle introduced by
+    // a malformed stream). Defence-in-depth against any future
+    // construction that bypasses the leaf-only entry guard above.
     let emit = |code: u16,
                 out: &mut Vec<u8>,
                 scratch: &mut Vec<u8>,
                 prefix: &[u16],
                 suffix: &[u8]|
-     -> u8 {
+     -> Option<u8> {
         scratch.clear();
         let mut c = code;
-        loop {
+        for _ in 0..=(LZW_MAX_CODE as usize) {
             scratch.push(suffix[c as usize]);
             let p = prefix[c as usize];
             if p == NONE {
-                break;
+                // scratch now holds the string in reverse order.
+                for &b in scratch.iter().rev() {
+                    out.push(b);
+                }
+                return Some(*scratch.last().unwrap());
             }
             c = p;
         }
-        // scratch now holds the string in reverse order.
-        for &b in scratch.iter().rev() {
-            out.push(b);
-        }
-        *scratch.last().unwrap() // first byte of the emitted string
+        None
     };
 
     while let Some(code) = bits.read(code_size) {
@@ -190,7 +238,8 @@ pub fn unpack_lzw(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
         if let Some(prev) = prev_code {
             if code < next_code {
                 // Code is in the table.
-                let first = emit(code, &mut out, &mut scratch, &prefix, &suffix);
+                let first = emit(code, &mut out, &mut scratch, &prefix, &suffix)
+                    .ok_or_else(|| Error::invalid("TIFF/LZW: prefix chain cycle"))?;
                 if next_code <= LZW_MAX_CODE {
                     prefix[next_code as usize] = prev;
                     suffix[next_code as usize] = first;
@@ -202,7 +251,8 @@ pub fn unpack_lzw(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
                 // an entry that's about to be added. The string is
                 // prev-string + first-char-of-prev-string.
                 // Emit prev string then append its first char.
-                let first = emit(prev, &mut out, &mut scratch, &prefix, &suffix);
+                let first = emit(prev, &mut out, &mut scratch, &prefix, &suffix)
+                    .ok_or_else(|| Error::invalid("TIFF/LZW: prefix chain cycle"))?;
                 out.push(first);
                 if next_code <= LZW_MAX_CODE {
                     prefix[next_code as usize] = prev;
@@ -216,9 +266,23 @@ pub fn unpack_lzw(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
                 )));
             }
         } else {
-            // First code after a Clear: must be a single byte
-            // (table indices 0..=255). Just emit it.
-            let _first = emit(code, &mut out, &mut scratch, &prefix, &suffix);
+            // First code after a Clear: must be a single byte (table
+            // indices 0..=255). Any larger value would index into an
+            // uninitialised table slot, and feeding that slot back
+            // through `emit` can chase a self-referential prefix
+            // chain forever (because the *next* iteration's
+            // `code == next_code` branch writes `prefix[next_code]
+            // = prev_code`, and the first-after-Clear we are about
+            // to record as `prev_code` could itself equal
+            // `next_code`). Reject explicitly so the cycle never
+            // forms.
+            if code >= LZW_CLEAR_CODE {
+                return Err(Error::invalid(format!(
+                    "TIFF/LZW: first code after Clear is {code}, must be a leaf (<256)"
+                )));
+            }
+            let _first = emit(code, &mut out, &mut scratch, &prefix, &suffix)
+                .ok_or_else(|| Error::invalid("TIFF/LZW: prefix chain cycle"))?;
         }
         prev_code = Some(code);
         // Bump the code size BEFORE writing the next-code-to-add
@@ -241,8 +305,19 @@ pub fn unpack_lzw(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
 // Deflate — Adobe Compression=8 (zlib stream)
 // ---------------------------------------------------------------------------
 
-pub fn unpack_deflate(input: &[u8], _expected_len: usize) -> Result<Vec<u8>> {
-    miniz_oxide::inflate::decompress_to_vec_zlib(input)
+pub fn unpack_deflate(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
+    // Cap output to the smaller of the IFD-claimed `expected_len`
+    // and `MAX_DEFLATE_OUTPUT`. Without an explicit limit, a
+    // malformed stream can claim to expand a 100-byte payload into
+    // gigabytes; `miniz_oxide`'s `decompress_to_vec_zlib_with_limit`
+    // bails with `TINFLStatus::HasMoreOutput` once the cap is hit
+    // and we surface that as a normal decode error rather than an
+    // OOM abort. The cap is loose enough not to interfere with any
+    // legitimate single-strip TIFF (most encoders chunk at well
+    // under 64 MiB per strip), but tight enough to bound the
+    // worst-case per-call allocation.
+    let limit = expected_len.min(MAX_DEFLATE_OUTPUT);
+    miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(input, limit)
         .map_err(|e| Error::invalid(format!("TIFF/Deflate: zlib inflate failed: {:?}", e.status)))
 }
 
@@ -439,6 +514,58 @@ mod tests {
         let src = vec![0u8; 4096];
         let encoded = pack_lzw(&src);
         let back = unpack_lzw(&encoded, src.len()).unwrap();
+        assert_eq!(back, src);
+    }
+
+    #[test]
+    fn lzw_rejects_first_code_above_leaf_range() {
+        // Fuzz reproducer (r126): a code >= 256 emitted before any
+        // dictionary entries have been added would index into an
+        // uninitialised table slot, then form a self-referential
+        // prefix chain on the next iteration and spin the emit loop
+        // forever. The decoder must reject first-after-Clear codes
+        // outside the 0..=255 leaf range up front.
+        //
+        // Encoding: nine MSB-first bits = `100000010` = 258 (=
+        // LZW_FIRST_CODE) → followed by enough bits to keep
+        // `bits.read(9)` happy. `[0x81, 0x00]` is exactly 16 bits
+        // of which the first 9 read as 258.
+        let err = unpack_lzw(&[0x81, 0x00, 0x00], 64).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("first code after Clear"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn lzw_initial_reserve_is_bounded() {
+        // A massive `expected_len` claim must not force a
+        // multi-gibibyte upfront allocation; the cap defined in
+        // `MAX_INITIAL_RESERVE` keeps the reserve sane while
+        // letting the vector grow naturally as decompression
+        // progresses. We test this by passing an absurd
+        // `expected_len` on an empty input and asserting we still
+        // get back a valid (empty) result.
+        let out = unpack_lzw(&[], usize::MAX / 2).unwrap();
+        assert!(out.is_empty());
+        let out = unpack_packbits(&[], usize::MAX / 2).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn deflate_output_is_bounded() {
+        // miniz_oxide's `decompress_to_vec_zlib` has no built-in
+        // bound on output size; `unpack_deflate` must cap at
+        // `MAX_DEFLATE_OUTPUT` to prevent zip-bomb OOMs. Encode a
+        // 64-byte zlib stream and confirm decode succeeds within
+        // the cap — we don't currently have a synthetic zip bomb in
+        // tree, so this is the "happy path doesn't regress"
+        // half of the contract; the panic-freedom half is covered
+        // by the fuzz target.
+        let src = vec![0u8; 1024];
+        let encoded = pack_deflate(&src);
+        let back = unpack_deflate(&encoded, src.len()).unwrap();
         assert_eq!(back, src);
     }
 
