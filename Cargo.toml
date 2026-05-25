@@ -44,3 +44,20 @@ default = ["registry"]
 # workspace's JPEG codec; without this feature the JPEG-in-TIFF path
 # returns `Error::Unsupported` rather than a silent fallback.
 registry = ["dep:oxideav-core", "dep:oxideav-mjpeg"]
+
+[dev-dependencies]
+# Round 129 (depth-mode benchmarks): Criterion drives the `lzw` bench
+# harness that A/B-measures the LZW encoder hot path
+# (`compress::pack_lzw`). Pinned to the same 0.5 line the other
+# OxideAV crates with benches (flac, tta, magicyuv, h264, pixfmt,
+# bmp) already track so cross-codec numbers stay comparable.
+criterion = "0.5"
+
+# Round 129 LZW encoder bench. Self-contained — every fixture is
+# synthesised in-bench from a deterministic xorshift seed (no
+# committed payload files, no `docs/` reads, no external library
+# calls). Run with:
+#     cargo bench -p oxideav-tiff --bench lzw
+[[bench]]
+name = "lzw"
+harness = false

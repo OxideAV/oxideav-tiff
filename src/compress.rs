@@ -363,14 +363,110 @@ pub fn pack_packbits(input: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Size of the trie's parent-indexed arrays. One slot per possible
+/// dictionary entry (codes `0..=LZW_MAX_CODE`), so the trie covers
+/// the entire 12-bit code space without any allocation past
+/// initialisation.
+const LZW_TRIE_SIZE: usize = (LZW_MAX_CODE as usize) + 1;
+
+/// Sentinel "no child" / "no sibling" value. The dictionary never
+/// stores codes below `LZW_FIRST_CODE` as child entries (codes 0..=255
+/// are roots, 256/257 are control codes), so 0 is unambiguously
+/// "empty slot" for both `first_child` and `next_sibling`.
+const LZW_TRIE_NONE: u16 = 0;
+
+/// LZW encoder trie. Each dictionary entry `c` is identified by its
+/// `(parent_code, suffix_byte)` pair; the trie indexes by parent and
+/// walks a singly-linked list of children to find the matching
+/// suffix, replacing the old `HashMap<(u16, u8), u16>` lookup with
+/// pure array math.
+///
+/// Three flat parallel arrays of `LZW_TRIE_SIZE` elements:
+///
+/// * `first_child[parent]` — head of `parent`'s child list, or
+///   `LZW_TRIE_NONE` if no children have been added under that prefix
+///   yet.
+/// * `next_sibling[c]` — next entry in `c`'s parent's child list, or
+///   `LZW_TRIE_NONE` at end of list.
+/// * `suffix[c]` — the byte that, concatenated to `parent`'s string,
+///   produces `c`'s string.
+///
+/// Total RAM footprint per encoder invocation: `LZW_TRIE_SIZE * (2 +
+/// 2 + 1) = 4096 * 5 = 20 480` bytes, all stack-resident through the
+/// `Box<LzwTrie>` heap allocation (so a deep recursion can't blow the
+/// stack on small-default-stack platforms).
+struct LzwTrie {
+    first_child: [u16; LZW_TRIE_SIZE],
+    next_sibling: [u16; LZW_TRIE_SIZE],
+    suffix: [u8; LZW_TRIE_SIZE],
+}
+
+impl LzwTrie {
+    fn new() -> Box<Self> {
+        // 20 KiB zero-initialised; `LZW_TRIE_NONE = 0` matches the
+        // zeroes, so the trie starts empty correctly.
+        Box::new(Self {
+            first_child: [0; LZW_TRIE_SIZE],
+            next_sibling: [0; LZW_TRIE_SIZE],
+            suffix: [0; LZW_TRIE_SIZE],
+        })
+    }
+
+    /// Reset on `ClearCode`: every child list head becomes empty.
+    /// We only need to zero `first_child` because once a parent has
+    /// no head, the `next_sibling` / `suffix` slots are unreachable
+    /// from a lookup walk regardless of their stale values, and the
+    /// next `insert` overwrites them.
+    fn reset(&mut self) {
+        self.first_child.fill(LZW_TRIE_NONE);
+    }
+
+    /// Lookup `(parent, byte)` in the trie. Returns `Some(code)` if a
+    /// dictionary entry already exists for this pair, else `None`.
+    /// Walks the singly-linked child list at `first_child[parent]`
+    /// (in insertion order) comparing `suffix[c] == byte`.
+    #[inline]
+    fn lookup(&self, parent: u16, byte: u8) -> Option<u16> {
+        let mut c = self.first_child[parent as usize];
+        while c != LZW_TRIE_NONE {
+            if self.suffix[c as usize] == byte {
+                return Some(c);
+            }
+            c = self.next_sibling[c as usize];
+        }
+        None
+    }
+
+    /// Insert a new entry `new_code` as a child of `parent` with the
+    /// given `byte`. The new entry is pushed at the *head* of
+    /// `parent`'s child list so it's the first one a subsequent
+    /// lookup sees — modest cache-locality win for repeated motifs in
+    /// the input.
+    #[inline]
+    fn insert(&mut self, parent: u16, byte: u8, new_code: u16) {
+        self.suffix[new_code as usize] = byte;
+        self.next_sibling[new_code as usize] = self.first_child[parent as usize];
+        self.first_child[parent as usize] = new_code;
+    }
+}
+
 /// LZW encode for TIFF (TIFF 6.0 §13). Builds the same code table
 /// the decoder expects, writes codes MSB-first ("FillOrder=1, codes
 /// stored high-to-low-order"), bumps code width "one early" exactly
 /// as `unpack_lzw` does on the read side, and emits `ClearCode`
 /// when the table fills.
+///
+/// Round 129: the dictionary is a flat-array trie keyed by
+/// `(parent_code, suffix_byte)` instead of the previous
+/// `HashMap<(u16, u8), u16>`. The bitstream output is byte-for-byte
+/// identical to the old implementation (same greedy match, same
+/// code-width bump points, same Clear-on-fill timing), so the change
+/// is invisible to any decoder, but lookup is now a short chain walk
+/// over up-to-12-bit codes rather than a `(u16, u8)` hash + bucket
+/// scan, eliminating the per-pixel HashMap overhead that dominated
+/// the encoder profile on Rgb24 / Gray8 strips.
 pub fn pack_lzw(input: &[u8]) -> Vec<u8> {
-    use std::collections::HashMap;
-    let mut dict: HashMap<(u16, u8), u16> = HashMap::new();
+    let mut trie = LzwTrie::new();
     let mut next_code: u16 = LZW_FIRST_CODE;
     let mut code_size: u32 = 9;
 
@@ -409,13 +505,12 @@ pub fn pack_lzw(input: &[u8]) -> Vec<u8> {
     } else {
         let mut current: u16 = input[0] as u16;
         for &b in &input[1..] {
-            let key = (current, b);
-            if let Some(&c) = dict.get(&key) {
+            if let Some(c) = trie.lookup(current, b) {
                 current = c;
             } else {
                 write_code(current, code_size, &mut bit_buf, &mut bit_count, &mut out);
                 if next_code <= LZW_MAX_CODE {
-                    dict.insert(key, next_code);
+                    trie.insert(current, b, next_code);
                     if code_size < 12 && next_code >= (1u16 << code_size) - 1 {
                         code_size += 1;
                     }
@@ -428,7 +523,7 @@ pub fn pack_lzw(input: &[u8]) -> Vec<u8> {
                         &mut bit_count,
                         &mut out,
                     );
-                    dict.clear();
+                    trie.reset();
                     next_code = LZW_FIRST_CODE;
                     code_size = 9;
                 }
@@ -585,5 +680,68 @@ mod tests {
         let encoded = pack_lzw(&src);
         let back = unpack_lzw(&encoded, src.len()).unwrap();
         assert_eq!(back, src);
+    }
+
+    #[test]
+    fn lzw_roundtrip_table_fill_clear() {
+        // Force the encoder past `LZW_MAX_CODE = 4095` distinct
+        // dictionary entries so the Clear-on-fill path runs at least
+        // once. A 64 KiB strip of slowly-shifted xorshift output
+        // produces well over 4096 unique short prefixes; r129's trie
+        // resets via `reset()` (zeroing `first_child`) and the test
+        // confirms the decoder reads the resulting bitstream back
+        // bit-exact.
+        let mut s: u32 = 0xC0FF_EE17;
+        let src: Vec<u8> = (0..(64 * 1024))
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                s as u8
+            })
+            .collect();
+        let encoded = pack_lzw(&src);
+        let back = unpack_lzw(&encoded, src.len()).unwrap();
+        assert_eq!(back, src);
+    }
+
+    #[test]
+    fn lzw_roundtrip_byte_pattern_repeated() {
+        // Tightly-repeating 16-byte motif — the inverse of a
+        // pseudo-random fixture: the trie's child lists for the
+        // motif's prefix codes get hit repeatedly, so this is the
+        // case where the head-insertion order in `LzwTrie::insert`
+        // earns its keep (most-recently-added child is found first).
+        // Mainly a roundtrip-correctness check; the bench file
+        // exercises throughput.
+        let motif = b"abcdefghijklmnop";
+        let mut src = Vec::with_capacity(motif.len() * 2048);
+        for _ in 0..2048 {
+            src.extend_from_slice(motif);
+        }
+        let encoded = pack_lzw(&src);
+        let back = unpack_lzw(&encoded, src.len()).unwrap();
+        assert_eq!(back, src);
+    }
+
+    #[test]
+    fn lzw_trie_lookup_and_insert() {
+        // Direct unit test of the trie API: insert two children of
+        // the same parent, look both up, look up a missing one.
+        // Verifies head-insertion ordering and the lookup-walk
+        // termination contract.
+        let mut t = LzwTrie::new();
+        t.insert(b'A' as u16, b'B', 258);
+        t.insert(b'A' as u16, b'C', 259);
+        assert_eq!(t.lookup(b'A' as u16, b'B'), Some(258));
+        assert_eq!(t.lookup(b'A' as u16, b'C'), Some(259));
+        assert_eq!(t.lookup(b'A' as u16, b'X'), None);
+        assert_eq!(t.lookup(b'Z' as u16, b'B'), None);
+        // Reset clears the parent's child list.
+        t.reset();
+        assert_eq!(t.lookup(b'A' as u16, b'B'), None);
+        // Post-reset insert is visible again.
+        t.insert(b'A' as u16, b'B', 258);
+        assert_eq!(t.lookup(b'A' as u16, b'B'), Some(258));
     }
 }

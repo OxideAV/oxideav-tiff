@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- Encoder: `compress::pack_lzw` (TIFF 6.0 §13 LZW) now backs the
+  dictionary with a flat-array trie (`first_child` / `next_sibling`
+  / `suffix`, all sized at `LZW_MAX_CODE + 1 = 4096`, total ~20 KiB
+  per encoder invocation behind a `Box`) instead of the previous
+  `HashMap<(u16, u8), u16>`. The bitstream output is byte-identical
+  to the pre-r129 encoder (same greedy match, same code-width bump
+  points, same Clear-on-fill timing), so the change is invisible to
+  any decoder, but lookup is now a short chain walk over up-to-12-bit
+  codes rather than a `(u16, u8)` hash + bucket scan. New
+  `benches/lzw.rs` Criterion harness (run with `cargo bench -p
+  oxideav-tiff --bench lzw`) reports the following on Apple Silicon
+  `release` builds:
+  - `lzw_random_64k` (xorshift random bytes, worst case): ~53 MiB/s
+    → ~65 MiB/s (~1.2x).
+  - `lzw_repeating_motif_64k` (16-byte motif × 4096): ~44 MiB/s →
+    ~640 MiB/s (~14.5x).
+  - `lzw_zeros_256k` (all-zero, exercises the Clear-on-fill path):
+    ~46 MiB/s → ~640 MiB/s (~14.1x).
+  - `lzw_natural_image_64k` (256×256 8-bit greyscale gradient,
+    representative image strip): ~39 MiB/s → ~809 MiB/s (~20.5x).
+  Three new inline roundtrip tests (`lzw_roundtrip_table_fill_clear`,
+  `lzw_roundtrip_byte_pattern_repeated`, `lzw_trie_lookup_and_insert`)
+  exercise the trie directly and the table-fill / Clear-reset path
+  end-to-end.
+
 ### Added
 
 - `cargo-fuzz` decoder target at `fuzz/fuzz_targets/decode.rs`

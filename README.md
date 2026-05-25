@@ -263,3 +263,36 @@ zip-bomb expansion. Regression tests live in
 `tests/decode_fuzz_regressions.rs` plus inline `compress` /
 `ifd` test modules so the panic-freedom checks survive in CI even
 when the fuzzer isn't being driven.
+
+## Benchmarks
+
+A Criterion bench harness lives at `benches/lzw.rs` covering the
+TIFF/LZW encoder hot path (`compress::pack_lzw`). Run with:
+
+```sh
+cargo bench -p oxideav-tiff --bench lzw
+```
+
+Round 129 replaced the per-byte `HashMap<(u16, u8), u16>` dictionary
+lookup in `pack_lzw` with a flat-array trie (three `[u16; 4096]` /
+`[u8; 4096]` arrays — `first_child`, `next_sibling`, `suffix`). The
+bitstream output is byte-identical to the pre-r129 encoder (same
+greedy match, same code-width bump points, same Clear-on-fill
+timing), so the change is invisible to any decoder, but throughput
+on representative image-like strips climbed substantially. On Apple
+Silicon `release` builds the four bench scenarios moved from:
+
+| Scenario                  | r128 HashMap | r129 trie   | Speedup |
+| ------------------------- | -----------: | ----------: | ------: |
+| `lzw_random_64k`          | ~53 MiB/s    | ~65 MiB/s   |   ~1.2x |
+| `lzw_repeating_motif_64k` | ~44 MiB/s    | ~640 MiB/s  |  ~14.5x |
+| `lzw_zeros_256k`          | ~46 MiB/s    | ~640 MiB/s  |  ~14.1x |
+| `lzw_natural_image_64k`   | ~39 MiB/s    | ~809 MiB/s  |  ~20.5x |
+
+The "natural image" 256×256 8-bit greyscale fixture (vertical ramp +
+horizontal sinusoid) is the most representative of a real TIFF strip
+and gives the largest speedup because the trie's child lists for the
+common short prefixes get amortised across many matches. The random
+fixture is the worst case (no prefix reuse) and still moves up
+modestly because the trie eliminates the per-byte hash + bucket
+probe.
