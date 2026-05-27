@@ -342,6 +342,29 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
                 TiffPixelFormat::Gray8,
             )
         }
+        // PhotometricInterpretation = 4 (Transparency Mask), TIFF 6.0
+        // page 37: "This means that the image is used to define an
+        // irregularly shaped region of another image in the same TIFF
+        // file. SamplesPerPixel and BitsPerSample must be 1. PackBits
+        // compression is recommended. The 1-bits define the interior
+        // of the region; the 0-bits define the exterior of the region."
+        //
+        // The spec ties the mask's polarity to bit value (1 = interior /
+        // visible, 0 = exterior), independent of FillOrder or
+        // PhotometricInterpretation inversion. We expose it as a
+        // Gray8 plane where interior pixels are 0xFF and exterior
+        // pixels are 0x00 — i.e. the same byte layout a downstream
+        // compositor would multiply with the main image. Strip /
+        // tile / FillOrder / compression handling is identical to
+        // the BlackIsZero bilevel path, so we route through the
+        // same expander with `invert = false` (bit 1 -> 0xFF).
+        (PHOTO_TRANSPARENCY_MASK, 1, 1) => {
+            let row_bytes = ((width as u64).div_ceil(8)) as usize;
+            (
+                build_gray8_from_1bpp(&pixel_buf, width, height, row_bytes, false),
+                TiffPixelFormat::Gray8,
+            )
+        }
         (PHOTO_BLACK_IS_ZERO, 1, 4) | (PHOTO_WHITE_IS_ZERO, 1, 4) => {
             let inv = photometric == PHOTO_WHITE_IS_ZERO;
             let row_bytes = ((width as u64).div_ceil(2)) as usize;

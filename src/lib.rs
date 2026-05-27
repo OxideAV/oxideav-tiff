@@ -12,7 +12,8 @@
 //!
 //! * Byte order: `II` (little-endian) and `MM` (big-endian)
 //! * Variants: classic TIFF (32-bit offsets) + BigTIFF (64-bit offsets)
-//! * Photometric: WhiteIsZero / BlackIsZero / RGB / Palette / CMYK / YCbCr
+//! * Photometric: WhiteIsZero / BlackIsZero / RGB / Palette / CMYK /
+//!   YCbCr / TransparencyMask
 //! * Bit depths: 1, 4, 8, 16 (per-strip and per-tile)
 //! * Compression: 1 None / 2 CCITT Modified Huffman / 3 CCITT T.4 1-D /
 //!   32773 PackBits / 5 LZW / 8 Deflate (zlib) /
@@ -26,7 +27,10 @@
 //! Encode-side coverage (classic II / single or multi page):
 //!
 //! * Photometric: WhiteIsZero (1-bit bilevel) / BlackIsZero (8/16-bit
-//!   greyscale) / RGB (8-bit) / Palette (8-bit indexed)
+//!   greyscale) / RGB (8-bit) / Palette (8-bit indexed) /
+//!   TransparencyMask (1-bit, sets PhotometricInterpretation = 4 and
+//!   NewSubfileType bit 2 per TIFF 6.0 §"PhotometricInterpretation"
+//!   value 4 + §"NewSubfileType" bit 2)
 //! * Compression: None / PackBits / LZW / Deflate /
 //!   CCITT Modified Huffman (Compression=2) /
 //!   CCITT T.4 1-D (Compression=3, with optional T4Options bit 2

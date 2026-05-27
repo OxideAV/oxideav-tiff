@@ -19,6 +19,7 @@ source was consulted.
 | WhiteIsZero    | 16             | None / PackBits / LZW / Deflate    | `Gray16Le`   |
 | BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate    | `Gray8`      |
 | BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate    | `Gray8` / `Gray16Le` |
+| **Transparency Mask** | 1       | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate    | `Gray8` (interior = 0xFF, exterior = 0x00) |
 | Palette        | 4 / 8          | None / PackBits / LZW / Deflate    | `Rgb24`      |
 | RGB (3 chan)   | 8              | None / PackBits / LZW / Deflate    | `Rgb24`      |
 | RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate    | `Rgb48Le`    |
@@ -92,6 +93,28 @@ JPEG-in-TIFF requires the default-on `registry` Cargo feature; with
 `default-features = false` the JPEG path returns
 `Error::Unsupported`.
 
+### Transparency Mask (PhotometricInterpretation = 4)
+
+Per TIFF 6.0 §"PhotometricInterpretation" value 4 (page 37) and
+§"NewSubfileType" bit 2 (page 36), a mask page is a 1-bit-per-pixel
+image with `SamplesPerPixel = 1` whose 1-bits define the interior
+("visible region") of another image in the same TIFF file and whose
+0-bits define the exterior. The decoder routes mask pages through the
+same bilevel expander as `BlackIsZero` 1-bit pages but pins the bit
+polarity to spec — 1-bit = `0xFF`, 0-bit = `0x00` — irrespective of
+`FillOrder` (the FillOrder normalisation runs in the strip walker, as
+for every bilevel path), so a downstream compositor can multiply the
+result with the main image directly. On the encode side
+[`EncodePixelFormat::TransparencyMask`] writes
+`PhotometricInterpretation = 4` and sets bit 2 of `NewSubfileType`
+(tag 254) — the companion field the spec uses to let multi-page
+readers spot a mask IFD without consulting the photometric tag. Mask
+pages accept the same compressors a `Bilevel` page does
+(None / PackBits / LZW / Deflate / CCITT-MH / CCITT-T.4-1D); the spec
+recommends PackBits. Tiled, planar, and Predictor=2 layouts are
+rejected for 1-bit input on both encode and decode (sub-byte tile
+slicing and §14 component-differencing don't apply to packed bits).
+
 `FillOrder = 1` (MSB-first, the baseline default) and `FillOrder = 2`
 (LSB-first) are both accepted for the bit orderings the spec admits:
 FillOrder=2 is honoured for uncompressed and CCITT-compressed
@@ -105,6 +128,7 @@ a precise error.
 | Photometric    | Bit depth | Compression                                                 | API call                |
 | -------------- | --------- | ----------------------------------------------------------- | ----------------------- |
 | WhiteIsZero    | 1         | None / CCITT-MH / T.4-1D                                    | `EncodePixelFormat::Bilevel`   |
+| **Transparency Mask** | 1  | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate         | `EncodePixelFormat::TransparencyMask` (sets PhotometricInterpretation = 4 and NewSubfileType bit 2) |
 | BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Gray8` / `::Gray16Le` |
 | RGB            | 8         | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Rgb24`     |
 | Palette        | 8         | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Palette8`  |
@@ -215,7 +239,10 @@ checking the resulting pixels match the original input.
   Gray / RGB / YCbCr / CMYK photometrics; 12-bit precision (SOF1 with
   `P = 12`), arithmetic coding (SOF9 / SOF11), and
   `PlanarConfiguration = 2` JPEG remain unsupported.
-- CIELab / Transparency-mask photometric interpretations
+- CIELab photometric interpretation (PhotometricInterpretation = 8)
+  on decode + encode. The Transparency-mask photometric
+  (PhotometricInterpretation = 4) is supported on both sides as of
+  round 172.
 - DNG / GeoTIFF / EXIF blob extraction
 - Encoder-side planar (`PlanarConfiguration = 2`) writing is now
   supported for `Rgb24` under None / PackBits / LZW / Deflate (with or

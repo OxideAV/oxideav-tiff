@@ -111,6 +111,22 @@ pub enum EncodePixelFormat<'a> {
     /// CCITT compression schemes ([`TiffCompression::CcittRle`],
     /// [`TiffCompression::CcittT4OneD`]).
     Bilevel { pixels: &'a [u8] },
+    /// 1-bit transparency mask (TIFF 6.0 §"PhotometricInterpretation"
+    /// value 4, page 37). 1 sample per pixel, MSB-first byte packing —
+    /// the on-disk layout is identical to [`Self::Bilevel`], but the
+    /// encoder writes `PhotometricInterpretation = 4` (Transparency
+    /// Mask) and sets bit 2 of `NewSubfileType` (tag 254), which the
+    /// spec defines as "1 if the image defines a transparency mask
+    /// for another image in this TIFF file. The PhotometricInterpretation
+    /// value must be 4". `pixels` must contain `ceil(width / 8) * height`
+    /// bytes; the bit convention is fixed by spec (§Photometric-
+    /// Interpretation page 37: "The 1-bits define the interior of the
+    /// region; the 0-bits define the exterior of the region"). The
+    /// spec recommends PackBits but does not forbid the other
+    /// compressions; this encoder accepts None / PackBits / LZW /
+    /// Deflate / CCITT-MH / CCITT-T.4-1D, the same compressor set
+    /// [`Self::Bilevel`] accepts.
+    TransparencyMask { pixels: &'a [u8] },
     /// 8-bit greyscale (BlackIsZero, 1 sample per pixel).
     /// `pixels.len() == width * height`.
     Gray8 { pixels: &'a [u8] },
@@ -463,10 +479,18 @@ struct PageIfd {
 }
 
 fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
-    // CCITT schemes are bilevel-only per TIFF 6.0 §10 / §11.
-    if p.compression.is_ccitt() && !matches!(p.kind, EncodePixelFormat::Bilevel { .. }) {
+    // CCITT schemes are bilevel-only per TIFF 6.0 §10 / §11. Both the
+    // generic Bilevel input and the TransparencyMask variant carry 1-bit
+    // data with identical on-disk packing and so satisfy that gate.
+    if p.compression.is_ccitt()
+        && !matches!(
+            p.kind,
+            EncodePixelFormat::Bilevel { .. } | EncodePixelFormat::TransparencyMask { .. }
+        )
+    {
         return Err(Error::invalid(
-            "TIFF encode: CCITT compression (Compression=2/3) requires Bilevel input",
+            "TIFF encode: CCITT compression (Compression=2/3) requires Bilevel or \
+             TransparencyMask input",
         ));
     }
 
@@ -480,7 +504,7 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
         return Err(Error::invalid(
             "TIFF encode: PlanarConfiguration=2 (separate planes) requires a multi-sample \
              format; TIFF 6.0 §\"PlanarConfiguration\" says the field is irrelevant when \
-             SamplesPerPixel is 1 (Gray8 / Gray16Le / Palette8 / Bilevel)",
+             SamplesPerPixel is 1 (Gray8 / Gray16Le / Palette8 / Bilevel / TransparencyMask)",
         ));
     }
     // CCITT schemes are bilevel-only (rejected above) so they never
@@ -499,11 +523,17 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
         }
         // Bilevel tiles need sub-byte tile-row slicing the decoder
         // rejects, and the CCITT coders are bilevel-only, so tiling is
-        // restricted to the byte-aligned chunky formats.
-        if matches!(p.kind, EncodePixelFormat::Bilevel { .. }) {
+        // restricted to the byte-aligned chunky formats. The
+        // TransparencyMask variant carries identical 1-bit packing and
+        // is rejected for the same reason.
+        if matches!(
+            p.kind,
+            EncodePixelFormat::Bilevel { .. } | EncodePixelFormat::TransparencyMask { .. }
+        ) {
             return Err(Error::invalid(
-                "TIFF encode: tiled layout (TIFF 6.0 §15) is not supported for Bilevel \
-                 (1-bit) input — sub-byte tile slicing is unimplemented on both sides",
+                "TIFF encode: tiled layout (TIFF 6.0 §15) is not supported for 1-bit input \
+                 (Bilevel / TransparencyMask) — sub-byte tile slicing is unimplemented on \
+                 both sides",
             ));
         }
         if p.compression.is_ccitt() {
@@ -527,10 +557,14 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
     // the impossible combinations up front so they surface precisely
     // rather than producing a file the decoder can't reverse.
     if p.predictor {
-        if matches!(p.kind, EncodePixelFormat::Bilevel { .. }) {
+        if matches!(
+            p.kind,
+            EncodePixelFormat::Bilevel { .. } | EncodePixelFormat::TransparencyMask { .. }
+        ) {
             return Err(Error::invalid(
-                "TIFF encode: Predictor=2 (horizontal differencing) is undefined for Bilevel \
-                 (1-bit) input — TIFF 6.0 §14 differences whole sample components",
+                "TIFF encode: Predictor=2 (horizontal differencing) is undefined for 1-bit \
+                 input (Bilevel / TransparencyMask) — TIFF 6.0 §14 differences whole sample \
+                 components",
             ));
         }
         if p.compression.is_ccitt() {
@@ -562,6 +596,35 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
                 // decoder applies the photometric inversion on the
                 // way to Gray8.
                 (1u16, vec![1u16], PHOTO_WHITE_IS_ZERO, pixels.to_vec(), None)
+            }
+            EncodePixelFormat::TransparencyMask { pixels } => {
+                // TIFF 6.0 page 37 "PhotometricInterpretation = 4":
+                // SamplesPerPixel and BitsPerSample must be 1; bytes
+                // are packed MSB-first row-by-row exactly like Bilevel.
+                // The bit polarity is fixed by spec — 1 = interior,
+                // 0 = exterior — and the encoder does not apply any
+                // inversion, so the input is written through verbatim.
+                // The NewSubfileType bit-2 flag is set further down so
+                // multi-page readers can recognise the IFD as a mask
+                // for a sibling image without consulting the photometric
+                // tag.
+                let row_bytes = (p.width as usize).div_ceil(8);
+                let want = row_bytes * (p.height as usize);
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/TransparencyMask: pixel buffer is {} bytes, expected \
+                         {want} (row_bytes={row_bytes}, height={})",
+                        pixels.len(),
+                        p.height
+                    )));
+                }
+                (
+                    1u16,
+                    vec![1u16],
+                    PHOTO_TRANSPARENCY_MASK,
+                    pixels.to_vec(),
+                    None,
+                )
             }
             EncodePixelFormat::Gray8 { pixels } => {
                 let want = (p.width as usize) * (p.height as usize);
@@ -746,14 +809,26 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
     let mut entries: Vec<PageIfdEntry> = Vec::new();
     let mut externals: Vec<(BlobId, Vec<u8>)> = Vec::new();
 
-    // 254 NewSubfileType — 0 = full-resolution image (only flag we
-    // know how to set safely; included so multi-page readers can
-    // walk the chain confidently).
+    // 254 NewSubfileType — TIFF 6.0 page 36, 32-bit bit-flag field.
+    // Bit 0: reduced-resolution version of another image. Bit 1:
+    // single page of a multi-page image. Bit 2: defines a
+    // transparency mask for another image in this TIFF file (the
+    // spec then requires PhotometricInterpretation = 4). Defaults
+    // to 0 (full-resolution single image). The encoder sets bit 2
+    // when the caller asked for a TransparencyMask page so that a
+    // multi-page reader can spot the mask IFD without consulting
+    // PhotometricInterpretation. Other bits stay clear; we never
+    // emit reduced-resolution or generic multi-page-numbering hints.
+    let new_subfile_type: u32 = if matches!(p.kind, EncodePixelFormat::TransparencyMask { .. }) {
+        1 << 2
+    } else {
+        0
+    };
     entries.push(PageIfdEntry {
         tag: TAG_NEW_SUBFILE_TYPE,
         field_type: TYPE_LONG,
         count: 1,
-        value: IfdValue::Inline(0u32.to_le_bytes().to_vec()),
+        value: IfdValue::Inline(new_subfile_type.to_le_bytes().to_vec()),
     });
     // 256 ImageWidth (LONG)
     entries.push(PageIfdEntry {

@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Decoder + Encoder: `PhotometricInterpretation = 4` (Transparency
+  Mask), per TIFF 6.0 page 37 + the `NewSubfileType` bit-2 companion
+  flag (page 36, "1 if the image defines a transparency mask for
+  another image in this TIFF file. The PhotometricInterpretation
+  value must be 4"). A mask is a 1-bit-per-pixel image with
+  `SamplesPerPixel = 1` whose 1-bits define the interior of the
+  region and whose 0-bits define the exterior. The decoder routes
+  mask pages through the existing bilevel expander with the bit
+  polarity pinned to spec (1-bit -> 0xFF, 0-bit -> 0x00, no
+  `WhiteIsZero` inversion) so a downstream compositor can multiply
+  the resulting `Gray8` plane against the main image directly. The
+  encoder exposes a new `EncodePixelFormat::TransparencyMask`
+  variant that writes `PhotometricInterpretation = 4` and sets
+  bit 2 of `NewSubfileType` (tag 254) — the companion field the
+  spec uses to let multi-page readers spot a mask IFD without
+  consulting the photometric tag. Other `NewSubfileType` bits stay
+  clear (the encoder still emits bit 2 only for mask pages and
+  zero for every other photometric, including Gray8 / Rgb24 /
+  Palette8 / Bilevel / Gray16Le).
+
+  Compressors accepted on both sides: None / PackBits / LZW /
+  Deflate / CCITT-MH (Compression = 2) / CCITT-T.4-1D
+  (Compression = 3, with or without `T4Options` bit 2 byte-aligned
+  EOLs). The spec recommends PackBits ("PackBits compression is
+  recommended", page 37) but does not forbid the others, and our
+  per-strip CCITT writer already accepts arbitrary 1-bit input. The
+  same per-strip `FillOrder` (tag 266) normalisation the
+  `BlackIsZero` / `WhiteIsZero` bilevel paths use applies, so
+  `FillOrder = 2` masks decode correctly when paired with
+  Compression = None / 2 / 3.
+
+  Layouts rejected on encode for 1-bit input (both `Bilevel` and
+  `TransparencyMask`) with a precise error: tiled
+  (sub-byte tile-row slicing isn't implemented on either side),
+  `PlanarConfiguration = 2` (the spec calls the field "irrelevant"
+  for `SamplesPerPixel = 1`), and `Predictor = 2` (TIFF 6.0 §14
+  differences whole sample components, undefined for bit-packed
+  data). Pixel-buffer size validation matches `Bilevel` (`pixels.len()
+  == ceil(width / 8) * height`, otherwise a precise error).
+
+  Validated by a binary-independent self-roundtrip suite (15 tests,
+  `tests/transparency_mask_roundtrip.rs`): all six accepted
+  compressors round-trip a 16x8 top-exterior/bottom-interior mask;
+  a 24x4 diagonal stripe stresses non-byte-aligned widths and the
+  CCITT scanner; a multi-page TIFF chain pairs a Gray8 main image
+  with a PackBits-compressed mask page and the decoder walks both
+  IFDs via `decode_tiff_all`. Two IFD-level inspection tests confirm
+  the encoder writes `PhotometricInterpretation = 4` and sets
+  `NewSubfileType` bit 2 only on `TransparencyMask` pages
+  (`gray8_page_does_not_set_mask_bit` catches accidental
+  fallthrough). Four negative tests pin the rejected combinations
+  (tiled / planar / predictor / wrong buffer size) so future
+  refactors keep the same shape of error message. The suite runs
+  identically with and without the `registry` Cargo feature — the
+  bilevel mask path is framework-independent.
+
 ### Performance
 
 - Encoder: `compress::pack_lzw` (TIFF 6.0 §13 LZW) now backs the
