@@ -143,6 +143,7 @@ fn encoder_gray8_lzw_roundtrips_through_convert() {
         predictor: false,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     // Round-trip through our own decoder first.
@@ -167,6 +168,7 @@ fn encoder_rgb24_packbits_roundtrips_through_convert() {
         predictor: false,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -189,6 +191,7 @@ fn encoder_rgb24_deflate_roundtrips_through_convert() {
         predictor: false,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -216,6 +219,7 @@ fn encoder_palette_roundtrips_through_convert() {
         predictor: false,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -240,6 +244,7 @@ fn encoder_tiffinfo_reports_expected_metadata() {
         predictor: false,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -283,6 +288,7 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         },
         EncodePage {
             width: 16,
@@ -292,6 +298,7 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         },
         EncodePage {
             width: 16,
@@ -301,6 +308,7 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         },
     ];
     let bytes = encode_tiff_multi(&pages).unwrap();
@@ -524,6 +532,7 @@ fn encoder_ccitt_rle_visible_to_tiffinfo() {
         predictor: false,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     // Self-roundtrip first.
@@ -571,6 +580,7 @@ fn encoder_ccitt_t4_1d_decodes_via_tiffcp_to_uncompressed() {
         predictor: false,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -628,6 +638,7 @@ fn encoder_ccitt_t4_1d_byte_aligned_decodes_via_tiffcp() {
         predictor: false,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -755,6 +766,7 @@ fn encoder_predictor_tiffinfo_reports_horizontal_differencing() {
         predictor: true,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -782,6 +794,7 @@ fn encoder_gray8_predictor_lzw_transcodes_via_tiffcp() {
         predictor: true,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_predictor_matches(&bytes, 50, 30, &pixels);
@@ -805,6 +818,7 @@ fn encoder_rgb24_predictor_deflate_transcodes_via_tiffcp() {
         predictor: true,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_predictor_matches(&bytes, 40, 24, &pixels);
@@ -821,6 +835,7 @@ fn encoder_gray8_predictor_lzw_roundtrips_through_convert() {
         predictor: true,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     // Our own decoder first.
@@ -846,6 +861,7 @@ fn encoder_rgb24_predictor_lzw_roundtrips_through_convert() {
         predictor: true,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -876,6 +892,7 @@ fn encoder_planar_rgb_transcodes_via_tiffcp() {
         predictor: false,
         planar: true,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -928,6 +945,7 @@ fn encoder_planar_predictor_lzw_transcodes_via_tiffcp() {
         predictor: true,
         planar: true,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -974,6 +992,7 @@ fn encoder_planar_rgb_roundtrips_through_convert() {
         predictor: false,
         planar: true,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -996,6 +1015,7 @@ fn encoder_planar_tiffinfo_reports_separate_planes() {
         predictor: false,
         planar: true,
         tiling: None,
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -1067,6 +1087,7 @@ fn encoder_tiled_gray8_transcodes_via_tiffcp() {
         predictor: false,
         planar: false,
         tiling: Some((16, 16)),
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 50, 30, &pixels);
@@ -1089,6 +1110,7 @@ fn encoder_tiled_rgb24_predictor_transcodes_via_tiffcp() {
         predictor: true,
         planar: false,
         tiling: Some((16, 16)),
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 48, 32, &pixels);
@@ -1106,6 +1128,7 @@ fn encoder_tiled_rgb24_roundtrips_through_convert() {
         predictor: false,
         planar: false,
         tiling: Some((32, 16)),
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -1124,6 +1147,7 @@ fn encoder_tiled_tiffinfo_reports_tile_geometry() {
         predictor: false,
         planar: false,
         tiling: Some((16, 16)),
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -1164,6 +1188,7 @@ fn encoder_tiled_planar_rgb24_transcodes_via_tiffcp() {
         predictor: false,
         planar: true,
         tiling: Some((16, 16)),
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 50, 30, &pixels);
@@ -1187,6 +1212,7 @@ fn encoder_tiled_planar_rgb24_predictor_transcodes_via_tiffcp() {
         predictor: true,
         planar: true,
         tiling: Some((16, 16)),
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 48, 32, &pixels);
@@ -1205,6 +1231,7 @@ fn encoder_tiled_planar_rgb24_roundtrips_through_convert() {
         predictor: false,
         planar: true,
         tiling: Some((32, 16)),
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -1223,6 +1250,7 @@ fn encoder_tiled_planar_tiffinfo_reports_tiles_and_separate_planes() {
         predictor: false,
         planar: true,
         tiling: Some((16, 16)),
+        bigtiff: false,
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {

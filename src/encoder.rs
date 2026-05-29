@@ -1,5 +1,6 @@
 //! TIFF 6.0 encoder — single-IFD or multi-page (multi-IFD chain),
-//! little-endian on-disk byte order ("II"), classic 32-bit offsets.
+//! little-endian on-disk byte order ("II"), classic 32-bit offsets or
+//! BigTIFF 64-bit offsets.
 //!
 //! The encoder targets the same baseline our decoder reads:
 //!
@@ -12,11 +13,17 @@
 //!   component plane for `PlanarConfiguration = 2` pages (see
 //!   [`EncodePage::planar`])
 //! * Single-IFD or multi-IFD chain via [`encode_tiff_multi`]
+//! * Variant: classic TIFF (8-byte header, magic 42, 32-bit offsets,
+//!   12-byte IFD entries) or BigTIFF (16-byte header, magic 43,
+//!   8-byte offset-bytesize + reserved, 64-bit offsets, 20-byte IFD
+//!   entries, 8-byte inline value/offset slot, LONG8/IFD8 types per
+//!   the Adobe Pagemaker 6.0 BigTIFF design), selectable via
+//!   [`EncodePage::bigtiff`].
 //!
-//! BigTIFF write, tile write, T.4 2-D / T.6 (Compression=4) encoding,
-//! JPEG-in-TIFF, and YCbCr / CIELab / CMYK output are intentionally out
-//! of scope for this round. The horizontal-differencing predictor
-//! (`Predictor = 2`, TIFF 6.0 §14) is supported on encode via the
+//! Tile write, T.4 2-D / T.6 (Compression=4) encoding, JPEG-in-TIFF,
+//! and YCbCr / CIELab / CMYK output are intentionally out of scope for
+//! this round. The horizontal-differencing predictor (`Predictor = 2`,
+//! TIFF 6.0 §14) is supported on encode via the
 //! [`EncodePage::predictor`] flag, and `PlanarConfiguration = 2`
 //! (separate component planes, §"PlanarConfiguration") via
 //! [`EncodePage::planar`].
@@ -97,6 +104,29 @@ pub struct EncodePage<'a> {
     /// first component plane are stored first, followed by all the offsets
     /// for the second component plane").
     pub tiling: Option<(u32, u32)>,
+    /// Emit BigTIFF instead of classic TIFF. Classic TIFF is the default
+    /// (`false`); when set, the encoder writes the 16-byte BigTIFF header
+    /// (II/MM + magic 43 + offset-bytesize 8 + reserved 0 + 8-byte
+    /// first-IFD offset) per the Adobe Pagemaker 6.0 BigTIFF design that
+    /// the decoder's [`crate::ifd::parse_header`] / [`crate::ifd::parse_ifd`]
+    /// already read. Each IFD then uses 20-byte entries (tag:u16 +
+    /// type:u16 + count:u64 + value-or-offset:u64) with an 8-byte
+    /// next-IFD pointer, the inline-value threshold widens from 4 to 8
+    /// bytes, and the LONG offset/byte-count fields (`StripOffsets`,
+    /// `StripByteCounts`, `TileOffsets`, `TileByteCounts`) are written
+    /// as LONG8 (type 16) so the on-disk layout is no longer pinned to
+    /// the 32-bit u32 ceiling that classic TIFF enforces (the encoder
+    /// returns precise `Error::Unsupported` if the final byte address
+    /// exceeds `u32::MAX` on a classic page; BigTIFF lifts that limit
+    /// to the full u64 file-offset range). The pixel / IFD-entry
+    /// semantics are otherwise identical to classic TIFF — all the
+    /// pixel formats, compressors, predictor / planar / tiling flags
+    /// compose with `bigtiff = true` unchanged.
+    ///
+    /// For [`encode_tiff_multi`], every page must agree on the variant
+    /// (all classic or all BigTIFF); mixing is rejected with a precise
+    /// error.
+    pub bigtiff: bool,
 }
 
 /// Pixel layouts the encoder knows how to write.
@@ -241,54 +271,80 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
         return Err(Error::invalid("TIFF encode: must supply at least one page"));
     }
 
+    // All pages must agree on the on-disk variant — a classic-TIFF file
+    // and a BigTIFF file have incompatible IFD layouts, so we cannot
+    // mix them in one chain.
+    let bigtiff = pages[0].bigtiff;
+    if pages.iter().any(|p| p.bigtiff != bigtiff) {
+        return Err(Error::invalid(
+            "TIFF encode: encode_tiff_multi pages must all agree on `bigtiff` (cannot mix \
+             classic-TIFF and BigTIFF IFDs in one file)",
+        ));
+    }
+
     // Layout strategy:
     //
-    // 1. Header (8 bytes): II + 42 + first-IFD-offset.
+    // 1. Header. Classic: 8 bytes (II + 42 + 4-byte first-IFD offset).
+    //    BigTIFF: 16 bytes (II + 43 + 2-byte off-size=8 + 2-byte
+    //    reserved=0 + 8-byte first-IFD offset), per Adobe Pagemaker 6.0
+    //    BigTIFF.
     // 2. For each page in order:
-    //    a. Compressed strip data (one strip per page).
+    //    a. Compressed strip / tile data.
     //    b. Out-of-line value blobs that don't fit inline (BitsPerSample
-    //       array for RGB, ColorMap for palette, StripOffsets/StripByteCounts
-    //       arrays when count > 1 — currently always count = 1, fits inline).
-    //    c. The IFD itself (count + 12 × entries + next-IFD).
+    //       array for RGB, ColorMap for palette, StripOffsets /
+    //       StripByteCounts arrays for >1 strip/tile).
+    //    c. The IFD itself (count + N × entry + next-IFD; size depends
+    //       on the variant).
     //
     // We compute layout in two passes: first sizing pass, then write
     // pass. The IFD offset of page N+1 is the next-IFD field of
     // page N's IFD.
 
+    // Variant-dependent constants. All addresses go through these so the
+    // classic / BigTIFF write paths share one set of loops.
+    let header_size: u64 = if bigtiff { 16 } else { 8 };
+    let entry_size: u64 = if bigtiff { 20 } else { 12 }; // u16+u16+count+value-or-offset
+    let count_size: u64 = if bigtiff { 8 } else { 2 }; // IFD entry-count field
+    let next_ifd_size: u64 = if bigtiff { 8 } else { 4 }; // next-IFD slot
+    let inline_threshold: usize = if bigtiff { 8 } else { 4 };
+    let offset_bytes: usize = if bigtiff { 8 } else { 4 }; // value-or-offset slot width
+    let array_align: u64 = if bigtiff { 8 } else { 4 }; // LONG8 vs LONG alignment
+
     // ---- Sizing pass: per-page, derive the on-disk layout ----
     let mut planned: Vec<PlannedPage> = Vec::with_capacity(pages.len());
     for p in pages {
-        let plan = plan_page_full(p)?;
+        let plan = plan_page_full(p, bigtiff)?;
         planned.push(plan);
     }
 
     // ---- Address assignment ----
     //
-    // Start at byte 8 (after the header). For each page we lay out:
-    // [compressed strip(s)][external blobs][StripOffsets/ByteCounts
-    // LONG arrays, only when >1 strip][IFD].
+    // Start at byte `header_size` (after the variant-specific header).
+    // For each page we lay out:
+    // [compressed strip(s) / tile(s)][external blobs][StripOffsets /
+    // ByteCounts LONG (classic) or LONG8 (BigTIFF) arrays, only when
+    // count > 1][IFD].
     //
     // We need to know the IFD offset *before* writing it (it goes in
     // the previous IFD's next-IFD slot or in the header for the
     // first page), so we walk pages once to assign byte ranges. The
     // StripOffsets / StripByteCounts arrays are written out-of-line
-    // only for multi-strip (planar) pages; a single-strip chunky page
-    // keeps both LONGs inline in the IFD value slot.
-    let mut cursor: u64 = 8;
+    // only when there are multiple strips/tiles; a single-strip chunky
+    // page keeps both inline in the IFD value slot.
+    let mut cursor: u64 = header_size;
     struct PlannedPageAddr {
-        // One (offset, size) per strip, in plane order. For chunky
-        // pages this has length 1.
+        // One (offset, size) per strip / tile, in storage order.
         strips: Vec<(u64, u64)>,
         externals: Vec<(BlobId, u64, u64)>, // (id, offset, size)
         // File offsets of the out-of-line StripOffsets / StripByteCounts
-        // LONG arrays (only Some when the page has >1 strip).
+        // arrays (only Some when there is more than one strip/tile).
         strip_offsets_array: Option<u64>,
         strip_byte_counts_array: Option<u64>,
         ifd_offset: u64,
     }
     let mut addrs: Vec<PlannedPageAddr> = Vec::with_capacity(planned.len());
     for plan in &planned {
-        // Strip payloads, laid out contiguously in plane order.
+        // Strip / tile payloads, laid out contiguously in storage order.
         let mut strip_addrs = Vec::with_capacity(plan.strips.len());
         for strip in &plan.strips {
             strip_addrs.push((cursor, strip.len() as u64));
@@ -296,10 +352,9 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
         }
         let mut ext_addrs = Vec::with_capacity(plan.externals.len());
         for (id, blob) in &plan.externals {
-            // SHORT/LONG arrays must be 2-/4-byte aligned. Align
-            // conservatively to 2 bytes — enough for SHORTs which
-            // is what we emit (ColorMap = SHORTs, BitsPerSample =
-            // SHORTs).
+            // SHORT / LONG arrays should be 2-/4-byte aligned. Align
+            // conservatively to 2 bytes — enough for SHORTs which is
+            // what we emit (ColorMap = SHORTs, BitsPerSample = SHORTs).
             if cursor % 2 != 0 {
                 cursor += 1;
             }
@@ -307,27 +362,28 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
             cursor += blob.len() as u64;
         }
         // Out-of-line StripOffsets / StripByteCounts arrays for
-        // multi-strip (planar) pages. Both are LONG arrays, so align
-        // to 4 bytes. Each holds `strips.len()` LONGs.
+        // multi-strip / multi-tile pages. Classic TIFF uses LONG
+        // (4 bytes per value); BigTIFF uses LONG8 (8 bytes per value),
+        // so the alignment + per-entry stride both follow the variant.
         let (strip_offsets_array, strip_byte_counts_array) = if plan.strips.len() > 1 {
-            if cursor % 4 != 0 {
-                cursor += 4 - (cursor % 4);
+            if cursor % array_align != 0 {
+                cursor += array_align - (cursor % array_align);
             }
             let so = cursor;
-            cursor += 4 * plan.strips.len() as u64;
+            cursor += array_align * plan.strips.len() as u64;
             let sbc = cursor;
-            cursor += 4 * plan.strips.len() as u64;
+            cursor += array_align * plan.strips.len() as u64;
             (Some(so), Some(sbc))
         } else {
             (None, None)
         };
-        // IFD must be 2-byte aligned (entries are u16/u32 mixes).
+        // IFD must be 2-byte aligned (entries start with u16 fields).
         if cursor % 2 != 0 {
             cursor += 1;
         }
         let ifd_offset = cursor;
-        // count(2) + entries × 12 + next_ifd(4)
-        let ifd_size = 2 + (plan.ifd.entries.len() as u64) * 12 + 4;
+        // count(2 or 8) + entries × (12 or 20) + next_ifd(4 or 8)
+        let ifd_size = count_size + (plan.ifd.entries.len() as u64) * entry_size + next_ifd_size;
         cursor += ifd_size;
         addrs.push(PlannedPageAddr {
             strips: strip_addrs,
@@ -336,9 +392,15 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
             strip_byte_counts_array,
             ifd_offset,
         });
-        if ifd_offset > u32::MAX as u64 || cursor > u32::MAX as u64 {
+        // Classic TIFF caps every offset (and therefore the total file
+        // size if the IFD is at the end of the file) at u32::MAX.
+        // BigTIFF lifts the cap to the full u64 range — there is no
+        // documented BigTIFF size ceiling in the Adobe Pagemaker 6.0
+        // design beyond what u64 can express.
+        if !bigtiff && (ifd_offset > u32::MAX as u64 || cursor > u32::MAX as u64) {
             return Err(Error::invalid(
-                "TIFF encode: classic-TIFF 32-bit offset overflow (would need BigTIFF)",
+                "TIFF encode: classic-TIFF 32-bit offset overflow (would need BigTIFF — set \
+                 EncodePage::bigtiff = true)",
             ));
         }
     }
@@ -346,14 +408,27 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
     // ---- Write pass ----
     let total = cursor as usize;
     let mut out = vec![0u8; total];
-    // Header.
-    out[0] = b'I';
-    out[1] = b'I';
-    out[2..4].copy_from_slice(&42u16.to_le_bytes());
-    out[4..8].copy_from_slice(&(addrs[0].ifd_offset as u32).to_le_bytes());
+    // Header — classic 8-byte or BigTIFF 16-byte.
+    if bigtiff {
+        // II + 43 + offset-bytesize 8 + reserved 0 + 8-byte first-IFD
+        // offset. Per the BigTIFF design (`docs/image/tiff/tiff6.pdf`
+        // BigTIFF / Adobe Pagemaker 6.0 sections, reproduced in
+        // `src/ifd.rs`).
+        out[0] = b'I';
+        out[1] = b'I';
+        out[2..4].copy_from_slice(&BIGTIFF_MAGIC.to_le_bytes());
+        out[4..6].copy_from_slice(&8u16.to_le_bytes()); // offset bytesize
+        out[6..8].copy_from_slice(&0u16.to_le_bytes()); // reserved
+        out[8..16].copy_from_slice(&addrs[0].ifd_offset.to_le_bytes());
+    } else {
+        out[0] = b'I';
+        out[1] = b'I';
+        out[2..4].copy_from_slice(&TIFF_MAGIC.to_le_bytes());
+        out[4..8].copy_from_slice(&(addrs[0].ifd_offset as u32).to_le_bytes());
+    }
 
     for (i, (plan, addr)) in planned.iter().zip(addrs.iter()).enumerate() {
-        // Strip payload(s), one per plane for planar pages.
+        // Strip / tile payload(s).
         for (strip, (off, size)) in plan.strips.iter().zip(addr.strips.iter()) {
             assert_eq!(strip.len() as u64, *size);
             out[*off as usize..(*off + *size) as usize].copy_from_slice(strip);
@@ -365,58 +440,102 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
             assert_eq!(blob.len() as u64, *size);
             out[*off as usize..(*off + *size) as usize].copy_from_slice(blob);
         }
-        // Out-of-line StripOffsets / StripByteCounts LONG arrays (only
-        // present for multi-strip planar pages). Each entry is the
-        // corresponding strip's file offset / compressed length.
+        // Out-of-line StripOffsets / StripByteCounts arrays (only present
+        // for multi-strip / multi-tile pages). Classic TIFF writes
+        // 4 bytes per entry (LONG); BigTIFF writes 8 bytes (LONG8).
         if let Some(so) = addr.strip_offsets_array {
             for (k, (off, _)) in addr.strips.iter().enumerate() {
-                let slot = so as usize + k * 4;
-                out[slot..slot + 4].copy_from_slice(&(*off as u32).to_le_bytes());
+                let slot = so as usize + k * (array_align as usize);
+                if bigtiff {
+                    out[slot..slot + 8].copy_from_slice(&off.to_le_bytes());
+                } else {
+                    out[slot..slot + 4].copy_from_slice(&(*off as u32).to_le_bytes());
+                }
             }
         }
         if let Some(sbc) = addr.strip_byte_counts_array {
             for (k, (_, size)) in addr.strips.iter().enumerate() {
-                let slot = sbc as usize + k * 4;
-                out[slot..slot + 4].copy_from_slice(&(*size as u32).to_le_bytes());
+                let slot = sbc as usize + k * (array_align as usize);
+                if bigtiff {
+                    out[slot..slot + 8].copy_from_slice(&size.to_le_bytes());
+                } else {
+                    out[slot..slot + 4].copy_from_slice(&(*size as u32).to_le_bytes());
+                }
             }
         }
         // IFD.
         let ifd_off = addr.ifd_offset as usize;
-        out[ifd_off..ifd_off + 2].copy_from_slice(&(plan.ifd.entries.len() as u16).to_le_bytes());
-        let next_ifd_off = ifd_off + 2 + plan.ifd.entries.len() * 12;
-        // Resolve each entry's value-or-offset slot.
+        // Entry-count field — 2 bytes in classic TIFF, 8 bytes in BigTIFF.
+        if bigtiff {
+            out[ifd_off..ifd_off + 8]
+                .copy_from_slice(&(plan.ifd.entries.len() as u64).to_le_bytes());
+        } else {
+            out[ifd_off..ifd_off + 2]
+                .copy_from_slice(&(plan.ifd.entries.len() as u16).to_le_bytes());
+        }
+        let entries_start = ifd_off + count_size as usize;
+        let next_ifd_off = entries_start + plan.ifd.entries.len() * (entry_size as usize);
+        // Resolve each entry's value-or-offset slot. The entry layout
+        // differs between variants:
+        //   classic: tag(2) + type(2) + count(4)  + value/offset(4)   = 12 bytes
+        //   BigTIFF: tag(2) + type(2) + count(8)  + value/offset(8)   = 20 bytes
         for (k, e) in plan.ifd.entries.iter().enumerate() {
-            let entry_off = ifd_off + 2 + k * 12;
+            let entry_off = entries_start + k * (entry_size as usize);
             out[entry_off..entry_off + 2].copy_from_slice(&e.tag.to_le_bytes());
             out[entry_off + 2..entry_off + 4].copy_from_slice(&e.field_type.to_le_bytes());
-            out[entry_off + 4..entry_off + 8].copy_from_slice(&e.count.to_le_bytes());
+            if bigtiff {
+                out[entry_off + 4..entry_off + 12].copy_from_slice(&e.count.to_le_bytes());
+            } else {
+                // Classic TIFF stores count as u32; if a caller-side count
+                // somehow exceeds u32::MAX in classic mode the address
+                // assignment above would have already errored, but we
+                // guard defensively.
+                if e.count > u32::MAX as u64 {
+                    return Err(Error::invalid(
+                        "TIFF encode: classic-TIFF entry count exceeds u32::MAX",
+                    ));
+                }
+                out[entry_off + 4..entry_off + 8].copy_from_slice(&(e.count as u32).to_le_bytes());
+            }
             // Value-or-offset slot:
-            let slot = &mut out[entry_off + 8..entry_off + 12];
+            let slot_off = entry_off + if bigtiff { 12 } else { 8 };
+            let slot = &mut out[slot_off..slot_off + offset_bytes];
             match &e.value {
                 IfdValue::Inline(bytes) => {
                     let n = bytes.len();
+                    debug_assert!(n <= inline_threshold);
                     slot[..n].copy_from_slice(bytes);
-                    if n < 4 {
-                        for b in &mut slot[n..] {
-                            *b = 0;
-                        }
+                    for b in &mut slot[n..] {
+                        *b = 0;
                     }
                 }
                 IfdValue::StripOffsets => {
-                    if let Some(so) = addr.strip_offsets_array {
-                        // >1 strip: value slot holds the file offset of
-                        // the out-of-line LONG array.
-                        slot.copy_from_slice(&(so as u32).to_le_bytes());
+                    let val: u64 = if let Some(so) = addr.strip_offsets_array {
+                        // >1 strip / tile: value slot holds the file
+                        // offset of the out-of-line LONG / LONG8 array.
+                        so
                     } else {
-                        // Single strip: the LONG offset fits inline.
-                        slot.copy_from_slice(&(addr.strips[0].0 as u32).to_le_bytes());
+                        // Single strip / tile: the offset fits inline
+                        // (LONG for classic — 4 bytes; LONG8 for BigTIFF
+                        // — 8 bytes, exactly filling the value slot).
+                        addr.strips[0].0
+                    };
+                    if bigtiff {
+                        slot.copy_from_slice(&val.to_le_bytes());
+                    } else {
+                        slot.copy_from_slice(&(val as u32).to_le_bytes());
                     }
                 }
                 IfdValue::StripByteCounts => {
-                    if let Some(sbc) = addr.strip_byte_counts_array {
-                        slot.copy_from_slice(&(sbc as u32).to_le_bytes());
+                    let val: u64 = if let Some(sbc) = addr.strip_byte_counts_array {
+                        sbc
                     } else {
-                        slot.copy_from_slice(&(addr.strips[0].1 as u32).to_le_bytes());
+                        addr.strips[0].1
+                    };
+                    if bigtiff {
+                        slot.copy_from_slice(&val.to_le_bytes());
+                    } else {
+                        slot.copy_from_slice(&(val as u32).to_le_bytes());
                     }
                 }
                 IfdValue::ExternalBlob(id) => {
@@ -427,17 +546,26 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
                         .ok_or_else(|| {
                             Error::invalid("TIFF encode: missing planned blob for entry")
                         })?;
-                    slot.copy_from_slice(&(*off as u32).to_le_bytes());
+                    if bigtiff {
+                        slot.copy_from_slice(&off.to_le_bytes());
+                    } else {
+                        slot.copy_from_slice(&(*off as u32).to_le_bytes());
+                    }
                 }
             }
         }
         // Next-IFD pointer.
-        let next_offset: u32 = if i + 1 < addrs.len() {
-            addrs[i + 1].ifd_offset as u32
+        let next_offset: u64 = if i + 1 < addrs.len() {
+            addrs[i + 1].ifd_offset
         } else {
             0
         };
-        out[next_ifd_off..next_ifd_off + 4].copy_from_slice(&next_offset.to_le_bytes());
+        if bigtiff {
+            out[next_ifd_off..next_ifd_off + 8].copy_from_slice(&next_offset.to_le_bytes());
+        } else {
+            out[next_ifd_off..next_ifd_off + 4]
+                .copy_from_slice(&(next_offset as u32).to_le_bytes());
+        }
     }
     Ok(out)
 }
@@ -469,7 +597,10 @@ enum IfdValue {
 struct PageIfdEntry {
     tag: u16,
     field_type: u16,
-    count: u32,
+    /// Field-value count (`count` in IFD parlance). Classic TIFF stores
+    /// this as a u32; BigTIFF as a u64. We keep it u64 here and narrow
+    /// at write time, with a range check for the classic path.
+    count: u64,
     value: IfdValue,
 }
 
@@ -478,7 +609,7 @@ struct PageIfd {
     entries: Vec<PageIfdEntry>,
 }
 
-fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
+fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     // CCITT schemes are bilevel-only per TIFF 6.0 §10 / §11. Both the
     // generic Bilevel input and the TransparencyMask variant carry 1-bit
     // data with identical on-disk packing and so satisfy that gate.
@@ -802,7 +933,7 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
     } else {
         PLANAR_CHUNKY
     };
-    let strip_count = strips.len() as u32;
+    let strip_count: u64 = strips.len() as u64;
 
     // Build the IFD entry list. Tags must appear in ascending order
     // per spec.
@@ -844,16 +975,20 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
         count: 1,
         value: IfdValue::Inline(p.height.to_le_bytes().to_vec()),
     });
-    // 258 BitsPerSample (SHORT × samples_per_pixel)
+    // 258 BitsPerSample (SHORT × samples_per_pixel). BigTIFF widens the
+    // inline value/offset slot from 4 to 8 bytes, so the Rgb24 3-entry
+    // SHORT array (6 bytes) now fits inline; classic TIFF still has
+    // to spill it out-of-line.
     let bps_inline_bytes: Vec<u8> = bits_per_sample
         .iter()
         .flat_map(|b| b.to_le_bytes())
         .collect();
-    if bps_inline_bytes.len() <= 4 {
+    let inline_threshold: usize = if bigtiff { 8 } else { 4 };
+    if bps_inline_bytes.len() <= inline_threshold {
         entries.push(PageIfdEntry {
             tag: TAG_BITS_PER_SAMPLE,
             field_type: TYPE_SHORT,
-            count: bits_per_sample.len() as u32,
+            count: bits_per_sample.len() as u64,
             value: IfdValue::Inline(bps_inline_bytes),
         });
     } else {
@@ -861,7 +996,7 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
         entries.push(PageIfdEntry {
             tag: TAG_BITS_PER_SAMPLE,
             field_type: TYPE_SHORT,
-            count: bits_per_sample.len() as u32,
+            count: bits_per_sample.len() as u64,
             value: IfdValue::ExternalBlob(BlobId::BitsPerSample),
         });
     }
@@ -879,16 +1014,19 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
         count: 1,
         value: IfdValue::Inline(photometric.to_le_bytes().to_vec()),
     });
-    // 273 StripOffsets (LONG). Omitted entirely for tiled pages — §15:
-    // "When the tiling fields … are used, they replace the StripOffsets,
+    // 273 StripOffsets. Omitted entirely for tiled pages — §15: "When
+    // the tiling fields … are used, they replace the StripOffsets,
     // StripByteCounts, and RowsPerStrip fields … Do not use both
     // strip-oriented and tile-oriented fields in the same TIFF file."
     // count=1 for chunky (one strip), or SamplesPerPixel for
-    // PlanarConfiguration=2 (one strip per plane).
+    // PlanarConfiguration=2 (one strip per plane). Classic TIFF stores
+    // offsets as LONG (4 bytes); BigTIFF as LONG8 (8 bytes) so a single
+    // 4 GiB+ strip can still be addressed inline in the value slot.
+    let offset_field_type = if bigtiff { TYPE_LONG8 } else { TYPE_LONG };
     if p.tiling.is_none() {
         entries.push(PageIfdEntry {
             tag: TAG_STRIP_OFFSETS,
-            field_type: TYPE_LONG,
+            field_type: offset_field_type,
             count: strip_count,
             value: IfdValue::StripOffsets,
         });
@@ -910,12 +1048,13 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
             value: IfdValue::Inline(p.height.to_le_bytes().to_vec()),
         });
     }
-    // 279 StripByteCounts (LONG). count matches StripOffsets. Omitted
-    // for tiled pages (replaced by TileByteCounts).
+    // 279 StripByteCounts. count matches StripOffsets. Omitted for
+    // tiled pages (replaced by TileByteCounts). LONG/LONG8 picks the
+    // variant-appropriate offset width (above).
     if p.tiling.is_none() {
         entries.push(PageIfdEntry {
             tag: TAG_STRIP_BYTE_COUNTS,
-            field_type: TYPE_LONG,
+            field_type: offset_field_type,
             count: strip_count,
             value: IfdValue::StripByteCounts,
         });
@@ -958,7 +1097,7 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
     // 320 ColorMap (SHORT, 3*2^bps) — palette only.
     if let Some(cm) = color_map_words {
         let bytes: Vec<u8> = cm.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let count = cm.len() as u32;
+        let count = cm.len() as u64;
         externals.push((BlobId::ColorMapWords, bytes));
         entries.push(PageIfdEntry {
             tag: TAG_COLOR_MAP,
@@ -988,17 +1127,18 @@ fn plan_page_full(p: &EncodePage<'_>) -> Result<PlannedPage> {
             count: 1,
             value: IfdValue::Inline(tile_h.to_le_bytes().to_vec()),
         });
-        // 324 TileOffsets (LONG, N = TilesPerImage for chunky).
+        // 324 TileOffsets (LONG, or LONG8 in BigTIFF; N = TilesPerImage
+        // for chunky, SamplesPerPixel × TilesPerImage for planar).
         entries.push(PageIfdEntry {
             tag: TAG_TILE_OFFSETS,
-            field_type: TYPE_LONG,
+            field_type: offset_field_type,
             count: strip_count,
             value: IfdValue::StripOffsets,
         });
-        // 325 TileByteCounts (LONG, N = TilesPerImage for chunky).
+        // 325 TileByteCounts (LONG, or LONG8 in BigTIFF).
         entries.push(PageIfdEntry {
             tag: TAG_TILE_BYTE_COUNTS,
-            field_type: TYPE_LONG,
+            field_type: offset_field_type,
             count: strip_count,
             value: IfdValue::StripByteCounts,
         });
@@ -1278,6 +1418,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1302,6 +1443,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1320,6 +1462,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1338,6 +1481,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1366,6 +1510,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1438,6 +1583,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1457,6 +1603,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1478,6 +1625,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1498,6 +1646,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1520,6 +1669,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1540,6 +1690,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let r = encode_tiff(&page);
         assert!(r.is_err());
@@ -1558,6 +1709,7 @@ mod tests {
                 predictor: false,
                 planar: false,
                 tiling: None,
+                bigtiff: false,
             },
             EncodePage {
                 width: 8,
@@ -1567,6 +1719,7 @@ mod tests {
                 predictor: false,
                 planar: false,
                 tiling: None,
+                bigtiff: false,
             },
         ];
         let bytes = encode_tiff_multi(&pages).unwrap();
@@ -1611,6 +1764,7 @@ mod tests {
             predictor: true,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1743,6 +1897,7 @@ mod tests {
             predictor: true,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1767,6 +1922,7 @@ mod tests {
             predictor: true,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let b = encode_tiff(&page).unwrap();
         let ifd_off = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
@@ -1793,6 +1949,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let b2 = encode_tiff(&page2).unwrap();
         let ifd2 = u32::from_le_bytes([b2[4], b2[5], b2[6], b2[7]]) as usize;
@@ -1815,6 +1972,7 @@ mod tests {
             predictor: true,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -1830,6 +1988,7 @@ mod tests {
             predictor: true,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -1864,6 +2023,7 @@ mod tests {
             predictor,
             planar: true,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -1920,6 +2080,7 @@ mod tests {
             predictor: false,
             planar: true,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
 
@@ -1963,6 +2124,7 @@ mod tests {
             predictor: false,
             planar: true,
             tiling: None,
+            bigtiff: false,
         };
         assert!(encode_tiff(&page).is_err());
 
@@ -1979,6 +2141,7 @@ mod tests {
             predictor: false,
             planar: true,
             tiling: None,
+            bigtiff: false,
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -1997,6 +2160,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let ifd_off = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
@@ -2038,6 +2202,7 @@ mod tests {
             predictor,
             planar: false,
             tiling: Some(tiling),
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -2190,6 +2355,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: Some((16, 16)),
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -2215,6 +2381,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: Some((16, 16)),
+            bigtiff: false,
         };
         let b = encode_tiff(&page).unwrap();
         let ifd_off = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
@@ -2256,6 +2423,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: Some((20, 16)),
+            bigtiff: false,
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -2271,6 +2439,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: Some((16, 16)),
+            bigtiff: false,
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -2286,6 +2455,7 @@ mod tests {
             predictor: false,
             planar: false,
             tiling: Some((16, 16)),
+            bigtiff: false,
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -2304,6 +2474,7 @@ mod tests {
             predictor: false,
             planar: true,
             tiling: Some((16, 16)),
+            bigtiff: false,
         };
         let bytes = encode_tiff(&page).expect("planar tiled encode");
         let d = decode_tiff(&bytes).expect("planar tiled decode");
@@ -2326,6 +2497,7 @@ mod tests {
                 predictor: false,
                 planar: false,
                 tiling: Some((16, 16)),
+                bigtiff: false,
             },
             EncodePage {
                 width: 16,
@@ -2335,6 +2507,7 @@ mod tests {
                 predictor: false,
                 planar: false,
                 tiling: None,
+                bigtiff: false,
             },
         ];
         let bytes = encode_tiff_multi(&pages).unwrap();

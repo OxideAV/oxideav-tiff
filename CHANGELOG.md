@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encoder: BigTIFF write (Adobe Pagemaker 6.0 BigTIFF design) via the
+  new `EncodePage::bigtiff` flag. When `true`, the encoder produces a
+  16-byte header (II/MM + magic 43 + offset-bytesize 8 + reserved 0 +
+  8-byte first-IFD offset), 20-byte IFD entries (`tag:u16 + type:u16 +
+  count:u64 + value-or-offset:u64`), an 8-byte next-IFD pointer, and
+  widens the inline-value threshold from 4 to 8 bytes. `StripOffsets`,
+  `StripByteCounts`, `TileOffsets`, and `TileByteCounts` switch from
+  LONG (type 4) to LONG8 (type 16) so multi-GiB offsets fit; the
+  `BitsPerSample[3]` SHORT array for `Rgb24` (6 bytes) now stays inline
+  rather than spilling out-of-line. The classic-TIFF 32-bit-offset
+  overflow check is lifted in BigTIFF mode (the on-disk ceiling becomes
+  the full u64 file-offset range). Pixel formats, compressors,
+  `predictor` / `planar` / `tiling` flags all compose unchanged.
+  `encode_tiff_multi` requires every page to agree on the variant —
+  mixing classic and BigTIFF IFDs in one chain is rejected with a
+  precise error since the on-disk layouts are wire-incompatible. The
+  decoder already accepts both variants via `parse_header` /
+  `parse_ifd` (round-136 BigTIFF read), so every supported pixel
+  format / compression combination now round-trips on both sides.
+
+  Validated by 14 new self-roundtrip + on-disk-layout tests
+  (`tests/encode_bigtiff.rs`): header byte assertions (II + magic 43 +
+  off-size 8 + reserved 0 + 8-byte first-IFD offset, plus a regression
+  case proving `bigtiff = false` keeps the classic 8-byte header with
+  magic 42); an IFD-walking helper independent of our decoder that
+  pulls `(tag, field_type, count, value_or_offset)` straight from
+  bytes to assert `StripOffsets` / `StripByteCounts` carry
+  `field_type = 16` (LONG8); a `BitsPerSample` inlining check for
+  `Rgb24` that asserts the three SHORT values pack into the 8-byte
+  value slot with no external blob; pixel-roundtrips for Gray8
+  (uncompressed and LZW + Predictor=2), Gray16Le (Deflate), Rgb24
+  (PackBits, planar+LZW, tiled), Palette8, and bilevel CCITT-MH; a
+  two-page BigTIFF chain that mixes LZW Gray8 with Deflate Rgb24; and
+  a negative test pinning the mixed-variant rejection. The planar
+  case exercises the out-of-line LONG8 array path (three plane
+  offsets in `StripOffsets`); the tiled case asserts the
+  `TileOffsets` `field_type = 16` and the 4-tile count for a
+  32x32 image over 16x16 tiles.
+
 - Decoder + Encoder: `PhotometricInterpretation = 4` (Transparency
   Mask), per TIFF 6.0 page 37 + the `NewSubfileType` bit-2 companion
   flag (page 36, "1 if the image defines a transparency mask for

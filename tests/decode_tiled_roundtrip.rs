@@ -118,6 +118,7 @@ fn gray8_page<'a>(
         predictor: pred,
         planar: false,
         tiling,
+        bigtiff: false,
     }
 }
 
@@ -195,9 +196,11 @@ fn tiled_gray16le_partial_edges_match_strip() {
         predictor: false,
         planar: false,
         tiling: Some((16, 16)),
+        bigtiff: false,
     };
     let page_s = EncodePage {
         tiling: None,
+        bigtiff: false,
         ..page_t.clone()
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
@@ -217,9 +220,11 @@ fn tiled_gray16le_predictor_match_strip() {
         predictor: true,
         planar: false,
         tiling: Some((16, 16)),
+        bigtiff: false,
     };
     let page_s = EncodePage {
         tiling: None,
+        bigtiff: false,
         ..page_t.clone()
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
@@ -239,9 +244,11 @@ fn tiled_rgb24_partial_edges_match_strip() {
         predictor: false,
         planar: false,
         tiling: Some((16, 16)),
+        bigtiff: false,
     };
     let page_s = EncodePage {
         tiling: None,
+        bigtiff: false,
         ..page_t.clone()
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
@@ -262,9 +269,11 @@ fn tiled_rgb24_predictor_match_strip() {
         predictor: true,
         planar: false,
         tiling: Some((16, 16)),
+        bigtiff: false,
     };
     let page_s = EncodePage {
         tiling: None,
+        bigtiff: false,
         ..page_t.clone()
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
@@ -285,9 +294,11 @@ fn tiled_rgb24_nonsquare_tiles_match_strip() {
         predictor: false,
         planar: false,
         tiling: Some((32, 16)),
+        bigtiff: false,
     };
     let page_s = EncodePage {
         tiling: None,
+        bigtiff: false,
         ..page_t.clone()
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
@@ -315,9 +326,11 @@ fn tiled_palette8_match_strip() {
         predictor: false,
         planar: false,
         tiling: Some((16, 16)),
+        bigtiff: false,
     };
     let page_s = EncodePage {
         tiling: None,
+        bigtiff: false,
         ..page_t.clone()
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
@@ -358,6 +371,7 @@ fn rgb_planar_tiled_page<'a>(
         predictor: pred,
         planar: true,
         tiling: Some(tile),
+        bigtiff: false,
     }
 }
 
@@ -492,6 +506,7 @@ fn tiled_planar_rejected_on_single_sample_formats() {
         predictor: false,
         planar: true,
         tiling: Some((16, 16)),
+        bigtiff: false,
     });
     assert!(r.is_err(), "planar tiling on Gray8 must be rejected");
 }

@@ -81,6 +81,7 @@ fn encode_mask(w: u32, h: u32, bytes: &[u8], compression: TiffCompression) -> Ve
         predictor: false,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     encode_tiff(&page).expect("encode_tiff TransparencyMask")
 }
@@ -229,6 +230,7 @@ fn multipage_main_image_plus_mask() {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         },
         EncodePage {
             width: w,
@@ -240,6 +242,7 @@ fn multipage_main_image_plus_mask() {
             predictor: false,
             planar: false,
             tiling: None,
+            bigtiff: false,
         },
     ];
     let buf = encode_tiff_multi(&pages).expect("multipage encode");
@@ -321,6 +324,7 @@ fn gray8_page_does_not_set_mask_bit() {
         predictor: false,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let buf = encode_tiff(&page).expect("encode Gray8");
     let header = parse_header(&buf).expect("parse_header");
@@ -357,6 +361,7 @@ fn transparency_mask_tiled_rejected() {
         predictor: false,
         planar: false,
         tiling: Some((16, 16)),
+        bigtiff: false,
     };
     let err = encode_tiff(&page).expect_err("tiled TransparencyMask must fail");
     let msg = format!("{err}");
@@ -381,6 +386,7 @@ fn transparency_mask_planar_rejected() {
         predictor: false,
         planar: true,
         tiling: None,
+        bigtiff: false,
     };
     let err = encode_tiff(&page).expect_err("planar TransparencyMask must fail");
     let msg = format!("{err}");
@@ -403,6 +409,7 @@ fn transparency_mask_predictor_rejected() {
         predictor: true,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let err = encode_tiff(&page).expect_err("predictor + TransparencyMask must fail");
     let msg = format!("{err}");
@@ -426,6 +433,7 @@ fn transparency_mask_wrong_buffer_size_rejected() {
         predictor: false,
         planar: false,
         tiling: None,
+        bigtiff: false,
     };
     let err = encode_tiff(&page).expect_err("size-mismatch TransparencyMask must fail");
     let msg = format!("{err}");

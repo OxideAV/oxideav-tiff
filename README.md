@@ -224,9 +224,28 @@ outputs additionally validate by asking `tiffcp -c none` to
 transcode our `Compression = 3` stream back to uncompressed and
 checking the resulting pixels match the original input.
 
+### BigTIFF write
+
+`EncodePage::bigtiff = true` switches the writer from classic TIFF
+(8-byte header, magic 42, 32-bit offsets, 12-byte IFD entries) to
+BigTIFF (16-byte header, magic 43, offset-bytesize 8 + reserved 0 + 8-byte
+first-IFD offset, 20-byte IFD entries with u64 count and u64
+value-or-offset, 8-byte next-IFD pointer) per the Adobe Pagemaker 6.0
+BigTIFF design that the decoder's `parse_header` / `parse_ifd` already
+read. `StripOffsets`, `StripByteCounts`, `TileOffsets`, and
+`TileByteCounts` are written as `LONG8` (field type 16, 8 bytes per
+value), and the wider 8-byte value/offset slot lets a 3-component
+`BitsPerSample` array stay inline that classic TIFF would have spilled
+out-of-line. The classic 32-bit-offset overflow check the encoder
+performs against `u32::MAX` is lifted in BigTIFF mode (the on-disk
+ceiling is the full u64 file-offset range). Pixel formats, compressors,
+predictor / planar / tiling flags compose with `bigtiff = true`
+unchanged, and the multi-IFD chain ([`encode_tiff_multi`]) is supported
+as long as every page agrees on the variant (a mixed-variant chain
+errors out — classic and BigTIFF IFD layouts are wire-incompatible).
+
 ## Backlog (not yet implemented)
 
-- BigTIFF write
 - CCITT T.4 2-D coding (`Compression = 3` with `T4Options` bit 0
   set) and T.6 / Group 4 (`Compression = 4`). The 2-D Pass /
   Horizontal / Vertical mode codes are not in the TIFF 6.0 PDF —
