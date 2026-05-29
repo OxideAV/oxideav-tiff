@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.2...v0.0.3) - 2026-05-29
+
+### Other
+
+- CCITT T.4 2-D + T.6 (Group 4) decode via Table 4/T.4
+- PhotometricInterpretation = 8 (CIE L*a*b*) per TIFF 6.0 §23
+- BigTIFF write (Adobe Pagemaker 6.0 BigTIFF design)
+- decoder + encoder: PhotometricInterpretation = 4 (Transparency Mask) per TIFF 6.0 page 37
+- pack_lzw flat-array trie + criterion bench (round 129)
+- add cargo-fuzz decoder target + fix 3 panic vectors it caught
+- CMYK JPEG-in-TIFF (Compression=7, Photometric=5, SamplesPerPixel=4)
+- tiled PlanarConfiguration=2 write (one tile grid per plane, §15)
+- validate tiled-layout read path via binary-independent self-roundtrip (TIFF 6.0 §15)
+- tiled layout (TIFF 6.0 §15) via EncodePage::tiling
+- PlanarConfiguration = 2 (separate component planes)
+- horizontal-differencing predictor (Predictor=2, TIFF 6.0 §14)
+- PlanarConfiguration = 2 (separate component planes)
+- JPEG-in-TIFF (Compression=7, TIFF Tech Note 2)
+- CCITT Modified Huffman (Compression=2) + T.4 1-D (Compression=3)
+- rewrite 4 libtiff / libjpeg cross-reference comments
+- FillOrder = 2 (LSB-first) for bilevel strips and tiles
+- CCITT Modified Huffman (Compression=2) + T.4 1-D (Compression=3)
+- update description to reflect round-2 encoder + BigTIFF/tiles/CMYK/YCbCr/multi-page
+- encoder + BigTIFF/tiles/CMYK/YCbCr/multi-page decode (round 2)
+
 ### Added
 
 - Decoder: CCITT T.4 2-D (Modified READ / MR — `Compression = 3`
