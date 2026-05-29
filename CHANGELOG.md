@@ -9,6 +9,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decoder: `PhotometricInterpretation = 8` (1976 CIE L*a*b*), per
+  TIFF 6.0 §23 "CIE L*a*b* Images" (page 110). Both the spec-defined
+  layouts decode:
+
+  * `SamplesPerPixel = 3, BitsPerSample = 8` — chunky `(L*, a*, b*)`
+    triples where L* is unsigned 0..255 mapping linearly to the
+    perceptual 0..100 lightness scale, and a*, b* are
+    two's-complement signed 8-bit values in -128..127 representing
+    the red/green and yellow/blue chrominance channels (§23: "L*
+    range is from 0 ... to 100 ... The a* and b* ranges will be
+    represented as signed 8 bit values having the range -127 to
+    +127"). Decoded to display `Rgb24` via the §23 conversion
+    pipeline: Lab → XYZ (D65 reference white per §23 page 111
+    "Generally, D65 illumination is used and a perfect reflecting
+    diffuser is used for the reference white"), XYZ → linear RGB
+    through the analytic inverse of §23's stated NTSC tristimulus
+    matrix `[0.6070, 0.1740, 0.2000; 0.2990, 0.5870, 0.1140;
+    0.0000, 0.0660, 1.1110]` (det ≈ 0.337438), and linear RGB →
+    8-bit through the standard sRGB OETF so the result is ready
+    for a contemporary display. §23's "Converting between RGB and
+    CIELAB, a Caveat" leaves the linear-to-display step open
+    ("some conversion to RGB will be required"); the sRGB gamma
+    curve is the universally-applicable choice and matches the
+    other photometric paths' display-ready output.
+
+  * `SamplesPerPixel = 1, BitsPerSample = 8` — §23 page 110 "Usage
+    of other Fields": "3 for L*a*b*, 1 implies L* only, for
+    monochrome data". The single byte is treated as L* and run
+    through the same lightness-curve inverse as the 3-sample path
+    (so a chromatically-neutral a* = b* = 0 CIELab pixel in either
+    layout produces the same gray level), then sRGB-encoded to
+    `Gray8`.
+
+  Compressors accepted by both layouts: None / PackBits / LZW /
+  Deflate (the byte-aligned, photometric-agnostic set the other
+  multi-bit photometric paths use). CCITT (Compression = 2/3/4) is
+  bilevel-only per spec and rejected here; the JPEG-in-TIFF
+  dispatch (Compression = 7) does not list CIELab as a permitted
+  TN2 photometric and is unchanged.
+
+  Validated by 7 hand-built classic-TIFF integration tests
+  (`tests/decode_cielab.rs`, no external library / binary
+  dependency) covering: a 4-pixel chromatically-neutral L* gradient
+  (0/33/66/100) asserting monotonic luminance, near-neutral RGB
+  channels, and saturation at the L* = 100 endpoint; the four
+  primary chromatic directions (+a* → red-dominant, -a* →
+  green-dominant, +b* → blue-suppressed yellow, -b* →
+  blue-dominant); a `SamplesPerPixel = 1` L*-only gradient
+  asserting the same monotonicity and endpoints in the Gray8 path;
+  and a cross-check that a 1×1 L* = 49.8 mono fixture decodes
+  within 2 levels of the green channel of the matching 3-sample
+  `L*=49.8/a*=0/b*=0` fixture. No external image library, decoder,
+  or trace was consulted — the conversion math is a direct
+  transcription of §23's formulas plus the analytic inverse of
+  §23's stated matrix.
+
 - Encoder: BigTIFF write (Adobe Pagemaker 6.0 BigTIFF design) via the
   new `EncodePage::bigtiff` flag. When `true`, the encoder produces a
   16-byte header (II/MM + magic 43 + offset-bytesize 8 + reserved 0 +

@@ -28,6 +28,8 @@ source was consulted.
 | RGB (3 chan)   | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
 | BlackIsZero / WhiteIsZero | 8   | **JPEG-in-TIFF** (Compression=7)   | `Gray8`      |
 | CMYK (4 chan)  | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
+| **CIELab (3 chan)** | 8         | None / PackBits / LZW / Deflate    | `Rgb24` (Lab→XYZ@D65→linear NTSC→sRGB) |
+| **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate  | `Gray8`      |
 
 `Predictor = 1` (no prediction) and `Predictor = 2` (horizontal
 differencing, per-component for `SamplesPerPixel > 1`) are both
@@ -92,6 +94,40 @@ deprecated TIFF 6.0 §22 "old-style" JPEG (`Compression = 6`).
 JPEG-in-TIFF requires the default-on `registry` Cargo feature; with
 `default-features = false` the JPEG path returns
 `Error::Unsupported`.
+
+### CIELab (PhotometricInterpretation = 8)
+
+Per TIFF 6.0 §23 "CIE L*a*b* Images" (page 110), `PhotometricInterpretation = 8`
+identifies a 1976 CIE L\*a\*b\* image whose three (or one) 8-bit
+samples per pixel are: L\* unsigned in 0..255 mapping linearly to the
+perceptual lightness scale 0..100; a\* and b\* as two's-complement
+signed bytes in -128..127 representing the red/green and yellow/blue
+chrominance channels. The decoder colorimetrically converts each
+pixel to display Rgb24 via Lab → XYZ under the spec's mandated
+"perfect reflecting diffuser at D65" reference white, then XYZ →
+linear RGB through the analytic inverse of §23's stated NTSC
+tristimulus matrix (page 111), and finally linear RGB → 8-bit through
+the standard sRGB OETF so the result is ready for a contemporary
+display. §23 explicitly leaves the "Converting between RGB and
+CIELAB" linear-to-display step open ("some conversion to RGB will be
+required"); the sRGB gamma curve is the universally-applicable
+choice and matches the render-ready Rgb24 the CMYK / YCbCr
+photometrics already produce.
+
+`SamplesPerPixel = 1` is also accepted — §23 "Usage of other Fields"
+on page 110: "3 for L\*a\*b\*, 1 implies L\* only, for monochrome data".
+The L\*-only path runs the same lightness-curve inverse as the
+3-sample render so a chromatically-neutral (a\* = b\* = 0) CIELab pixel
+in either layout produces the same gray level.
+
+Compressors accepted: None / PackBits / LZW / Deflate (the
+byte-aligned, photometric-agnostic set the rest of the multi-bit
+photometric paths use). CCITT (Compression = 2/3/4) is bilevel-only
+per spec and rejected here; the JPEG-in-TIFF dispatch (Compression =
+7) does not currently recognise CIELab as one of its render targets —
+TN2 doesn't list it as a permitted §6.1.4 photometric for new-style
+JPEG. Encode-side CIELab is not yet implemented (no Lab variant on
+`EncodePixelFormat`).
 
 ### Transparency Mask (PhotometricInterpretation = 4)
 
@@ -259,9 +295,10 @@ errors out — classic and BigTIFF IFD layouts are wire-incompatible).
   `P = 12`), arithmetic coding (SOF9 / SOF11), and
   `PlanarConfiguration = 2` JPEG remain unsupported.
 - CIELab photometric interpretation (PhotometricInterpretation = 8)
-  on decode + encode. The Transparency-mask photometric
-  (PhotometricInterpretation = 4) is supported on both sides as of
-  round 172.
+  **decodes** as of this round (3-sample `L*a*b*` and 1-sample
+  `L*`-only, 8-bit; both uncompressed and the byte-aligned
+  compressors). Encode-side CIELab remains a backlog item — the
+  `EncodePixelFormat` enum does not yet expose a Lab variant.
 - DNG / GeoTIFF / EXIF blob extraction
 - Encoder-side planar (`PlanarConfiguration = 2`) writing is now
   supported for `Rgb24` under None / PackBits / LZW / Deflate (with or

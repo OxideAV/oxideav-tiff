@@ -439,6 +439,36 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
                 TiffPixelFormat::Rgb24,
             )
         }
+        // PhotometricInterpretation = 8 (1976 CIE L*a*b*), TIFF 6.0
+        // §23 "CIE L*a*b* Images" (page 110). Three 8-bit chunky
+        // samples per pixel: L* in 0..255 mapping linearly to the
+        // 0..100 perceptual-lightness scale, a* and b* as
+        // two's-complement signed 8-bit values in -128..127
+        // representing the red/green and yellow/blue chrominance
+        // channels (§23: "L* range is from 0 ... to 100 ... The
+        // a* and b* ranges will be represented as signed 8 bit
+        // values having the range -127 to +127"). The decoder
+        // colorimetrically converts via Lab -> XYZ (D65 reference
+        // white) -> linear NTSC RGB (§23's stated forward matrix,
+        // inverted analytically) -> sRGB-encoded 8-bit, matching
+        // the "(perfect reflecting diffuser ... D65 illumination)"
+        // reference white the spec mandates. This is a display-
+        // ready render path consistent with how the existing
+        // YCbCr and CMYK photometrics collapse to Rgb24.
+        (PHOTO_CIELAB, 3, 8) => (
+            build_rgb24_from_cielab(&pixel_buf, width, height),
+            TiffPixelFormat::Rgb24,
+        ),
+        // §23: "SamplesPerPixel - ExtraSamples: 3 for L*a*b*, 1
+        // implies L* only, for monochrome data". An L*-only CIELab
+        // image is a perceptual grayscale: the stored 0..255 byte
+        // maps linearly to L* 0..100, which we re-encode as
+        // gamma-corrected sRGB-luminance so the 8-bit output is
+        // ready for display.
+        (PHOTO_CIELAB, 1, 8) => (
+            build_gray8_from_cielab_l(&pixel_buf, width, height),
+            TiffPixelFormat::Gray8,
+        ),
         (p, s, b) => {
             return Err(Error::invalid(format!(
                 "TIFF: photometric={p} samples_per_pixel={s} bits_per_sample={b} not supported"
@@ -1505,6 +1535,205 @@ fn ycbcr_to_rgb(y: i32, cb: i32, cr: i32) -> (u8, u8, u8) {
 
 fn clamp_u8(v: i32) -> u8 {
     v.clamp(0, 255) as u8
+}
+
+// ---------------------------------------------------------------------------
+// CIELab (PhotometricInterpretation = 8) decode, per TIFF 6.0 §23.
+// ---------------------------------------------------------------------------
+
+/// Decode a 3-sample CIELab strip/tile buffer into a packed Rgb24
+/// [`TiffImage`] suitable for display.
+///
+/// On-disk layout per §23 page 110: 8-bit chunky L*, a*, b* triples
+/// with L* unsigned 0..255 ↔ 0..100 and a*/b* two's-complement signed
+/// 8-bit values in -128..127. The "reference white for this data type
+/// is the perfect reflecting diffuser" with "D65 illumination", so we
+/// convert via the Lab → XYZ formulas given on page 110 and the
+/// inverse of §23's stated NTSC tristimulus matrix to recover linear
+/// RGB. A standard sRGB-style gamma curve then maps the linear values
+/// into a display-ready 8-bit byte. This is the same shape the
+/// existing CMYK and YCbCr photometric paths take (decode produces
+/// Rgb24 ready for compositing).
+fn build_rgb24_from_cielab(src: &[u8], w: u32, h: u32) -> TiffImage {
+    let stride = w as usize * 3;
+    let pixels = (w as usize) * (h as usize);
+    let mut data = Vec::with_capacity(stride * h as usize);
+    for triple in src.chunks_exact(3).take(pixels) {
+        // L* in 0..255 maps linearly to 0..100 per §23 ("Dividing
+        // the 0-100 range of L* into 256 levels").
+        let l_byte = triple[0] as f64;
+        // a*, b* per §23: "signed 8 bit values having the range
+        // -127 to +127". We accept the full two's-complement byte
+        // range (-128..127) — values at the extremes are within
+        // spec tolerance.
+        let a_signed = triple[1] as i8 as f64;
+        let b_signed = triple[2] as i8 as f64;
+        let l = l_byte * (100.0 / 255.0);
+        let (r, g, b) = cielab_to_rgb_byte(l, a_signed, b_signed);
+        data.push(r);
+        data.push(g);
+        data.push(b);
+    }
+    TiffImage {
+        width: w,
+        height: h,
+        pixel_format: TiffPixelFormat::Rgb24,
+        planes: vec![TiffPlane { stride, data }],
+    }
+}
+
+/// Decode a 1-sample CIELab L*-only buffer into a Gray8 [`TiffImage`].
+///
+/// §23 page 110 ("Usage of other Fields"): "SamplesPerPixel -
+/// ExtraSamples: 3 for L*a*b*, 1 implies L* only, for monochrome
+/// data". The byte is the perceptual lightness on the 0..100 scale;
+/// we re-encode it as sRGB-luminance so the gray level matches what
+/// the 3-sample CIELab render produces for a chromatically-neutral
+/// pixel (a* = b* = 0).
+fn build_gray8_from_cielab_l(src: &[u8], w: u32, h: u32) -> TiffImage {
+    let stride = w as usize;
+    let pixels = (w as usize) * (h as usize);
+    let mut data = Vec::with_capacity(pixels);
+    for &byte in src.iter().take(pixels) {
+        let l = byte as f64 * (100.0 / 255.0);
+        // For a chromatically-neutral CIELab pixel (a* = b* = 0)
+        // the Lab → XYZ formula collapses to Y = f(L*) (X and Z
+        // are proportional with fx = fy = fz). Run the same
+        // lightness curve as the 3-sample path so a* = b* = 0
+        // CIELab pixels in either layout produce the same gray.
+        let y_lin = lab_l_to_y_linear(l);
+        data.push(linear_to_srgb_byte(y_lin));
+    }
+    TiffImage {
+        width: w,
+        height: h,
+        pixel_format: TiffPixelFormat::Gray8,
+        planes: vec![TiffPlane { stride, data }],
+    }
+}
+
+/// CIELab triple to display Rgb24 byte, per TIFF 6.0 §23 + the
+/// inverse of §23's stated forward NTSC matrix.
+///
+/// Steps:
+/// 1. Lab → XYZ via the inverse of the §23 page 110 formulas. The
+///    reference white is the perfect reflecting diffuser at D65
+///    (Xn = 0.95047, Yn = 1.00000, Zn = 1.08883 — the CIE 1931 2°
+///    Standard Observer values for D65 the spec implies on page
+///    111: "Generally, D65 illumination is used and a perfect
+///    reflecting diffuser is used for the reference white").
+/// 2. XYZ → linear RGB via the analytic inverse of the NTSC
+///    tristimulus matrix the spec prints on page 111:
+///    X = 0.6070 R + 0.1740 G + 0.2000 B,
+///    Y = 0.2990 R + 0.5870 G + 0.1140 B,
+///    Z = 0.0000 R + 0.0660 G + 1.1110 B.
+///    Inverting algebraically (cofactor expansion, det ≈
+///    0.337438) gives the row-major coefficients hard-coded
+///    below. They are arithmetic facts derived from the spec's
+///    matrix only — no external impl was consulted.
+/// 3. Linear RGB → 8-bit display RGB via the standard sRGB OETF
+///    so the result is ready for a contemporary screen. The
+///    spec's "Converting from CIELAB to RGB" caveat (page 111)
+///    explicitly leaves the linear-to-display step to the
+///    implementer; gamma encoding is the universally-applicable
+///    choice and matches the render the rest of the crate
+///    produces from RGB / CMYK / YCbCr.
+fn cielab_to_rgb_byte(l_star: f64, a_star: f64, b_star: f64) -> (u8, u8, u8) {
+    // ---- Lab -> XYZ (D65 white) ----
+    // CIE 1931 2° Standard Observer D65 white in the spec's
+    // normalised "1.0 = perfect reflecting diffuser" form.
+    const XN: f64 = 0.95047;
+    const YN: f64 = 1.00000;
+    const ZN: f64 = 1.08883;
+
+    // §23 page 110:
+    //   L* = 116 (Y/Yn)^(1/3) - 16            (Y/Yn > 0.008856)
+    //   L* = 903.3 (Y/Yn)                     (Y/Yn <= 0.008856)
+    //   a* = 500 [(X/Xn)^(1/3) - (Y/Yn)^(1/3)]
+    //   b* = 200 [(Y/Yn)^(1/3) - (Z/Zn)^(1/3)]
+    // Inverting: let fy = (L*+16)/116; if fy^3 > 0.008856 then
+    // Y/Yn = fy^3 else Y/Yn = L*/903.3. Likewise for X, Z via
+    // fx = a*/500 + fy and fz = fy - b*/200, applying the low-light
+    // branch when the cube is at or below 0.008856 (the spec's
+    // threshold). The cube root inverse of the low-light leg
+    // 7.787*F + 16/116 is (f - 16/116)/7.787.
+    let fy = (l_star + 16.0) / 116.0;
+    let fx = a_star / 500.0 + fy;
+    let fz = fy - b_star / 200.0;
+
+    let y_yn = if l_star > 7.999625 {
+        // Boundary: L* = 116 * 0.008856^(1/3) - 16 ≈ 7.99963; above
+        // this the cubic branch applies.
+        fy.powi(3)
+    } else {
+        l_star / 903.3
+    };
+    let fx3 = fx.powi(3);
+    let x_xn = if fx3 > 0.008856 {
+        fx3
+    } else {
+        (fx - 16.0 / 116.0) / 7.787
+    };
+    let fz3 = fz.powi(3);
+    let z_zn = if fz3 > 0.008856 {
+        fz3
+    } else {
+        (fz - 16.0 / 116.0) / 7.787
+    };
+
+    let x = x_xn * XN;
+    let y = y_yn * YN;
+    let z = z_zn * ZN;
+
+    // ---- XYZ -> linear RGB ----
+    // Inverse of §23 NTSC matrix:
+    //   [ 0.6070  0.1740  0.2000 ]
+    //   [ 0.2990  0.5870  0.1140 ]
+    //   [ 0.0000  0.0660  1.1110 ]
+    // Determinant (cofactor expansion along row 0):
+    //    0.6070*(0.5870*1.1110 - 0.1140*0.0660)
+    //   -0.1740*(0.2990*1.1110 - 0.1140*0.0000)
+    //   +0.2000*(0.2990*0.0660 - 0.5870*0.0000)
+    //  = 0.6070*0.644633 - 0.1740*0.332189 + 0.2000*0.019734
+    //  ≈ 0.337438145
+    // Adjugate row-major / determinant gives the inverse below.
+    // The constants are arithmetic facts derived from the spec
+    // matrix only — no external impl was consulted.
+    let r_lin = 1.9103738257 * x - 0.5337689371 * y - 0.2891315088 * z;
+    let g_lin = -0.9844441268 * x + 1.9985203510 * y - 0.0278510303 * z;
+    let b_lin = 0.0584818293 * x - 0.1187239812 * y + 0.9017445257 * z;
+
+    (
+        linear_to_srgb_byte(r_lin),
+        linear_to_srgb_byte(g_lin),
+        linear_to_srgb_byte(b_lin),
+    )
+}
+
+/// Lab L* → linear Y under D65 reference white, used by the
+/// L*-only render path. Same inverse-cube-root step as
+/// [`cielab_to_rgb_byte`].
+fn lab_l_to_y_linear(l_star: f64) -> f64 {
+    if l_star > 7.999625 {
+        ((l_star + 16.0) / 116.0).powi(3)
+    } else {
+        l_star / 903.3
+    }
+}
+
+/// Linear-light value in [0, 1] → 8-bit sRGB display byte using the
+/// canonical sRGB OETF (the published IEC 61966-2-1 piecewise
+/// curve). Out-of-gamut values are clamped to [0, 255].
+fn linear_to_srgb_byte(v: f64) -> u8 {
+    let c = v.clamp(0.0, 1.0);
+    // sRGB encoding: linear-to-display compander. The piecewise
+    // breakpoint at 0.0031308 maps to ~0.04045 on the display side.
+    let encoded = if c <= 0.0031308 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0 + 0.5).clamp(0.0, 255.0) as u8
 }
 
 // ---------------------------------------------------------------------------

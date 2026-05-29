@@ -13,7 +13,9 @@
 //! * Byte order: `II` (little-endian) and `MM` (big-endian)
 //! * Variants: classic TIFF (32-bit offsets) + BigTIFF (64-bit offsets)
 //! * Photometric: WhiteIsZero / BlackIsZero / RGB / Palette / CMYK /
-//!   YCbCr / TransparencyMask
+//!   YCbCr / TransparencyMask / CIELab (3-sample L*a*b* and 1-sample
+//!   L*-only, TIFF 6.0 §23, decoded to display Rgb24 / Gray8 via
+//!   Lab → XYZ@D65 → linear NTSC RGB → sRGB)
 //! * Bit depths: 1, 4, 8, 16 (per-strip and per-tile)
 //! * Compression: 1 None / 2 CCITT Modified Huffman / 3 CCITT T.4 1-D /
 //!   32773 PackBits / 5 LZW / 8 Deflate (zlib) /
@@ -45,8 +47,9 @@
 //! and T.6 / Group 4 (Compression=3 with T4Options bit 0 set, and
 //! Compression=4 — the 2-D mode codes are not in the TIFF 6.0
 //! spec, which defers to CCITT Rec. T.4 / T.6), the deprecated
-//! TIFF 6.0 §22 old-style JPEG (Compression=6), CIELab photometric,
-//! BigTIFF write, and tiled `PlanarConfiguration = 2` write.
+//! TIFF 6.0 §22 old-style JPEG (Compression=6), and encode-side
+//! CIELab (decode-side CIELab is implemented as of this round; the
+//! `EncodePixelFormat` enum has no Lab variant yet).
 //! Compression=7 (new-style JPEG-in-TIFF, per TIFF Tech Note 2) is
 //! decoded as of round 92.
 //!
