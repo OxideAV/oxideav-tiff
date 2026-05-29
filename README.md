@@ -14,12 +14,12 @@ source was consulted.
 
 | Photometric    | Bit depth      | Compression                        | Output       |
 | -------------- | -------------- | ---------------------------------- | ------------ |
-| WhiteIsZero    | 1              | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate    | `Gray8`      |
+| WhiteIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate | `Gray8` |
 | WhiteIsZero    | 4 / 8          | None / PackBits / LZW / Deflate    | `Gray8`      |
 | WhiteIsZero    | 16             | None / PackBits / LZW / Deflate    | `Gray16Le`   |
-| BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate    | `Gray8`      |
+| BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate | `Gray8` |
 | BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate    | `Gray8` / `Gray16Le` |
-| **Transparency Mask** | 1       | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate    | `Gray8` (interior = 0xFF, exterior = 0x00) |
+| **Transparency Mask** | 1       | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate | `Gray8` (interior = 0xFF, exterior = 0x00) |
 | Palette        | 4 / 8          | None / PackBits / LZW / Deflate    | `Rgb24`      |
 | RGB (3 chan)   | 8              | None / PackBits / LZW / Deflate    | `Rgb24`      |
 | RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate    | `Rgb48Le`    |
@@ -283,11 +283,24 @@ errors out — classic and BigTIFF IFD layouts are wire-incompatible).
 ## Backlog (not yet implemented)
 
 - CCITT T.4 2-D coding (`Compression = 3` with `T4Options` bit 0
-  set) and T.6 / Group 4 (`Compression = 4`). The 2-D Pass /
-  Horizontal / Vertical mode codes are not in the TIFF 6.0 PDF —
-  it defers to CCITT Rec. T.4 / T.6 — so implementing these
-  requires a clean-room transcription added to
-  `docs/image/tiff/` first.
+  set) and T.6 / Group 4 (`Compression = 4`) **decode** as of this
+  round. The 2-D Pass / Horizontal / Vertical mode codes —
+  transcribed clean-room from ITU-T T.4 §4.2 / T.6 into
+  `docs/image/tiff/ccitt-t4-t6-fax-codes.md` §1 — drive the same
+  READ algorithm both variants share. T.6 adds the
+  "imaginary all-white first reference line" + no-EOL framing rule;
+  T.4 2-D layers the EOL+tag-bit row separator on top of it. The
+  optional uncompressed-mode extension (`0000001111` followed by
+  Table 5/T.4 patterns) is explicitly rejected — `tiffcp` never
+  emits it for normal facsimile content. Validated through 7
+  end-to-end `run_roundtrip` fixtures (solid white, two
+  rectangles, diagonal, wide run) × G4 / T.4-2D against `tiffcp
+  -c g4` / `-c g3:2d` oracle outputs, plus 13 in-crate unit tests
+  covering the mode-code dictionary entries (V(0), VR/VL(1..3),
+  Pass, Horizontal, Uncompressed-extension) and the
+  `first_change_after` reference-line walker. **Encode** for these
+  variants remains a backlog item — the encoder explicitly returns
+  `InvalidData` for `T4TwoD` / `T6` variants of `CcittVariant`.
 - JPEG-in-TIFF Compression = 6 (old-style, deprecated by TIFF Tech
   Note 2; decoder returns precise `Error::Unsupported`).
   Compression = 7 (new-style) **decodes** as of this round across

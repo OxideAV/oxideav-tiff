@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decoder: CCITT T.4 2-D (Modified READ / MR — `Compression = 3`
+  with `T4Options` bit 0 set) and T.6 / Group 4 (MMR —
+  `Compression = 4`). The TIFF 6.0 PDF defers the 2-D Pass /
+  Horizontal / Vertical mode codes to ITU-T Recommendations T.4 §4.2
+  and T.6; those recommendations are now staged in
+  `docs/image/tiff/T-REC-T.4.pdf` / `T-REC-T.6.pdf` and the normative
+  Table 4/T.4 = Table 1/T.6 mode-code dictionary is transcribed
+  clean-room into `docs/image/tiff/ccitt-t4-t6-fax-codes.md` §1.
+
+  The decoder implements the READ algorithm (T.4 §4.2.1 / T.6
+  §2.2.1) directly:
+
+  * `CcittVariant::T6` — every row is 2-D coded against the previous
+    decoded row; the first reference line is an imaginary all-white
+    line; no EOL framing between rows.
+  * `CcittVariant::T4TwoD { eol_byte_aligned }` — each row is
+    preceded by the 12-bit EOL code (optionally byte-aligned per
+    `T4Options` bit 2) followed by a one-bit tag selecting 1-D
+    (tag = 1) vs 2-D (tag = 0) coding for the next row; 2-D rows
+    use the same mode-code dictionary as T.6.
+
+  Mode codes implemented: `Vertical(0)` (= `1`),
+  `Vertical(±1)` (= `011` / `010`), `Vertical(±2)` (= `000011` /
+  `000010`), `Vertical(±3)` (= `0000011` / `0000010`), `Horizontal`
+  (= `001` + two MH runs, colour-toggling), `Pass` (= `0001`,
+  encoder coalesces a0..b2 of a0's colour). The optional
+  `0000001111` uncompressed-mode extension (Table 5/T.4) is rejected
+  explicitly — `tiffcp` does not emit it for normal facsimile
+  content and the docs flag it as out of scope. `T6Options` (tag
+  293) is now read; bit 1 (uncompressed mode allowed) is similarly
+  rejected.
+
+  Validated by 7 new `tiffcp` round-trip fixtures (`tests/
+  decode_ccitt_fixtures.rs`): solid-white 32×4, two-rectangle 64×8,
+  diagonal 32×32, wide-run 128×4 — each under `-c g4` (Compression
+  = 4) and `-c g3:2d` (Compression = 3 with T4Options = 1). Pixels
+  must match the uncompressed reference byte-for-byte. The two
+  preexisting `ccitt_g4_is_unsupported` / `ccitt_t4_2d_is_unsupported`
+  tests are removed (they encoded a docs-gap that has been
+  resolved). 13 in-crate unit tests cover the mode-code dictionary
+  entries and the `first_change_after` reference-line walker (T.4
+  §4.2.1.2).
+
+  Encoder side is unchanged — `encode_ccitt` now explicitly returns
+  `InvalidData` for `CcittVariant::T4TwoD` / `T6` rather than
+  silently emitting a 1-D stream, so callers get a clean
+  diagnostic. The MH + T.4 1-D encode paths are untouched and
+  remain bit-exact.
+
 - Decoder: `PhotometricInterpretation = 8` (1976 CIE L*a*b*), per
   TIFF 6.0 §23 "CIE L*a*b* Images" (page 110). Both the spec-defined
   layouts decode:

@@ -98,6 +98,10 @@ pub const T4OPT_2D_CODING: u32 = 1 << 0;
 pub const T4OPT_UNCOMPRESSED: u32 = 1 << 1;
 pub const T4OPT_EOL_BYTE_ALIGNED: u32 = 1 << 2;
 
+// T6Options bits (Section 11). Only bit 1 ("uncompressed mode
+// allowed") is defined; bit 0 is reserved.
+pub const T6OPT_UNCOMPRESSED: u32 = 1 << 1;
+
 // --- YCbCr tags (Section 21) --------------------------------------------
 pub const TAG_YCBCR_COEFFICIENTS: u16 = 529;
 pub const TAG_YCBCR_SUBSAMPLING: u16 = 530;

@@ -209,6 +209,10 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         .map(|e| e.as_u32(bo))
         .transpose()?
         .unwrap_or(0);
+    let t6_options = find(entries, TAG_T6_OPTIONS)
+        .map(|e| e.as_u32(bo))
+        .transpose()?
+        .unwrap_or(0);
 
     // JPEG-in-TIFF (Compression = 7) takes its own path. Each strip
     // or tile is a freestanding JPEG datastream; merging the optional
@@ -272,6 +276,7 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
                 compression,
                 predictor,
                 t4_options,
+                t6_options,
                 fill_order,
             )?
         } else {
@@ -286,6 +291,7 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
                 compression,
                 predictor,
                 t4_options,
+                t6_options,
                 fill_order,
             )?
         }
@@ -301,6 +307,7 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             compression,
             predictor,
             t4_options,
+            t6_options,
             fill_order,
         )?
     } else {
@@ -315,6 +322,7 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             compression,
             predictor,
             t4_options,
+            t6_options,
             fill_order,
         )?
     };
@@ -491,6 +499,7 @@ fn decode_strips(
     compression: u16,
     predictor: u16,
     t4_options: u32,
+    t6_options: u32,
     fill_order: FillOrder,
 ) -> Result<Vec<u8>> {
     let rows_per_strip = find(entries, TAG_ROWS_PER_STRIP)
@@ -541,6 +550,7 @@ fn decode_strips(
                 rows: rows_this_strip,
                 fill: fill_order,
                 t4_options,
+                t6_options,
             })
         } else {
             None
@@ -599,6 +609,7 @@ fn decode_tiles(
     compression: u16,
     predictor: u16,
     t4_options: u32,
+    t6_options: u32,
     fill_order: FillOrder,
 ) -> Result<Vec<u8>> {
     let tile_w = find(entries, TAG_TILE_WIDTH)
@@ -662,6 +673,7 @@ fn decode_tiles(
                     rows: tile_h,
                     fill: fill_order,
                     t4_options,
+                    t6_options,
                 })
             } else {
                 None
@@ -756,6 +768,7 @@ fn decode_strips_planar(
     compression: u16,
     predictor: u16,
     t4_options: u32,
+    t6_options: u32,
     fill_order: FillOrder,
 ) -> Result<Vec<u8>> {
     if samples_per_pixel < 2 {
@@ -841,6 +854,7 @@ fn decode_strips_planar(
                     rows: rows_this_strip,
                     fill: fill_order,
                     t4_options,
+                    t6_options,
                 })
             } else {
                 None
@@ -911,6 +925,7 @@ fn decode_tiles_planar(
     compression: u16,
     predictor: u16,
     t4_options: u32,
+    t6_options: u32,
     fill_order: FillOrder,
 ) -> Result<Vec<u8>> {
     if samples_per_pixel < 2 {
@@ -990,6 +1005,7 @@ fn decode_tiles_planar(
                         rows: tile_h,
                         fill: fill_order,
                         t4_options,
+                        t6_options,
                     })
                 } else {
                     None
@@ -1075,15 +1091,16 @@ fn interleave_planes(
     Ok(out)
 }
 
-/// Parameters needed for CCITT compression schemes (2 / 3). Carries
-/// the per-block geometry plus the codec-shape options decoded out
-/// of the IFD (FillOrder + T4Options).
+/// Parameters needed for CCITT compression schemes (2 / 3 / 4).
+/// Carries the per-block geometry plus the codec-shape options
+/// decoded out of the IFD (FillOrder + T4Options + T6Options).
 #[derive(Debug, Clone, Copy)]
 struct CcittParams {
     width: u32,
     rows: u32,
     fill: FillOrder,
     t4_options: u32,
+    t6_options: u32,
 }
 
 fn decompress_block(
@@ -1105,28 +1122,34 @@ fn decompress_block(
         COMPRESSION_CCITT_T4 => {
             let p = ccitt
                 .ok_or_else(|| Error::invalid("TIFF: CCITT-T4 compression requires CcittParams"))?;
-            if p.t4_options & T4OPT_2D_CODING != 0 {
-                return Err(Error::invalid(
-                    "TIFF: T4 2-D coding (T4Options bit 0) not supported (docs lack 2D mode codes)",
-                ));
-            }
             if p.t4_options & T4OPT_UNCOMPRESSED != 0 {
                 return Err(Error::invalid(
                     "TIFF: T4 uncompressed-mode extension (T4Options bit 1) not supported",
                 ));
             }
             let eol_byte_aligned = p.t4_options & T4OPT_EOL_BYTE_ALIGNED != 0;
-            decode_ccitt(
-                raw,
-                p.width,
-                p.rows,
-                CcittVariant::T4OneD { eol_byte_aligned },
-                p.fill,
-            )
+            let variant = if p.t4_options & T4OPT_2D_CODING != 0 {
+                CcittVariant::T4TwoD { eol_byte_aligned }
+            } else {
+                CcittVariant::T4OneD { eol_byte_aligned }
+            };
+            decode_ccitt(raw, p.width, p.rows, variant, p.fill)
         }
-        COMPRESSION_CCITT_T6 => Err(Error::invalid(
-            "TIFF: T.6 (Compression=4) not supported (docs lack 2D mode codes)",
-        )),
+        COMPRESSION_CCITT_T6 => {
+            let p = ccitt
+                .ok_or_else(|| Error::invalid("TIFF: CCITT-T6 compression requires CcittParams"))?;
+            // T6Options (tag 293): only bit 1 ("uncompressed mode
+            // allowed") is defined per TIFF 6.0 §11. Bit 0 is
+            // reserved. The uncompressed extension is out of scope
+            // for this implementation (the docs flag it as optional
+            // and we reject it consistently with the T.4 path).
+            if p.t6_options & T6OPT_UNCOMPRESSED != 0 {
+                return Err(Error::invalid(
+                    "TIFF: T6 uncompressed-mode extension (T6Options bit 1) not supported",
+                ));
+            }
+            decode_ccitt(raw, p.width, p.rows, CcittVariant::T6, p.fill)
+        }
         other => Err(Error::invalid(format!(
             "TIFF: Compression={other} not supported"
         ))),

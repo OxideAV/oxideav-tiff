@@ -107,8 +107,16 @@ fn unique_tmp(prefix: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let pid = std::process::id();
+    // Thread ID via a static atomic counter — `std::thread::current().id()`
+    // returns a `ThreadId` whose internal value isn't accessible; we
+    // emulate uniqueness across parallel threads with a per-call
+    // monotonic counter so two threads landing in the same nanosecond
+    // don't collide on the path.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let mut p = std::env::temp_dir();
-    p.push(format!("{prefix}-{pid}-{nanos}"));
+    p.push(format!("{prefix}-{pid}-{nanos}-{seq}"));
     p
 }
 
@@ -212,34 +220,47 @@ fn ccitt_t4_1d_eol_byte_aligned_64x8() {
 }
 
 // -------------------------------------------------------------------------
-// Compression=4 (T.6) and Compression=3 with T4Options bit 0 set
-// (2-D) MUST return an Err — the docs don't include the 2-D mode
-// codes, and per workspace clean-room rules we cannot fish for them.
+// Compression=4 (T.6 / Group 4) and Compression=3 with T4Options bit 0
+// set (T.4 2-D / Modified READ) are validated end-to-end via the same
+// tiffcp oracle: tiffcp emits the 2-D-coded TIFF, our decoder reads it,
+// and the result must match the uncompressed reference pixel-for-pixel.
 // -------------------------------------------------------------------------
 
 #[test]
-fn ccitt_g4_is_unsupported() {
-    if !must_have_tooling() {
-        return;
-    }
-    let base = unique_tmp("oxideav-tiff-r76");
-    let raw = base.with_extension("none.tif");
-    let comp = base.with_extension("g4.tif");
-    make_bilevel(&raw, 32, 4, Some("rectangle 4,1 20,3"));
-    tiffcp_recompress(&raw, &comp, "g4");
-    let bytes = std::fs::read(&comp).unwrap();
-    let r = decode_tiff(&bytes);
-    let _ = std::fs::remove_file(&raw);
-    let _ = std::fs::remove_file(&comp);
-    let err = match r {
-        Ok(_) => panic!("G4 must be rejected until 2-D codes are documented"),
-        Err(e) => e,
-    };
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("T.6") || msg.contains("Compression=4"),
-        "unexpected G4 error: {msg}"
+fn ccitt_g4_solid_white_32x4() {
+    run_roundtrip(32, 4, None, "g4", "g4_solid_w");
+}
+
+#[test]
+fn ccitt_g4_two_rectangles_64x8() {
+    run_roundtrip(
+        64,
+        8,
+        Some("rectangle 4,1 30,5 rectangle 40,2 55,4"),
+        "g4",
+        "g4_rects",
     );
+}
+
+#[test]
+fn ccitt_g4_diagonal_32x32() {
+    // Alternating black/white along a diagonal — exercises Pass,
+    // Vertical and Horizontal modes against a continuously-shifting
+    // reference line.
+    run_roundtrip(
+        32,
+        32,
+        Some("rectangle 0,0 31,0 rectangle 0,1 0,31 line 0,0 31,31"),
+        "g4",
+        "g4_diag",
+    );
+}
+
+#[test]
+fn ccitt_g4_wide_run_128x4() {
+    // ≥ 64-pixel solid run inside a 2-D row exercises the
+    // Horizontal-mode embedded MH make-up paths.
+    run_roundtrip(128, 4, Some("rectangle 0,0 100,3"), "g4", "g4_wide");
 }
 
 // -------------------------------------------------------------------------
@@ -350,27 +371,35 @@ fn uncompressed_bilevel_fillorder_lsb_first_64x4() {
     );
 }
 
+// -------------------------------------------------------------------------
+// Compression=3 with T4Options bit 0 set (T.4 2-D / Modified READ /
+// MR) — same oracle pattern as G4, exercises the same mode-code
+// decoder against EOL+tag-bit framing.
+// -------------------------------------------------------------------------
+
 #[test]
-fn ccitt_t4_2d_is_unsupported() {
-    if !must_have_tooling() {
-        return;
-    }
-    let base = unique_tmp("oxideav-tiff-r76");
-    let raw = base.with_extension("none.tif");
-    let comp = base.with_extension("g3_2d.tif");
-    make_bilevel(&raw, 32, 4, Some("rectangle 4,1 20,3"));
-    tiffcp_recompress(&raw, &comp, "g3:2d");
-    let bytes = std::fs::read(&comp).unwrap();
-    let r = decode_tiff(&bytes);
-    let _ = std::fs::remove_file(&raw);
-    let _ = std::fs::remove_file(&comp);
-    let err = match r {
-        Ok(_) => panic!("T.4 2-D must be rejected until mode codes are documented"),
-        Err(e) => e,
-    };
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("2-D") || msg.contains("T4Options"),
-        "unexpected T.4-2D error: {msg}"
+fn ccitt_t4_2d_solid_white_32x4() {
+    run_roundtrip(32, 4, None, "g3:2d", "t4_2d_solid_w");
+}
+
+#[test]
+fn ccitt_t4_2d_two_rectangles_64x8() {
+    run_roundtrip(
+        64,
+        8,
+        Some("rectangle 4,1 30,5 rectangle 40,2 55,4"),
+        "g3:2d",
+        "t4_2d_rects",
+    );
+}
+
+#[test]
+fn ccitt_t4_2d_diagonal_32x32() {
+    run_roundtrip(
+        32,
+        32,
+        Some("rectangle 0,0 31,0 rectangle 0,1 0,31 line 0,0 31,31"),
+        "g3:2d",
+        "t4_2d_diag",
     );
 }
