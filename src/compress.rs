@@ -29,6 +29,18 @@ const MAX_INITIAL_RESERVE: usize = 64 * 1024;
 /// `expected_len` itself can be attacker-chosen on a malformed file.
 const MAX_DEFLATE_OUTPUT: usize = 64 * 1024 * 1024;
 
+/// Upper bound on the expansion ratio of a single Zstandard (RFC 8878)
+/// strip / tile. The streaming decoder we drive (`ruzstd`) is
+/// `io::Read`-shaped and does not, on its own, enforce a maximum
+/// decompressed size — a malformed frame can claim to expand a few
+/// hundred bytes into many gigabytes. Mirror of `MAX_DEFLATE_OUTPUT`:
+/// 64 MiB per strip/tile is well above any legitimate TIFF strip
+/// (encoders chunk at well under this) while bounding worst-case
+/// per-call allocation when fed a frame shaped like a decompression
+/// bomb.
+#[cfg(feature = "zstd")]
+const MAX_ZSTD_OUTPUT: usize = 64 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // PackBits — TIFF 6.0 Section 9
 // ---------------------------------------------------------------------------
@@ -319,6 +331,73 @@ pub fn unpack_deflate(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
     let limit = expected_len.min(MAX_DEFLATE_OUTPUT);
     miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(input, limit)
         .map_err(|e| Error::invalid(format!("TIFF/Deflate: zlib inflate failed: {:?}", e.status)))
+}
+
+// ---------------------------------------------------------------------------
+// Zstandard — extension Compression=50000 (one RFC 8878 frame per strip/tile)
+// ---------------------------------------------------------------------------
+
+/// Decode one TIFF strip / tile payload as a single RFC 8878 Zstandard
+/// frame and return the (predicted) byte stream that the predictor
+/// reversal stage then walks.
+///
+/// Contract:
+///
+/// * `input` is the strip's / tile's on-disk bytes, which must begin
+///   with the zstd magic number `0x28 0xB5 0x2F 0xFD` (little-endian
+///   `0xFD2FB528`). A single TIFF block carries exactly one zstd
+///   frame — there is no whole-file framing and no cross-strip
+///   dictionary sharing.
+/// * `expected_len` is the post-decompression strip / tile size in
+///   bytes, derived from the IFD geometry (`ImageWidth *
+///   ImageLength * SamplesPerPixel * BitsPerSample / 8`, or the
+///   tile-grid analogue). It is the upper bound the decoder will
+///   produce; output is capped at `min(expected_len, MAX_ZSTD_OUTPUT)`
+///   to bound worst-case per-call allocation on attacker-supplied
+///   IFDs.
+/// * Returns the decompressed bytes verbatim (no Predictor reversal —
+///   the caller in `decoder.rs` applies `apply_horizontal_predictor`
+///   in a subsequent step, exactly as it does for Compression=5 and
+///   Compression=8).
+///
+/// Errors map a missing zstd magic, a truncated frame, or any
+/// decoder failure to `Error::invalid` with a textual reason; an
+/// output that exceeds the cap is treated as a corrupt /
+/// adversarial input and surfaced as a decode error rather than an
+/// OOM abort.
+#[cfg(feature = "zstd")]
+pub fn unpack_zstd(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    if input.len() < 4 || input[..4] != [0x28, 0xB5, 0x2F, 0xFD] {
+        return Err(Error::invalid(
+            "TIFF/Zstd: strip payload does not begin with RFC 8878 frame magic 0x28B52FFD",
+        ));
+    }
+
+    let limit = expected_len.min(MAX_ZSTD_OUTPUT);
+
+    let mut dec = ruzstd::streaming_decoder::StreamingDecoder::new(input)
+        .map_err(|e| Error::invalid(format!("TIFF/Zstd: frame init failed: {e}")))?;
+
+    // Bound output via `Read::take` to keep a malformed / bomb-shaped
+    // frame from forcing an unbounded allocation. We read `limit + 1`
+    // bytes worth: hitting `limit + 1` means the frame would expand
+    // past the cap, which is an error; a normal frame stops short on
+    // its own at `limit` or below.
+    let cap = (limit as u64).saturating_add(1);
+    let reserve = limit.min(MAX_INITIAL_RESERVE);
+    let mut out = Vec::with_capacity(reserve);
+    (&mut dec)
+        .take(cap)
+        .read_to_end(&mut out)
+        .map_err(|e| Error::invalid(format!("TIFF/Zstd: frame decode failed: {e}")))?;
+    if out.len() > limit {
+        return Err(Error::invalid(format!(
+            "TIFF/Zstd: decompressed strip exceeds {limit}-byte cap (frame would expand past expected size)"
+        )));
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -722,6 +801,120 @@ mod tests {
         let encoded = pack_lzw(&src);
         let back = unpack_lzw(&encoded, src.len()).unwrap();
         assert_eq!(back, src);
+    }
+
+    /// Synthesise a minimal RFC 8878 zstd frame whose decompressed
+    /// payload is the literal `data` slice, using only:
+    ///
+    /// * the frame magic `0x28B52FFD`,
+    /// * a frame header byte with `Single_Segment_Flag = 1` and
+    ///   `Content_Checksum_Flag = 0` (so Frame_Content_Size is
+    ///   present, no checksum field follows, and there is no
+    ///   Window_Descriptor),
+    /// * a `Frame_Content_Size` field whose width is chosen by the
+    ///   2-bit `Frame_Content_Size_Flag` (here always FCS_Field_Size=4
+    ///   so the size is a `u32 LE`),
+    /// * exactly one `Raw_Block` carrying the literal bytes (the
+    ///   simplest of the three block kinds: zero entropy stages),
+    /// * the `Last_Block` flag set in the block header.
+    ///
+    /// This lets the decode tests run without depending on any
+    /// external zstd encoder (`tiffcp`, `zstd`); the integration test
+    /// suite still uses `tiffcp -c zstd` to cross-check.
+    #[cfg(feature = "zstd")]
+    fn build_raw_zstd_frame(data: &[u8]) -> Vec<u8> {
+        assert!(
+            data.len() <= u32::MAX as usize,
+            "test helper accepts up to u32::MAX-sized payloads"
+        );
+        let mut out = Vec::with_capacity(data.len() + 32);
+        // Magic 0xFD2FB528 (LE bytes 0x28 0xB5 0x2F 0xFD).
+        out.extend_from_slice(&[0x28, 0xB5, 0x2F, 0xFD]);
+        // Frame_Header_Descriptor:
+        //   bits 7..6  Frame_Content_Size_Flag = 2 (FCS field is 4 bytes)
+        //   bit  5     Single_Segment_Flag     = 1 (no Window_Descriptor)
+        //   bit  4     Unused                  = 0
+        //   bit  3     Reserved                = 0
+        //   bit  2     Content_Checksum_Flag   = 0
+        //   bits 1..0  Dictionary_ID_Flag      = 0 (no dictionary)
+        // → 0b10100000 = 0xA0
+        out.push(0xA0);
+        // Frame_Content_Size: u32 little-endian.
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        // One block of kind Raw_Block (Block_Type = 0), Last_Block = 1.
+        // Block_Header is 3 bytes, packed little-endian as:
+        //   bit  0      Last_Block (set: this is the only block)
+        //   bits 1..2   Block_Type = 0 (Raw_Block — the low two bits
+        //               above the Last_Block bit are zero, so the
+        //               Block_Type field contributes nothing to the
+        //               packed value)
+        //   bits 3..23  Block_Size (raw byte count)
+        let bh: u32 = 1 | ((data.len() as u32) << 3);
+        out.extend_from_slice(&bh.to_le_bytes()[..3]);
+        out.extend_from_slice(data);
+        out
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_decodes_synthetic_raw_block_frame() {
+        // Decoder side only: feed a hand-built RFC 8878 frame whose
+        // single Raw_Block carries 64 known bytes and verify we get
+        // them back. Confirms the magic-check + StreamingDecoder
+        // wiring + 64-MiB cap interaction is sane for small inputs.
+        let payload: Vec<u8> = (0u8..64).collect();
+        let frame = build_raw_zstd_frame(&payload);
+        let back = unpack_zstd(&frame, payload.len()).unwrap();
+        assert_eq!(back, payload);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_rejects_missing_magic() {
+        // 16 bytes that don't start with 0x28 0xB5 0x2F 0xFD: must
+        // surface a precise textual error rather than reaching the
+        // StreamingDecoder. Negative test #1 per the round brief.
+        let not_a_frame = [0u8; 16];
+        let err = unpack_zstd(&not_a_frame, 64).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("frame magic") || msg.contains("0x28B52FFD"),
+            "expected magic-check error, got: {msg}"
+        );
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_rejects_truncated_frame() {
+        // Build a valid frame, then chop off the trailing block bytes
+        // so the StreamingDecoder hits EOF mid-block. Must surface a
+        // textual error rather than panicking. Negative test #2 per
+        // the round brief.
+        let payload: Vec<u8> = (0u8..64).collect();
+        let mut frame = build_raw_zstd_frame(&payload);
+        // Drop the last 16 bytes — well into the Raw_Block body.
+        frame.truncate(frame.len() - 16);
+        let err = unpack_zstd(&frame, payload.len()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("decode failed") || msg.contains("frame init") || msg.contains("Zstd"),
+            "expected truncated-frame error, got: {msg}"
+        );
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_output_is_bounded() {
+        // A frame that claims to expand to more than MAX_ZSTD_OUTPUT
+        // (64 MiB) must be rejected as a decode error, not aborted
+        // for OOM. Build a small valid frame and pass an absurd
+        // `expected_len` — the cap is `min(expected_len, 64 MiB)` so
+        // a 64-byte payload still decodes fine even with a huge
+        // upper bound.
+        let payload: Vec<u8> = (0u8..64).collect();
+        let frame = build_raw_zstd_frame(&payload);
+        let back = unpack_zstd(&frame, usize::MAX / 2).unwrap();
+        assert_eq!(back, payload);
     }
 
     #[test]

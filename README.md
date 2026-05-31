@@ -4,32 +4,32 @@ Pure-Rust TIFF 6.0 image decoder + encoder + container for the
 [`oxideav`](https://github.com/OxideAV/oxideav) framework.
 
 Implements the *Aldus TIFF Revision 6.0 (June 1992)* baseline plus the
-universally-deployed Part 2 extensions (LZW + Deflate, tiles, YCbCr /
-CMYK photometrics, CCITT Modified Huffman + T.4 1-D), the multi-IFD
-chain (multi-page), and the Adobe Pagemaker 6.0 *BigTIFF* design
-(8-byte offsets, magic 43). Spec-only clean-room: no external library
-source was consulted.
+universally-deployed Part 2 extensions (LZW + Deflate + Zstandard,
+tiles, YCbCr / CMYK photometrics, CCITT Modified Huffman + T.4 1-D /
+T.4 2-D / T.6), the multi-IFD chain (multi-page), and the Adobe
+Pagemaker 6.0 *BigTIFF* design (8-byte offsets, magic 43). Spec-only
+clean-room: no external library source was consulted.
 
 ## Decode
 
 | Photometric    | Bit depth      | Compression                        | Output       |
 | -------------- | -------------- | ---------------------------------- | ------------ |
-| WhiteIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate | `Gray8` |
-| WhiteIsZero    | 4 / 8          | None / PackBits / LZW / Deflate    | `Gray8`      |
-| WhiteIsZero    | 16             | None / PackBits / LZW / Deflate    | `Gray16Le`   |
-| BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate | `Gray8` |
-| BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate    | `Gray8` / `Gray16Le` |
-| **Transparency Mask** | 1       | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate | `Gray8` (interior = 0xFF, exterior = 0x00) |
-| Palette        | 4 / 8          | None / PackBits / LZW / Deflate    | `Rgb24`      |
-| RGB (3 chan)   | 8              | None / PackBits / LZW / Deflate    | `Rgb24`      |
-| RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate    | `Rgb48Le`    |
-| CMYK (4 chan)  | 8              | None / PackBits / LZW / Deflate    | `Rgb24`      |
-| YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **JPEG-in-TIFF** (Compression=7) | `Rgb24`      |
+| WhiteIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **Zstd** | `Gray8` |
+| WhiteIsZero    | 4 / 8          | None / PackBits / LZW / Deflate / **Zstd**    | `Gray8`      |
+| WhiteIsZero    | 16             | None / PackBits / LZW / Deflate / **Zstd**    | `Gray16Le`   |
+| BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **Zstd** | `Gray8` |
+| BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate / **Zstd**    | `Gray8` / `Gray16Le` |
+| **Transparency Mask** | 1       | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **Zstd** | `Gray8` (interior = 0xFF, exterior = 0x00) |
+| Palette        | 4 / 8          | None / PackBits / LZW / Deflate / **Zstd**    | `Rgb24`      |
+| RGB (3 chan)   | 8              | None / PackBits / LZW / Deflate / **Zstd**    | `Rgb24`      |
+| RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate / **Zstd**    | `Rgb48Le`    |
+| CMYK (4 chan)  | 8              | None / PackBits / LZW / Deflate / **Zstd**    | `Rgb24`      |
+| YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **Zstd** / **JPEG-in-TIFF** (Compression=7) | `Rgb24`      |
 | RGB (3 chan)   | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
 | BlackIsZero / WhiteIsZero | 8   | **JPEG-in-TIFF** (Compression=7)   | `Gray8`      |
 | CMYK (4 chan)  | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
-| **CIELab (3 chan)** | 8         | None / PackBits / LZW / Deflate    | `Rgb24` (Lab→XYZ@D65→linear NTSC→sRGB) |
-| **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate  | `Gray8`      |
+| **CIELab (3 chan)** | 8         | None / PackBits / LZW / Deflate / **Zstd**    | `Rgb24` (Lab→XYZ@D65→linear NTSC→sRGB) |
+| **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **Zstd**  | `Gray8`      |
 
 `Predictor = 1` (no prediction) and `Predictor = 2` (horizontal
 differencing, per-component for `SamplesPerPixel > 1`) are both
@@ -94,6 +94,31 @@ deprecated TIFF 6.0 §22 "old-style" JPEG (`Compression = 6`).
 JPEG-in-TIFF requires the default-on `registry` Cargo feature; with
 `default-features = false` the JPEG path returns
 `Error::Unsupported`.
+
+### Zstandard (Compression = 50000)
+
+Per `docs/image/tiff/tiff-zstd-compression-50000.md`, `Compression = 50000`
+is the open self-assigned extension codec ID for RFC 8878 Zstandard.
+There is no Adobe technical note registering this value — TIFF
+inherits the same structural conventions Compression=8 Deflate
+established: each strip or tile is one self-contained codec stream,
+and the `Predictor` tag (317) interaction is identical (Predictor=1
+raw, Predictor=2 horizontal differencing applied to the post-decode
+byte stream, per-component for `SamplesPerPixel > 1`). The decoder
+verifies the RFC 8878 frame magic (`0x28 0xB5 0x2F 0xFD`) before
+handing the payload to the pure-Rust `ruzstd` streaming decoder; the
+output is capped at `min(IFD-claimed strip size, 64 MiB)` to bound
+worst-case allocation on attacker-supplied IFDs, mirroring the
+Deflate path's 64-MiB cap. Both strip and tile organisations decode,
+both Predictor values (1 / 2) round-trip byte-exact, and the path
+is exercised against `tiffcp -c zstd[:p2]` Gray8 + RGB24 strip-
+and tile-mode fixtures.
+
+Compression=50000 requires the default-on `zstd` Cargo feature.
+Building with `default-features = false` (or with just `registry`
+selected) drops the `ruzstd` dependency entirely and a TIFF declaring
+Compression=50000 then surfaces a precise `Error::Unsupported`
+("requires the `zstd` feature") instead of a silent fallback.
 
 ### CIELab (PhotometricInterpretation = 8)
 

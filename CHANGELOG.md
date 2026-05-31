@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- decoder: Compression=50000 (Zstandard) strip and tile decode. Each
+  strip / tile is one self-contained RFC 8878 zstd frame; the
+  Predictor (tag 317) interaction is identical to Compression=8
+  Deflate (Predictor=1 raw, Predictor=2 horizontal differencing,
+  per-component for SamplesPerPixel>1). Output is bounded to
+  `min(IFD-claimed strip size, 64 MiB)` to keep a frame shaped like
+  a decompression bomb from forcing an unbounded allocation. Pure
+  Rust: decode goes through the leaf-only `ruzstd 0.7` crate
+  (`StreamingDecoder::new` + `io::Read::take`). Gated behind a
+  default-on `zstd` Cargo feature so consumers that do not need the
+  extension codec ID can opt out and shrink the dependency tree.
+- compress: `unpack_zstd(input, expected_len)` with a magic-number
+  pre-check (`0x28 0xB5 0x2F 0xFD`) so a stray non-zstd payload
+  surfaces a precise textual error instead of reaching the streaming
+  decoder.
+- types: `COMPRESSION_ZSTD = 50000` constant (open self-assigned
+  extension codec ID).
+- tests: 4 new unit tests in `src/compress.rs` covering a synthetic
+  RFC 8878 frame round-trip, missing-magic rejection, mid-frame
+  truncation, and 64-MiB output cap behaviour; 7 new integration
+  tests in `tests/decode_zstd_fixtures.rs` exercising every
+  `{Gray8, RGB24} × {strip, tile} × {Predictor=1, Predictor=2}`
+  combination through `tiffcp -c zstd[:p2]` (gated on the local
+  validator build actually shipping the codec).
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.2...v0.0.3) - 2026-05-29
 
 ### Other

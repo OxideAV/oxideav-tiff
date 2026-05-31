@@ -18,9 +18,10 @@
 //!   Lab → XYZ@D65 → linear NTSC RGB → sRGB)
 //! * Bit depths: 1, 4, 8, 16 (per-strip and per-tile)
 //! * Compression: 1 None / 2 CCITT Modified Huffman / 3 CCITT T.4 1-D /
-//!   32773 PackBits / 5 LZW / 8 Deflate (zlib) /
+//!   4 CCITT T.6 (Group 4) / 32773 PackBits / 5 LZW / 8 Deflate (zlib) /
 //!   7 JPEG-in-TIFF (TIFF Tech Note 2; routes each strip/tile through
-//!   `oxideav-mjpeg`)
+//!   `oxideav-mjpeg`) / 50000 Zstandard (one RFC 8878 frame per
+//!   strip/tile; gated behind the default-on `zstd` Cargo feature)
 //! * Predictor: 1 (none) and 2 (horizontal differencing,
 //!   per-component for SamplesPerPixel > 1)
 //! * Strip OR tile layout

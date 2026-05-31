@@ -118,6 +118,11 @@ pub const COMPRESSION_JPEG_OLD: u16 = 6;
 pub const COMPRESSION_JPEG_NEW: u16 = 7;
 pub const COMPRESSION_DEFLATE_ADOBE: u16 = 8;
 pub const COMPRESSION_PACKBITS: u16 = 32773;
+/// Compression = 50000 — Zstandard (RFC 8878). Open self-assigned
+/// extension codec ID (no Adobe technical note registers this value).
+/// Each strip / tile carries one self-contained zstd frame; the
+/// Predictor (tag 317) interaction is identical to Deflate (8).
+pub const COMPRESSION_ZSTD: u16 = 50000;
 
 // --- Photometric interpretations (Section 3..6) -------------------------
 pub const PHOTO_WHITE_IS_ZERO: u16 = 0;
