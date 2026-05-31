@@ -322,6 +322,82 @@ pub fn unpack_deflate(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
+// Zstandard — libtiff self-assigned Compression = 50000
+// ---------------------------------------------------------------------------
+
+/// Upper bound on the *expansion ratio* of a single Zstandard strip /
+/// tile. `ruzstd::StreamingDecoder` will happily emit gigabytes from
+/// a few hundred input bytes if the frame so directs (a zstd analogue
+/// of the classic zip-bomb), so the per-call output is hard-capped at
+/// the smaller of the IFD-claimed `expected_len` and this constant.
+/// Mirrors `MAX_DEFLATE_OUTPUT` so both byte-oriented codecs have the
+/// same worst-case footprint.
+#[cfg(feature = "zstd")]
+const MAX_ZSTD_OUTPUT: usize = 64 * 1024 * 1024;
+
+/// Decompress one TIFF strip / tile whose `Compression` tag is
+/// `50000` (Zstandard, libtiff self-assignment; see
+/// `docs/image/tiff/tiff-zstd-compression-50000.md`).
+///
+/// Per the doc, each strip / tile is one **standalone** zstd frame
+/// (RFC 8878, magic `0x28B52FFD`) carrying the post-predictor byte
+/// stream the strip / tile would otherwise contain — identical
+/// structural role to `Compression = 8` (Adobe Deflate). The decoder
+/// is therefore a thin wrapper around `ruzstd`'s frame decoder, with
+/// the same explicit output cap the Deflate path uses (an attacker
+/// must not be able to direct an arbitrary multi-GiB allocation from
+/// a few hundred input bytes).
+///
+/// The Predictor reversal is **not** done here — it is the caller's
+/// responsibility, identical to how the Deflate path is wired into
+/// `decoder.rs`, so the encode-side and decode-side prediction code
+/// stays in one place regardless of which codec produced the bytes.
+#[cfg(feature = "zstd")]
+pub fn unpack_zstd(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    if input.len() < 4 || &input[..4] != b"\x28\xb5\x2f\xfd" {
+        return Err(Error::invalid(
+            "TIFF/ZSTD: strip does not start with the zstd frame magic 0x28B52FFD",
+        ));
+    }
+    let limit = expected_len.min(MAX_ZSTD_OUTPUT);
+    let reserve = limit.min(MAX_INITIAL_RESERVE);
+    let mut decoder = ruzstd::StreamingDecoder::new(input)
+        .map_err(|e| Error::invalid(format!("TIFF/ZSTD: frame init failed: {e}")))?;
+    let mut out = Vec::with_capacity(reserve);
+    // Hard cap the per-frame output. `take()` truncates the underlying
+    // decoder at the byte limit; if the truncation actually triggers
+    // (i.e. the frame had more decoded bytes to give), we surface that
+    // as an error rather than returning a silently-truncated buffer,
+    // because every legitimate TIFF strip / tile encodes exactly
+    // `expected_len` bytes.
+    let cap_plus_one = (limit as u64).saturating_add(1);
+    let mut limited = (&mut decoder).take(cap_plus_one);
+    limited
+        .read_to_end(&mut out)
+        .map_err(|e| Error::invalid(format!("TIFF/ZSTD: frame decode failed: {e}")))?;
+    if out.len() > limit {
+        return Err(Error::invalid(format!(
+            "TIFF/ZSTD: decoded output exceeds the {limit}-byte per-strip cap",
+        )));
+    }
+    Ok(out)
+}
+
+/// `zstd`-feature-off stub. Mirrors the JPEG-in-TIFF feature-gate
+/// pattern: the public `decode_tiff` path stays compilable without
+/// the codec dependency, and a TIFF that actually carries
+/// `Compression = 50000` yields a precise error rather than a silent
+/// fallback.
+#[cfg(not(feature = "zstd"))]
+pub fn unpack_zstd(_input: &[u8], _expected_len: usize) -> Result<Vec<u8>> {
+    Err(Error::invalid(
+        "TIFF: Compression=50000 (Zstandard) requires the `zstd` feature",
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Encoders (used by the writer in `encoder.rs`)
 // ---------------------------------------------------------------------------
 

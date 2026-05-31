@@ -118,6 +118,13 @@ pub const COMPRESSION_JPEG_OLD: u16 = 6;
 pub const COMPRESSION_JPEG_NEW: u16 = 7;
 pub const COMPRESSION_DEFLATE_ADOBE: u16 = 8;
 pub const COMPRESSION_PACKBITS: u16 = 32773;
+// libtiff self-assignment (see `docs/image/tiff/tiff-zstd-compression-50000.md`).
+// Each strip / tile is one standalone Zstandard frame (RFC 8878,
+// magic `0x28B52FFD`) carrying the same post-predictor byte stream
+// that Deflate (Compression = 8) would carry. Never registered through
+// Adobe — Adobe's registration function has been defunct since the
+// late 1990s — but de-facto consumed by GDAL, Pillow, tifffile, etc.
+pub const COMPRESSION_ZSTD: u16 = 50000;
 
 // --- Photometric interpretations (Section 3..6) -------------------------
 pub const PHOTO_WHITE_IS_ZERO: u16 = 0;

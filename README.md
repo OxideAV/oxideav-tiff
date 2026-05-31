@@ -15,21 +15,21 @@ source was consulted.
 | Photometric    | Bit depth      | Compression                        | Output       |
 | -------------- | -------------- | ---------------------------------- | ------------ |
 | WhiteIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate | `Gray8` |
-| WhiteIsZero    | 4 / 8          | None / PackBits / LZW / Deflate    | `Gray8`      |
-| WhiteIsZero    | 16             | None / PackBits / LZW / Deflate    | `Gray16Le`   |
+| WhiteIsZero    | 4 / 8          | None / PackBits / LZW / Deflate / **ZSTD (50000)** | `Gray8`      |
+| WhiteIsZero    | 16             | None / PackBits / LZW / Deflate / **ZSTD (50000)** | `Gray16Le`   |
 | BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate | `Gray8` |
-| BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate    | `Gray8` / `Gray16Le` |
+| BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate / **ZSTD (50000)** | `Gray8` / `Gray16Le` |
 | **Transparency Mask** | 1       | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate | `Gray8` (interior = 0xFF, exterior = 0x00) |
-| Palette        | 4 / 8          | None / PackBits / LZW / Deflate    | `Rgb24`      |
-| RGB (3 chan)   | 8              | None / PackBits / LZW / Deflate    | `Rgb24`      |
-| RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate    | `Rgb48Le`    |
-| CMYK (4 chan)  | 8              | None / PackBits / LZW / Deflate    | `Rgb24`      |
-| YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **JPEG-in-TIFF** (Compression=7) | `Rgb24`      |
+| Palette        | 4 / 8          | None / PackBits / LZW / Deflate / **ZSTD (50000)** | `Rgb24`      |
+| RGB (3 chan)   | 8              | None / PackBits / LZW / Deflate / **ZSTD (50000)** | `Rgb24`      |
+| RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate / **ZSTD (50000)** | `Rgb48Le`    |
+| CMYK (4 chan)  | 8              | None / PackBits / LZW / Deflate / **ZSTD (50000)** | `Rgb24`      |
+| YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **ZSTD (50000)** / **JPEG-in-TIFF** (Compression=7) | `Rgb24`      |
 | RGB (3 chan)   | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
 | BlackIsZero / WhiteIsZero | 8   | **JPEG-in-TIFF** (Compression=7)   | `Gray8`      |
 | CMYK (4 chan)  | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
-| **CIELab (3 chan)** | 8         | None / PackBits / LZW / Deflate    | `Rgb24` (Lab→XYZ@D65→linear NTSC→sRGB) |
-| **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate  | `Gray8`      |
+| **CIELab (3 chan)** | 8         | None / PackBits / LZW / Deflate / **ZSTD (50000)** | `Rgb24` (Lab→XYZ@D65→linear NTSC→sRGB) |
+| **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD (50000)** | `Gray8`      |
 
 `Predictor = 1` (no prediction) and `Predictor = 2` (horizontal
 differencing, per-component for `SamplesPerPixel > 1`) are both
@@ -158,6 +158,65 @@ FillOrder=2 is honoured for uncompressed and CCITT-compressed
 TIFF 6.0 §FillOrder (page 32). Any other combination of FillOrder=2
 with non-bilevel data or with a non-CCITT compressor is rejected with
 a precise error.
+
+### Zstandard (Compression = 50000)
+
+Per [`docs/image/tiff/tiff-zstd-compression-50000.md`](../../docs/image/tiff/tiff-zstd-compression-50000.md),
+the libtiff project self-assigned `Compression = 50000` for Zstandard
+in libtiff 4.0.10 (2018-11-10) because Adobe's tag-registration
+function has been defunct since the late 1990s. The de-facto
+on-disk layout follows the same structural template that Adobe
+Deflate (`Compression = 8`) established:
+
+* Each strip / tile is one **standalone Zstandard frame** (RFC 8878,
+  magic `0x28B52FFD`) carrying the post-`Predictor` byte stream the
+  strip / tile would otherwise contain.
+* No file-global zstd stream, no cross-strip dictionary sharing —
+  the strip / tile is the framing unit, identical to Deflate.
+* `Predictor` (tag 317) values 1 (none) and 2 (horizontal
+  differencing) interact with the zstd-decoded byte stream exactly as
+  they do with the Deflate-decoded byte stream; the decoder reverses
+  the predictor after `unpack_zstd` returns the differenced bytes.
+* The TIFF 6.0 §14 reader rule applies: a `Predictor` value the
+  decoder does not recognise must produce an error, never silent
+  garbage. `Predictor = 3` (floating-point) is not implemented and is
+  rejected with a precise error.
+
+The decoder routes `Compression = 50000` through `ruzstd`, a pure-Rust
+RFC 8878 implementation, behind the default-on `zstd` Cargo feature.
+With `--no-default-features` the path returns `Error::Unsupported`
+("TIFF: Compression=50000 (Zstandard) requires the `zstd` feature")
+rather than pulling the zstd decompressor into a minimal build.
+
+Validated by 7 `tiffcp -c zstd[:p2] [-t -w W -l L]` round-trip
+fixtures in `tests/decode_zstd_fixtures.rs`:
+
+* Strip-organised Gray8 32×32 and 128×64, with and without
+  `Predictor = 2`.
+* Strip-organised RGB24 64×64 (ImageMagick `plasma:fractal` source —
+  non-trivially compressible 3-channel data so `Predictor = 2`
+  actually has work to do), with and without `Predictor = 2`.
+* Tile-organised Gray8 128×128 / 32×32 tiles and tile-organised RGB24
+  128×128 / 32×32 tiles + `Predictor = 2`.
+
+In every case, the pixels decoded from the zstd-compressed copy must
+equal the pixels decoded from the uncompressed reference,
+byte-for-byte. Two unconditional negative tests synthesise minimal
+`Compression = 50000` TIFFs by hand (no validator binary needed) and
+verify the decoder rejects the missing-magic and truncated-frame
+cases with a `TIFF/ZSTD: …` error rather than panicking inside the
+zstd decoder. A per-strip / per-tile expansion-ratio cap of 64 MiB
+(mirroring the Deflate `MAX_DEFLATE_OUTPUT`) bounds the worst-case
+per-call allocation against a zstd-bomb-shaped input.
+
+Out of scope this round: encoder-side `Compression = 50000` (the
+`TiffCompression` enum has no `Zstd` variant yet; the
+`docs/image/tiff/tiff-zstd-compression-50000.md` §2 level parameter
+1–22 with libtiff default 9 maps to `ruzstd`'s `CompressionLevel`
+when we add it next round) and `Compression = 50001` (WebP — same
+self-assignment, but the per-strip-WebP wrapping needs its own
+fixture pass and the WebP encoder's size limits make it less broadly
+applicable).
 
 ## Encode
 

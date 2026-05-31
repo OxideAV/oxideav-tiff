@@ -18,9 +18,13 @@
 //!   Lab → XYZ@D65 → linear NTSC RGB → sRGB)
 //! * Bit depths: 1, 4, 8, 16 (per-strip and per-tile)
 //! * Compression: 1 None / 2 CCITT Modified Huffman / 3 CCITT T.4 1-D /
+//!   3 CCITT T.4 2-D (MR) / 4 CCITT T.6 (MMR / Group 4) /
 //!   32773 PackBits / 5 LZW / 8 Deflate (zlib) /
 //!   7 JPEG-in-TIFF (TIFF Tech Note 2; routes each strip/tile through
-//!   `oxideav-mjpeg`)
+//!   `oxideav-mjpeg`) /
+//!   50000 Zstandard (libtiff self-assignment; one zstd frame per
+//!   strip/tile, identical structural template to Compression=8 — see
+//!   `docs/image/tiff/tiff-zstd-compression-50000.md`)
 //! * Predictor: 1 (none) and 2 (horizontal differencing,
 //!   per-component for SamplesPerPixel > 1)
 //! * Strip OR tile layout
@@ -43,15 +47,19 @@
 //! * Predictor: 2 (horizontal differencing) via [`EncodePage::predictor`]
 //! * Multi-page chain via [`encode_tiff_multi`]
 //!
-//! Out of scope for this round (next-round backlog): CCITT T.4 2-D
-//! and T.6 / Group 4 (Compression=3 with T4Options bit 0 set, and
-//! Compression=4 — the 2-D mode codes are not in the TIFF 6.0
-//! spec, which defers to CCITT Rec. T.4 / T.6), the deprecated
-//! TIFF 6.0 §22 old-style JPEG (Compression=6), and encode-side
-//! CIELab (decode-side CIELab is implemented as of this round; the
-//! `EncodePixelFormat` enum has no Lab variant yet).
-//! Compression=7 (new-style JPEG-in-TIFF, per TIFF Tech Note 2) is
-//! decoded as of round 92.
+//! Out of scope for this round (next-round backlog): the deprecated
+//! TIFF 6.0 §22 old-style JPEG (Compression=6), encode-side CIELab
+//! (decode-side CIELab is implemented; the `EncodePixelFormat` enum
+//! has no Lab variant yet), encode-side `Compression = 50000`
+//! (Zstandard; the `TiffCompression` enum has no `Zstd` variant
+//! yet), and `Compression = 50001` (WebP — same libtiff
+//! self-assignment as ZSTD; needs its own per-strip-WebP fixture
+//! pass). Decode-side CCITT T.4 2-D and T.6 / Group 4 are implemented
+//! per CCITT Rec. T.4 §4.2 / Rec. T.6 staged at
+//! `docs/image/tiff/{T-REC-T.4.pdf,T-REC-T.6.pdf}`; decode-side
+//! Compression=7 (new-style JPEG-in-TIFF) is implemented per
+//! TIFF Tech Note 2; decode-side Compression=50000 (Zstandard) is
+//! implemented per `docs/image/tiff/tiff-zstd-compression-50000.md`.
 //!
 //! ## Standalone vs registry-integrated
 //!

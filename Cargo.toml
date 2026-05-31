@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/OxideAV/oxideav-tiff"
 homepage = "https://github.com/OxideAV/oxideav-tiff"
 authors = ["Mark Karpeles"]
-description = "Pure-Rust TIFF 6.0 image decoder + encoder + container for oxideav (None/CCITT-MH/CCITT-T4-1D/CCITT-T4-2D/CCITT-T6-G4/PackBits/LZW/Deflate/JPEG-in-TIFF-7; 1/4/8/16-bit; bilevel/gray/palette/RGB/CMYK/YCbCr; BigTIFF; tiles; multi-page)"
+description = "Pure-Rust TIFF 6.0 image decoder + encoder + container for oxideav (None/CCITT-MH/CCITT-T4-1D/CCITT-T4-2D/CCITT-T6-G4/PackBits/LZW/Deflate/JPEG-in-TIFF-7/ZSTD-50000; 1/4/8/16-bit; bilevel/gray/palette/RGB/CMYK/YCbCr; BigTIFF; tiles; multi-page)"
 readme = "README.md"
 keywords = ["multimedia", "image", "tiff", "codec", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::images"]
@@ -29,9 +29,19 @@ oxideav-core = { version = "0.1", optional = true }
 # rather than dragging both crates into a default-features=false build.
 oxideav-mjpeg = { version = "0.1", optional = true }
 miniz_oxide = "0.9"
+# `ruzstd` is a pure-Rust Zstandard (RFC 8878) decompressor. The libtiff
+# self-assigned `Compression = 50000` (per `docs/image/tiff/
+# tiff-zstd-compression-50000.md`) stores each strip / tile as one
+# standalone zstd frame (magic `0x28B52FFD`), so the decoder needs a
+# raw zstd-frame decompressor — identical structural role to
+# `miniz_oxide` for `Compression = 8` (Adobe Deflate). Gated behind
+# the default-on `zstd` Cargo feature so consumers that need a
+# smaller dependency tree (and don't see `Compression = 50000` TIFFs)
+# can build with `--no-default-features --features registry`.
+ruzstd = { version = "0.7", optional = true, default-features = false, features = ["std"] }
 
 [features]
-default = ["registry"]
+default = ["registry", "zstd"]
 
 # Wires up the `Decoder` trait implementation, the TIFF container
 # demuxer + probe, and the `register_codecs` / `register_containers`
@@ -44,6 +54,14 @@ default = ["registry"]
 # workspace's JPEG codec; without this feature the JPEG-in-TIFF path
 # returns `Error::Unsupported` rather than a silent fallback.
 registry = ["dep:oxideav-core", "dep:oxideav-mjpeg"]
+
+# Enables `Compression = 50000` (Zstandard, libtiff self-assignment —
+# see `docs/image/tiff/tiff-zstd-compression-50000.md`). Pulls in the
+# pure-Rust `ruzstd` decompressor. Without this feature, encountering
+# `Compression = 50000` in a TIFF returns the standard `Compression
+# not supported` decode error rather than dragging in the zstd
+# decompressor unconditionally.
+zstd = ["dep:ruzstd"]
 
 [dev-dependencies]
 # Round 129 (depth-mode benchmarks): Criterion drives the `lzw` bench

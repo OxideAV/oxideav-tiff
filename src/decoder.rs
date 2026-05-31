@@ -4,7 +4,7 @@
 //! standard `TiffPixelFormat`s.
 
 use crate::ccitt::{decode_ccitt, reverse_bits_in_place, CcittVariant, FillOrder};
-use crate::compress::{unpack_deflate, unpack_lzw, unpack_packbits};
+use crate::compress::{unpack_deflate, unpack_lzw, unpack_packbits, unpack_zstd};
 use crate::error::{Result, TiffError as Error};
 use crate::ifd::{find, parse_header, parse_ifd, ByteOrder, Entry};
 use crate::image::{TiffImage, TiffPixelFormat, TiffPlane};
@@ -1114,6 +1114,7 @@ fn decompress_block(
         COMPRESSION_PACKBITS => unpack_packbits(raw, expected),
         COMPRESSION_LZW => unpack_lzw(raw, expected),
         COMPRESSION_DEFLATE_ADOBE => unpack_deflate(raw, expected),
+        COMPRESSION_ZSTD => unpack_zstd(raw, expected),
         COMPRESSION_CCITT_HUFFMAN => {
             let p = ccitt
                 .ok_or_else(|| Error::invalid("TIFF: CCITT compression requires CcittParams"))?;

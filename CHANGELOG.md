@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Decoder: `Compression = 50000` (Zstandard) per the libtiff
+  self-assignment captured in
+  `docs/image/tiff/tiff-zstd-compression-50000.md`. Each strip / tile
+  is decoded as one standalone Zstandard frame (RFC 8878, magic
+  `0x28B52FFD`) through the pure-Rust `ruzstd` decompressor;
+  `Predictor = 1` and `Predictor = 2` interact with the
+  zstd-decoded byte stream identically to the way they interact with
+  the Deflate-decoded byte stream (the predictor is reversed by the
+  same per-photometric pass that already handles `Compression = 8`).
+  Behind the default-on `zstd` Cargo feature: with
+  `--no-default-features`, encountering `Compression = 50000` returns
+  a precise feature-gate error rather than dragging in the zstd
+  decompressor. A 64 MiB per-strip / per-tile expansion-ratio cap
+  (mirroring the Deflate `MAX_DEFLATE_OUTPUT`) bounds the worst-case
+  per-call allocation against a zstd-bomb-shaped input.
+
+  Validated by 7 `tiffcp -c zstd[:p2] [-t -w W -l L]` round-trip
+  fixtures in `tests/decode_zstd_fixtures.rs` (Gray8 + RGB24, strip
+  + tile, `Predictor = 1` + `Predictor = 2`), each asserting that
+  the pixels decoded from the zstd-compressed copy equal the pixels
+  decoded from the uncompressed reference byte-for-byte. Two
+  unconditional negative tests (no validator binary needed)
+  hand-synthesise minimal `Compression = 50000` TIFFs and verify
+  missing-magic and truncated-frame inputs surface as `TIFF/ZSTD: …`
+  decode errors rather than panics.
+
+  Encoder-side `Compression = 50000` is deferred to a later round.
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.2...v0.0.3) - 2026-05-29
 
 ### Other
