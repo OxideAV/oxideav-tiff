@@ -21,10 +21,13 @@
 //!   [`EncodePage::bigtiff`].
 //!
 //! Tile write, T.4 2-D / T.6 (Compression=4) encoding, JPEG-in-TIFF,
-//! and YCbCr / CIELab / CMYK output are intentionally out of scope for
-//! this round. The horizontal-differencing predictor (`Predictor = 2`,
-//! TIFF 6.0 §14) is supported on encode via the
-//! [`EncodePage::predictor`] flag, and `PlanarConfiguration = 2`
+//! and YCbCr / CMYK output are intentionally out of scope for this
+//! round. CIELab output (3-sample `(L*, a*, b*)` chunky and 1-sample
+//! `L*`-only, `PhotometricInterpretation = 8` per TIFF 6.0 §23) is
+//! available via [`EncodePixelFormat::CieLab8`] and
+//! [`EncodePixelFormat::CieLabL8`]. The horizontal-differencing
+//! predictor (`Predictor = 2`, TIFF 6.0 §14) is supported on encode via
+//! the [`EncodePage::predictor`] flag, and `PlanarConfiguration = 2`
 //! (separate component planes, §"PlanarConfiguration") via
 //! [`EncodePage::planar`].
 
@@ -171,6 +174,41 @@ pub enum EncodePixelFormat<'a> {
         indices: &'a [u8],
         palette: &'a [RgbColor],
     },
+    /// 8-bit chunky 1976 CIE L\*a\*b\* (`PhotometricInterpretation = 8`,
+    /// `SamplesPerPixel = 3`, `BitsPerSample = 8 / 8 / 8`) per TIFF 6.0
+    /// §23 "CIE L\*a\*b\* Images" (page 110). `pixels` is row-major
+    /// interleaved `(L*, a*, b*)` triples — `pixels.len() == width *
+    /// height * 3`. The on-disk bit interpretation is fixed by §23: L\*
+    /// is unsigned 0..255 mapping linearly to the perceptual 0..100
+    /// lightness scale, and a\* / b\* are two's-complement signed bytes
+    /// in -128..127 representing the red/green and yellow/blue chrominance
+    /// channels (§23: "The a\* and b\* ranges will be represented as
+    /// signed 8 bit values"). The encoder writes these bytes through to
+    /// the strip / tile / plane payload verbatim — the caller owns the
+    /// colourimetric encoding, exactly as the decoder takes them
+    /// verbatim back off disk. Compressors accepted: None / PackBits /
+    /// LZW / Deflate (the byte-aligned, photometric-agnostic set the
+    /// other multi-bit photometric paths use); CCITT is bilevel-only
+    /// per §10 / §11 and rejected here. `Predictor = 2` (TIFF 6.0 §14
+    /// horizontal differencing, per-component on chunky multi-sample
+    /// data) composes; `PlanarConfiguration = 2` (separate L\* / a\* /
+    /// b\* component planes) composes (§14 says differencing in planar
+    /// "works the same as it does for grayscale data" — each plane is
+    /// differenced independently with an offset of one sample); tiled
+    /// layout (§15) composes for both chunky and planar.
+    CieLab8 { pixels: &'a [u8] },
+    /// 8-bit 1-sample CIE L\* monochrome (`PhotometricInterpretation =
+    /// 8`, `SamplesPerPixel = 1`, `BitsPerSample = 8`) per TIFF 6.0 §23
+    /// page 110 "Usage of other Fields": "SamplesPerPixel - ExtraSamples:
+    /// 3 for L\*a\*b\*, 1 implies L\* only, for monochrome data".
+    /// `pixels.len() == width * height`. Each byte is L\* on the
+    /// 0..255-maps-to-0..100 scale. As with [`Self::CieLab8`], the bytes
+    /// are written through verbatim. Compressors accepted: None /
+    /// PackBits / LZW / Deflate. `Predictor = 2` composes (single-sample
+    /// chunky path with offset = 1); `PlanarConfiguration = 2` is
+    /// rejected per §"PlanarConfiguration" "irrelevant" for
+    /// `SamplesPerPixel = 1`; tiled layout composes.
+    CieLabL8 { pixels: &'a [u8] },
 }
 
 /// Compression scheme for an [`EncodePage`].
@@ -629,13 +667,21 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     // meaningful when there is more than one sample per pixel; TIFF 6.0
     // §"PlanarConfiguration" (page 38): "If SamplesPerPixel is 1,
     // PlanarConfiguration is irrelevant." Reject the single-sample
-    // formats and the bit-packed bilevel format up front. The only
-    // multi-sample format the encoder writes is Rgb24 (SPP=3).
-    if p.planar && !matches!(p.kind, EncodePixelFormat::Rgb24 { .. }) {
+    // formats and the bit-packed bilevel format up front. The
+    // multi-sample formats the encoder writes are Rgb24 (SPP=3) and
+    // CieLab8 (SPP=3 — three 8-bit L*/a*/b* component planes per
+    // §"PlanarConfiguration").
+    if p.planar
+        && !matches!(
+            p.kind,
+            EncodePixelFormat::Rgb24 { .. } | EncodePixelFormat::CieLab8 { .. }
+        )
+    {
         return Err(Error::invalid(
             "TIFF encode: PlanarConfiguration=2 (separate planes) requires a multi-sample \
              format; TIFF 6.0 §\"PlanarConfiguration\" says the field is irrelevant when \
-             SamplesPerPixel is 1 (Gray8 / Gray16Le / Palette8 / Bilevel / TransparencyMask)",
+             SamplesPerPixel is 1 (Gray8 / Gray16Le / Palette8 / Bilevel / TransparencyMask / \
+             CieLabL8)",
         ));
     }
     // CCITT schemes are bilevel-only (rejected above) so they never
@@ -821,6 +867,43 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                     cm[512 + i] = ((c[2] as u16) << 8) | c[2] as u16;
                 }
                 (1u16, vec![8u16], PHOTO_PALETTE, indices.to_vec(), Some(cm))
+            }
+            EncodePixelFormat::CieLab8 { pixels } => {
+                // TIFF 6.0 §23 "CIE L*a*b* Images" (page 110):
+                // 3-sample chunky `(L*, a*, b*)` at 8 bits per sample.
+                // The on-disk bit interpretation is fixed by the spec
+                // — L* is unsigned 0..255 mapping to the 0..100
+                // perceptual lightness scale, and a*, b* are
+                // two's-complement signed bytes — so the encoder
+                // writes the caller-supplied bytes through verbatim.
+                // BitsPerSample is a 3-entry [8, 8, 8] SHORT array,
+                // identical to Rgb24, so the inline-vs-out-of-line
+                // spill machinery already in `plan_page_full` handles
+                // it for both classic (spill out-of-line, 6 > 4) and
+                // BigTIFF (stay inline, 6 <= 8).
+                let want = (p.width as usize) * (p.height as usize) * 3;
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/CieLab8: pixel buffer is {} bytes, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                (3u16, vec![8u16, 8, 8], PHOTO_CIELAB, pixels.to_vec(), None)
+            }
+            EncodePixelFormat::CieLabL8 { pixels } => {
+                // TIFF 6.0 §23 page 110 "Usage of other Fields":
+                // "SamplesPerPixel - ExtraSamples: 3 for L*a*b*, 1
+                // implies L* only, for monochrome data". One byte per
+                // pixel, BitsPerSample = [8]. Bytes are L* on the
+                // 0..255 -> 0..100 perceptual lightness scale.
+                let want = (p.width as usize) * (p.height as usize);
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/CieLabL8: pixel buffer is {} bytes, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                (1u16, vec![8u16], PHOTO_CIELAB, pixels.to_vec(), None)
             }
         };
 
@@ -1384,6 +1467,7 @@ fn forward_horizontal_predictor(
 mod tests {
     use super::*;
     use crate::decode_tiff;
+    use crate::image::TiffPixelFormat;
 
     fn ramp_gray8(w: u32, h: u32) -> Vec<u8> {
         let mut v = Vec::with_capacity((w * h) as usize);
@@ -2515,5 +2599,486 @@ mod tests {
         assert_eq!(imgs.len(), 2);
         assert_eq!(imgs[0].planes[0].data, p1);
         assert_eq!(imgs[1].planes[0].data, p2);
+    }
+
+    // ----------------------------------------------------------------
+    // CIELab encode (TIFF 6.0 §23, PhotometricInterpretation = 8)
+    // ----------------------------------------------------------------
+    //
+    // The encoder writes the caller-supplied L*/a*/b* bytes through
+    // verbatim — the decoder takes them back off disk verbatim too,
+    // so a self-roundtrip can compare on-disk-bytes-in vs
+    // bytes-the-decoder-saw at the strip / tile layer. The
+    // colourimetric Lab → Rgb24 conversion the decoder applies *after*
+    // that is exercised separately by `tests/decode_cielab.rs`.
+
+    /// Pack a logical (L%, a, b) where L is the 0..100 perceptual scale
+    /// and a, b are -127..127, into the three on-disk bytes per §23.
+    fn pack_lab_byte(l_pct: f64, a_signed: i32, b_signed: i32) -> [u8; 3] {
+        let l_byte = (l_pct * 255.0 / 100.0).round().clamp(0.0, 255.0) as u8;
+        [l_byte, (a_signed as i8) as u8, (b_signed as i8) as u8]
+    }
+
+    /// Build a 3-sample (L*, a*, b*) raster as a deterministic mix of
+    /// the four chromatic primaries plus the neutral gradient.
+    fn lab_pattern_3sample(w: u32, h: u32) -> Vec<u8> {
+        let mut v = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                // L* swings 0..100 across the row, a* sweeps -127..127
+                // across the column, b* picks up alternate sign rows.
+                let l_pct = (x as f64) * 100.0 / (w as f64).max(1.0);
+                let a_signed = -127 + (2 * 127 * (y as i32) / (h as i32).max(1));
+                let b_signed = if (x ^ y) & 1 == 0 { 50 } else { -50 };
+                v.extend_from_slice(&pack_lab_byte(l_pct, a_signed, b_signed));
+            }
+        }
+        v
+    }
+
+    /// 1-sample L*-only ramp.
+    fn lab_l_ramp(w: u32, h: u32) -> Vec<u8> {
+        let mut v = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                v.push(((x.wrapping_add(y)) & 0xFF) as u8);
+            }
+        }
+        v
+    }
+
+    /// Helper: take the public-API decoded (Lab → Rgb24) output of a
+    /// CIELab fixture as the round-trip "ground truth" and check that
+    /// the same source bytes round-trip through both the hand-built
+    /// classic fixture path and our `encode_tiff(CieLab8)`. If both
+    /// produce identical Rgb24 outputs, the encoder is writing the
+    /// strip / IFD / photometric the decoder is expecting.
+    fn decode_3sample_cielab(pixels: &[u8], w: u32, h: u32) -> Vec<u8> {
+        // Build the same classic-TIFF the decode-side tests use,
+        // independently of our encoder, to get the canonical Rgb24 the
+        // decoder produces from a verbatim L*/a*/b* strip. The encoder
+        // path's Rgb24 must match this.
+        let row_bytes = (w as u64) * 3;
+        let strip_bytes = row_bytes * (h as u64);
+        assert_eq!(pixels.len() as u64, strip_bytes);
+        let num_entries: u16 = 8;
+        let ifd_offset: u32 = 8;
+        let ifd_size: u32 = 2 + (num_entries as u32) * 12 + 4;
+        let bps_blob_bytes: u32 = 3 * 2;
+        let blobs_offset: u32 = ifd_offset + ifd_size;
+        let bps_off = blobs_offset;
+        let pixels_off = bps_off + bps_blob_bytes;
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"II");
+        buf.extend_from_slice(&42u16.to_le_bytes());
+        buf.extend_from_slice(&ifd_offset.to_le_bytes());
+        buf.extend_from_slice(&num_entries.to_le_bytes());
+        let push = |buf: &mut Vec<u8>, tag: u16, ft: u16, count: u32, v: [u8; 4]| {
+            buf.extend_from_slice(&tag.to_le_bytes());
+            buf.extend_from_slice(&ft.to_le_bytes());
+            buf.extend_from_slice(&count.to_le_bytes());
+            buf.extend_from_slice(&v);
+        };
+        push(&mut buf, 256, 4, 1, w.to_le_bytes());
+        push(&mut buf, 257, 4, 1, h.to_le_bytes());
+        push(&mut buf, 258, 3, 3, bps_off.to_le_bytes());
+        let mut comp = [0u8; 4];
+        comp[..2].copy_from_slice(&1u16.to_le_bytes());
+        push(&mut buf, 259, 3, 1, comp);
+        let mut ph = [0u8; 4];
+        ph[..2].copy_from_slice(&8u16.to_le_bytes());
+        push(&mut buf, 262, 3, 1, ph);
+        push(&mut buf, 273, 4, 1, pixels_off.to_le_bytes());
+        let mut spp = [0u8; 4];
+        spp[..2].copy_from_slice(&3u16.to_le_bytes());
+        push(&mut buf, 277, 3, 1, spp);
+        push(&mut buf, 279, 4, 1, (strip_bytes as u32).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..3u16 {
+            buf.extend_from_slice(&8u16.to_le_bytes());
+        }
+        buf.extend_from_slice(pixels);
+        decode_tiff(&buf).unwrap().frame.planes[0].data.clone()
+    }
+
+    fn decode_1sample_cielab(pixels: &[u8], w: u32, h: u32) -> Vec<u8> {
+        let strip_bytes = (w as u64) * (h as u64);
+        assert_eq!(pixels.len() as u64, strip_bytes);
+        let num_entries: u16 = 8;
+        let ifd_offset: u32 = 8;
+        let ifd_size: u32 = 2 + (num_entries as u32) * 12 + 4;
+        let blobs_offset: u32 = ifd_offset + ifd_size;
+        let pixels_off = blobs_offset;
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"II");
+        buf.extend_from_slice(&42u16.to_le_bytes());
+        buf.extend_from_slice(&ifd_offset.to_le_bytes());
+        buf.extend_from_slice(&num_entries.to_le_bytes());
+        let push = |buf: &mut Vec<u8>, tag: u16, ft: u16, count: u32, v: [u8; 4]| {
+            buf.extend_from_slice(&tag.to_le_bytes());
+            buf.extend_from_slice(&ft.to_le_bytes());
+            buf.extend_from_slice(&count.to_le_bytes());
+            buf.extend_from_slice(&v);
+        };
+        push(&mut buf, 256, 4, 1, w.to_le_bytes());
+        push(&mut buf, 257, 4, 1, h.to_le_bytes());
+        let mut bps = [0u8; 4];
+        bps[..2].copy_from_slice(&8u16.to_le_bytes());
+        push(&mut buf, 258, 3, 1, bps);
+        let mut comp = [0u8; 4];
+        comp[..2].copy_from_slice(&1u16.to_le_bytes());
+        push(&mut buf, 259, 3, 1, comp);
+        let mut ph = [0u8; 4];
+        ph[..2].copy_from_slice(&8u16.to_le_bytes());
+        push(&mut buf, 262, 3, 1, ph);
+        push(&mut buf, 273, 4, 1, pixels_off.to_le_bytes());
+        let mut spp = [0u8; 4];
+        spp[..2].copy_from_slice(&1u16.to_le_bytes());
+        push(&mut buf, 277, 3, 1, spp);
+        push(&mut buf, 279, 4, 1, (strip_bytes as u32).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(pixels);
+        decode_tiff(&buf).unwrap().frame.planes[0].data.clone()
+    }
+
+    #[test]
+    fn encode_cielab8_uncompressed_roundtrip() {
+        // 3-sample (L*, a*, b*) at 8 bits each: encoder must write
+        // PhotometricInterpretation = 8 + SamplesPerPixel = 3 +
+        // BitsPerSample = [8,8,8], so the decoder takes the strip bytes
+        // through the §23 colourimetric pipeline. Self-roundtrip checks
+        // the output matches the hand-built fixture's decode.
+        let pixels = lab_pattern_3sample(8, 8);
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::CieLab8 { pixels: &pixels },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        assert_eq!((d.width, d.height), (8, 8));
+        assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
+        let want = decode_3sample_cielab(&pixels, 8, 8);
+        assert_eq!(d.frame.planes[0].data, want);
+    }
+
+    #[test]
+    fn encode_cielab8_compressors_match_uncompressed() {
+        // PackBits / LZW / Deflate must all produce decoder output
+        // identical to the uncompressed encode (lossless byte-aligned
+        // compressors, photometric-agnostic).
+        let pixels = lab_pattern_3sample(16, 8);
+        let baseline = {
+            let page = EncodePage {
+                width: 16,
+                height: 8,
+                kind: EncodePixelFormat::CieLab8 { pixels: &pixels },
+                compression: TiffCompression::None,
+                predictor: false,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        for c in [
+            TiffCompression::PackBits,
+            TiffCompression::Lzw,
+            TiffCompression::Deflate,
+        ] {
+            let page = EncodePage {
+                width: 16,
+                height: 8,
+                kind: EncodePixelFormat::CieLab8 { pixels: &pixels },
+                compression: c,
+                predictor: false,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+            };
+            let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
+            assert_eq!(d.frame.planes[0].data, baseline, "compressor {:?}", c);
+        }
+    }
+
+    #[test]
+    fn encode_cielab8_predictor_composes() {
+        // Predictor=2 must round-trip on chunky 3-sample CIELab —
+        // the decoder undoes the per-component differencing with
+        // SamplesPerPixel = 3, identical to Rgb24.
+        let pixels = lab_pattern_3sample(20, 12);
+        let no_pred = {
+            let page = EncodePage {
+                width: 20,
+                height: 12,
+                kind: EncodePixelFormat::CieLab8 { pixels: &pixels },
+                compression: TiffCompression::Lzw,
+                predictor: false,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        let with_pred = {
+            let page = EncodePage {
+                width: 20,
+                height: 12,
+                kind: EncodePixelFormat::CieLab8 { pixels: &pixels },
+                compression: TiffCompression::Lzw,
+                predictor: true,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        assert_eq!(no_pred, with_pred);
+    }
+
+    #[test]
+    fn encode_cielab8_planar_composes() {
+        // PlanarConfiguration = 2 splits L* / a* / b* into three
+        // single-component planes (§"PlanarConfiguration"). The
+        // re-interleaved decode must match the chunky path.
+        let pixels = lab_pattern_3sample(16, 8);
+        let chunky = {
+            let page = EncodePage {
+                width: 16,
+                height: 8,
+                kind: EncodePixelFormat::CieLab8 { pixels: &pixels },
+                compression: TiffCompression::Deflate,
+                predictor: false,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        let planar = {
+            let page = EncodePage {
+                width: 16,
+                height: 8,
+                kind: EncodePixelFormat::CieLab8 { pixels: &pixels },
+                compression: TiffCompression::Deflate,
+                predictor: false,
+                planar: true,
+                tiling: None,
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        assert_eq!(chunky, planar);
+    }
+
+    #[test]
+    fn encode_cielab8_tiled_composes() {
+        // Tiled §15 chunky write — `tiffcp` round-trip pattern, applied
+        // to L*/a*/b* via the byte-aligned tile splitter.
+        let pixels = lab_pattern_3sample(32, 32);
+        let strip = {
+            let page = EncodePage {
+                width: 32,
+                height: 32,
+                kind: EncodePixelFormat::CieLab8 { pixels: &pixels },
+                compression: TiffCompression::Lzw,
+                predictor: false,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        let tiled = {
+            let page = EncodePage {
+                width: 32,
+                height: 32,
+                kind: EncodePixelFormat::CieLab8 { pixels: &pixels },
+                compression: TiffCompression::Lzw,
+                predictor: false,
+                planar: false,
+                tiling: Some((16, 16)),
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        assert_eq!(strip, tiled);
+    }
+
+    #[test]
+    fn encode_cielab8_bigtiff_composes() {
+        // BigTIFF: BitsPerSample[3] should now sit inline in the
+        // widened 8-byte value/offset slot. Self-roundtrip the same as
+        // the classic path.
+        let pixels = lab_pattern_3sample(8, 8);
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::CieLab8 { pixels: &pixels },
+            compression: TiffCompression::Deflate,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: true,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        // BigTIFF magic 43.
+        assert_eq!(&bytes[..2], b"II");
+        assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 43);
+        let d = decode_tiff(&bytes).unwrap();
+        let want = decode_3sample_cielab(&pixels, 8, 8);
+        assert_eq!(d.frame.planes[0].data, want);
+    }
+
+    #[test]
+    fn encode_cielab8_rejects_ccitt() {
+        // CCITT is bilevel-only per §10 / §11; CieLab8 is 3-sample
+        // 8-bit, so the bilevel-input gate must reject.
+        let pixels = lab_pattern_3sample(8, 8);
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::CieLab8 { pixels: &pixels },
+            compression: TiffCompression::CcittRle,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        };
+        let err = encode_tiff(&page).unwrap_err();
+        assert!(format!("{err}").contains("CCITT"));
+    }
+
+    #[test]
+    fn encode_cielab8_wrong_buffer_size_rejected() {
+        // 8x8 wants 192 bytes (3 * 64); pass 100 to exercise the size
+        // validator.
+        let bad = vec![0u8; 100];
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::CieLab8 { pixels: &bad },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        };
+        let err = encode_tiff(&page).unwrap_err();
+        assert!(format!("{err}").contains("CieLab8"));
+    }
+
+    #[test]
+    fn encode_cielab_l8_roundtrip() {
+        // 1-sample L*-only — §23 "1 implies L* only, for monochrome
+        // data". Decoder must produce Gray8 matching the hand-built
+        // fixture.
+        let pixels = lab_l_ramp(8, 4);
+        let page = EncodePage {
+            width: 8,
+            height: 4,
+            kind: EncodePixelFormat::CieLabL8 { pixels: &pixels },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        assert_eq!((d.width, d.height), (8, 4));
+        assert_eq!(d.pixel_format, TiffPixelFormat::Gray8);
+        let want = decode_1sample_cielab(&pixels, 8, 4);
+        assert_eq!(d.frame.planes[0].data, want);
+    }
+
+    #[test]
+    fn encode_cielab_l8_rejects_planar() {
+        // SamplesPerPixel = 1 → §"PlanarConfiguration" "irrelevant" →
+        // rejected (mirrors Gray8 / Gray16Le / Palette8 / Bilevel).
+        let pixels = lab_l_ramp(8, 4);
+        let page = EncodePage {
+            width: 8,
+            height: 4,
+            kind: EncodePixelFormat::CieLabL8 { pixels: &pixels },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: true,
+            tiling: None,
+            bigtiff: false,
+        };
+        let err = encode_tiff(&page).unwrap_err();
+        assert!(format!("{err}").contains("PlanarConfiguration"));
+    }
+
+    #[test]
+    fn encode_cielab_writes_photometric_8() {
+        // Decode the encoder's output through a byte-level IFD walker
+        // (independent of our decoder) and confirm
+        // PhotometricInterpretation = 8 lands in tag 262.
+        let pixels = lab_pattern_3sample(8, 8);
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::CieLab8 { pixels: &pixels },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let ifd_off = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        let count = u16::from_le_bytes([bytes[ifd_off], bytes[ifd_off + 1]]) as usize;
+        let mut found = None;
+        for k in 0..count {
+            let entry_off = ifd_off + 2 + k * 12;
+            let tag = u16::from_le_bytes([bytes[entry_off], bytes[entry_off + 1]]);
+            if tag == 262 {
+                let val = u16::from_le_bytes([bytes[entry_off + 8], bytes[entry_off + 9]]);
+                found = Some(val);
+            }
+        }
+        assert_eq!(found, Some(8), "expected PhotometricInterpretation = 8");
     }
 }

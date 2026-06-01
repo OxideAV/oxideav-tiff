@@ -32,7 +32,9 @@
 //!   greyscale) / RGB (8-bit) / Palette (8-bit indexed) /
 //!   TransparencyMask (1-bit, sets PhotometricInterpretation = 4 and
 //!   NewSubfileType bit 2 per TIFF 6.0 §"PhotometricInterpretation"
-//!   value 4 + §"NewSubfileType" bit 2)
+//!   value 4 + §"NewSubfileType" bit 2) / CIELab (8-bit chunky
+//!   `(L*, a*, b*)` and 1-sample L*-only, PhotometricInterpretation = 8
+//!   per TIFF 6.0 §23 "CIE L*a*b* Images")
 //! * Compression: None / PackBits / LZW / Deflate /
 //!   CCITT Modified Huffman (Compression=2) /
 //!   CCITT T.4 1-D (Compression=3, with optional T4Options bit 2
@@ -44,14 +46,12 @@
 //! * Multi-page chain via [`encode_tiff_multi`]
 //!
 //! Out of scope for this round (next-round backlog): CCITT T.4 2-D
-//! and T.6 / Group 4 (Compression=3 with T4Options bit 0 set, and
-//! Compression=4 — the 2-D mode codes are not in the TIFF 6.0
-//! spec, which defers to CCITT Rec. T.4 / T.6), the deprecated
-//! TIFF 6.0 §22 old-style JPEG (Compression=6), and encode-side
-//! CIELab (decode-side CIELab is implemented as of this round; the
-//! `EncodePixelFormat` enum has no Lab variant yet).
-//! Compression=7 (new-style JPEG-in-TIFF, per TIFF Tech Note 2) is
-//! decoded as of round 92.
+//! and T.6 / Group 4 encode (the read side covers both as of round
+//! 200; the writer still returns InvalidData for those CcittVariants),
+//! the deprecated TIFF 6.0 §22 old-style JPEG (Compression=6), and
+//! encode-side JPEG-in-TIFF (Compression=7) / YCbCr / CMYK output.
+//! Decode-side Compression=7 (new-style JPEG-in-TIFF, per TIFF Tech
+//! Note 2) is implemented as of round 92.
 //!
 //! ## Standalone vs registry-integrated
 //!

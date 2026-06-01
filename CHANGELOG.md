@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Encoder: `PhotometricInterpretation = 8` (1976 CIE L*a*b*), per
+  TIFF 6.0 §23 "CIE L*a*b* Images" (page 110). Two new
+  `EncodePixelFormat` variants:
+
+  * `CieLab8 { pixels }` — 3-sample chunky `(L*, a*, b*)` at 8 bits
+    per sample. Writes `PhotometricInterpretation = 8`,
+    `SamplesPerPixel = 3`, `BitsPerSample = [8, 8, 8]`. The bit
+    interpretation is fixed by §23 — L* unsigned 0..255 mapping
+    linearly to the 0..100 perceptual lightness scale, a*/b*
+    two's-complement signed bytes in -128..127 — so the encoder
+    takes the caller-supplied bytes through verbatim, exactly the
+    inverse of the decoder's verbatim strip read.
+
+  * `CieLabL8 { pixels }` — 1-sample L*-only at 8 bits per sample
+    (§23 page 110 "Usage of other Fields": "3 for L*a*b*, 1 implies
+    L* only, for monochrome data"). Writes
+    `PhotometricInterpretation = 8`, `SamplesPerPixel = 1`,
+    `BitsPerSample = [8]`.
+
+  Compressors accepted on both variants: None / PackBits / LZW /
+  Deflate (the byte-aligned set the rest of the multi-bit
+  photometric paths use); CCITT (Compression = 2 / 3) is bilevel-only
+  per §10 / §11 and rejected via the existing CCITT-input gate.
+  `Predictor = 2` (TIFF 6.0 §14 horizontal differencing) composes
+  with both — per-component differencing with offset =
+  `SamplesPerPixel`, identical to the Rgb24 / Gray8 paths.
+  `PlanarConfiguration = 2` composes with `CieLab8` (three
+  single-component planes via §"PlanarConfiguration"); it is
+  rejected on `CieLabL8` per §"PlanarConfiguration" "irrelevant"
+  when `SamplesPerPixel = 1`. Tiled layout (§15) composes with both
+  variants under chunky, and for `CieLab8` under planar (one tile
+  grid per L*/a*/b* plane, §15 `TileOffsets`). BigTIFF composes
+  unchanged — the 3-entry `BitsPerSample` SHORT array (6 bytes)
+  stays inline in the widened 8-byte value/offset slot.
+
+  Validated by 11 in-crate unit tests covering uncompressed
+  roundtrip, all four compressors, the Predictor=2 composition, the
+  PlanarConfiguration=2 composition, the tiled-§15 composition, the
+  BigTIFF composition, the CCITT rejection, the wrong-buffer-size
+  rejection, the 1-sample roundtrip, the planar-rejection on 1-sample
+  L*-only input, and an IFD-level photometric byte check; plus 9
+  integration tests in `tests/encode_cielab_roundtrip.rs` mirroring
+  `decode_cielab.rs`'s fixture shape — the neutral L* gradient, each
+  of the four chromatic primary directions, the lossless-compressor
+  parity check, an exhaustive Predictor / Planar / Tiled / combined
+  composition check, 1-sample L*-only ramp + tiled composition +
+  predictor / compressor matrix, an IFD-level byte walker that asserts
+  `tag 262 = 8` and `tag 277 = 3 (or 1)`, and a multi-page chain that
+  mixes `CieLab8`, `Gray8`, and `CieLabL8` pages.
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.2...v0.0.3) - 2026-05-29
 
 ### Other

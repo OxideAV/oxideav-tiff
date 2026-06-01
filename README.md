@@ -126,8 +126,30 @@ photometric paths use). CCITT (Compression = 2/3/4) is bilevel-only
 per spec and rejected here; the JPEG-in-TIFF dispatch (Compression =
 7) does not currently recognise CIELab as one of its render targets —
 TN2 doesn't list it as a permitted §6.1.4 photometric for new-style
-JPEG. Encode-side CIELab is not yet implemented (no Lab variant on
-`EncodePixelFormat`).
+JPEG.
+
+Encode-side CIELab is available via
+[`EncodePixelFormat::CieLab8`] (3-sample chunky `(L*, a*, b*)`) and
+[`EncodePixelFormat::CieLabL8`] (1-sample L\*-only). The encoder
+writes the caller-supplied L\*/a\*/b\* bytes through verbatim — the
+on-disk bit interpretation is fixed by §23 (L\* unsigned 0..255 →
+0..100 perceptual lightness, a\*/b\* two's-complement signed bytes
+in -128..127) — and sets `PhotometricInterpretation = 8`,
+`SamplesPerPixel = 3` (or `1`), `BitsPerSample = [8,8,8]` (or `[8]`).
+The same compressor set the decode path accepts (None / PackBits /
+LZW / Deflate) is accepted on the encode side; CCITT (Compression =
+2/3/4) is rejected because it is bilevel-only per §10 / §11.
+`Predictor = 2` composes with both variants (per-component
+differencing with offset = `SamplesPerPixel`, identical to the
+Rgb24 / Gray8 paths). `PlanarConfiguration = 2` composes with
+`CieLab8` (L\*, a\*, b\* split into three single-component planes,
+§"PlanarConfiguration"); it is rejected on `CieLabL8` per
+§"PlanarConfiguration" "irrelevant" when `SamplesPerPixel = 1`.
+Tiled layout (§15) composes with both variants under chunky and, for
+`CieLab8`, under planar (one tile grid per plane, §15
+`TileOffsets`). BigTIFF composes unchanged — the 3-entry
+`BitsPerSample` SHORT array (6 bytes) stays inline in the widened
+8-byte value/offset slot.
 
 ### Transparency Mask (PhotometricInterpretation = 4)
 
@@ -168,6 +190,8 @@ a precise error.
 | BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Gray8` / `::Gray16Le` |
 | RGB            | 8         | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Rgb24`     |
 | Palette        | 8         | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Palette8`  |
+| **CIELab (3 chan)** | 8    | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::CieLab8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 3, BitsPerSample = [8,8,8]) |
+| **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate                          | `EncodePixelFormat::CieLabL8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 1) |
 
 `TiffCompression::CcittRle` selects Modified Huffman
 (`Compression = 2`, TIFF 6.0 §10) and `TiffCompression::CcittT4OneD`
@@ -308,10 +332,11 @@ errors out — classic and BigTIFF IFD layouts are wire-incompatible).
   `P = 12`), arithmetic coding (SOF9 / SOF11), and
   `PlanarConfiguration = 2` JPEG remain unsupported.
 - CIELab photometric interpretation (PhotometricInterpretation = 8)
-  **decodes** as of this round (3-sample `L*a*b*` and 1-sample
-  `L*`-only, 8-bit; both uncompressed and the byte-aligned
-  compressors). Encode-side CIELab remains a backlog item — the
-  `EncodePixelFormat` enum does not yet expose a Lab variant.
+  **decodes** and **encodes** as of this round (3-sample `L*a*b*`
+  and 1-sample `L*`-only, 8-bit; both uncompressed and the
+  byte-aligned compressors; encode composes with `Predictor = 2`,
+  `PlanarConfiguration = 2` on `CieLab8`, tiled layout, and BigTIFF
+  per the §23 / §14 / §15 spec rules).
 - DNG / GeoTIFF / EXIF blob extraction
 - Encoder-side planar (`PlanarConfiguration = 2`) writing is now
   supported for `Rgb24` under None / PackBits / LZW / Deflate (with or
