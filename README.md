@@ -161,21 +161,34 @@ a precise error.
 
 ## Encode
 
-| Photometric    | Bit depth | Compression                                                 | API call                |
-| -------------- | --------- | ----------------------------------------------------------- | ----------------------- |
-| WhiteIsZero    | 1         | None / CCITT-MH / T.4-1D                                    | `EncodePixelFormat::Bilevel`   |
-| **Transparency Mask** | 1  | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate         | `EncodePixelFormat::TransparencyMask` (sets PhotometricInterpretation = 4 and NewSubfileType bit 2) |
-| BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Gray8` / `::Gray16Le` |
-| RGB            | 8         | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Rgb24`     |
-| Palette        | 8         | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Palette8`  |
+| Photometric    | Bit depth | Compression                                                                                       | API call                |
+| -------------- | --------- | ------------------------------------------------------------------------------------------------- | ----------------------- |
+| WhiteIsZero    | 1         | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)**                                               | `EncodePixelFormat::Bilevel`   |
+| **Transparency Mask** | 1  | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate                  | `EncodePixelFormat::TransparencyMask` (sets PhotometricInterpretation = 4 and NewSubfileType bit 2) |
+| BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate                                                                   | `EncodePixelFormat::Gray8` / `::Gray16Le` |
+| RGB            | 8         | None / PackBits / LZW / Deflate                                                                   | `EncodePixelFormat::Rgb24`     |
+| Palette        | 8         | None / PackBits / LZW / Deflate                                                                   | `EncodePixelFormat::Palette8`  |
 
 `TiffCompression::CcittRle` selects Modified Huffman
-(`Compression = 2`, TIFF 6.0 §10) and `TiffCompression::CcittT4OneD`
-selects T.4 1-D (`Compression = 3`, §11) with an optional
-`eol_byte_aligned` flag that writes `T4Options` bit 2. Both
-encoders use the same `WHITE` / `BLACK` run-length tables we
-transcribed from the TIFF 6.0 PDF for decode. The CCITT writer
-rejects non-bilevel inputs with a precise error.
+(`Compression = 2`, TIFF 6.0 §10), `TiffCompression::CcittT4OneD`
+selects T.4 1-D (`Compression = 3`, §11), `TiffCompression::CcittT4TwoD`
+selects T.4 2-D / Modified READ (MR, `Compression = 3` with `T4Options`
+bit 0 set), and `TiffCompression::CcittT6` selects T.6 / Modified
+Modified READ (MMR, `Compression = 4`). Both T.4 variants accept the
+`eol_byte_aligned` flag that writes `T4Options` bit 2; T.6 has no EOL
+framing at all. The 2-D variants reuse the same Pass / Horizontal /
+Vertical mode codes the decoder uses (transcribed clean-room from
+ITU-T T.4 §4.2 / T.6 Table 1 into `docs/image/tiff/ccitt-t4-t6-fax-codes.md`
+§1), with the imaginary all-white first reference line per T.4 §4.2 /
+T.6 §2.2.1. The encoder picks the shortest applicable mode at each
+step: Pass when `b2 < a1`, Vertical V(n) when `|a1 − b1| ≤ 3`, otherwise
+Horizontal (the same partition the standard T.4 / T.6 reference
+encoder makes). Every T.4-2D row is coded 2-D (the encoder does not
+model a K-parameter 1-D fallback — TIFF allows the all-2-D layout and
+our decoder accepts it). The bilevel CCITT writer continues to reject
+non-bilevel inputs, tiled layouts, and `Predictor = 2` (TIFF 6.0 §14
+ties the predictor to the LZW family); these gates apply uniformly to
+all four variants.
 
 The horizontal-differencing predictor (`Predictor = 2`, TIFF 6.0 §14)
 is available on encode via the `EncodePage::predictor` flag. When set,
@@ -283,8 +296,9 @@ errors out — classic and BigTIFF IFD layouts are wire-incompatible).
 ## Backlog (not yet implemented)
 
 - CCITT T.4 2-D coding (`Compression = 3` with `T4Options` bit 0
-  set) and T.6 / Group 4 (`Compression = 4`) **decode** as of this
-  round. The 2-D Pass / Horizontal / Vertical mode codes —
+  set) and T.6 / Group 4 (`Compression = 4`) round-trip through
+  both **decode** (round 130) and **encode** (this round) as of
+  this round. The 2-D Pass / Horizontal / Vertical mode codes —
   transcribed clean-room from ITU-T T.4 §4.2 / T.6 into
   `docs/image/tiff/ccitt-t4-t6-fax-codes.md` §1 — drive the same
   READ algorithm both variants share. T.6 adds the
@@ -292,15 +306,24 @@ errors out — classic and BigTIFF IFD layouts are wire-incompatible).
   T.4 2-D layers the EOL+tag-bit row separator on top of it. The
   optional uncompressed-mode extension (`0000001111` followed by
   Table 5/T.4 patterns) is explicitly rejected — `tiffcp` never
-  emits it for normal facsimile content. Validated through 7
-  end-to-end `run_roundtrip` fixtures (solid white, two
-  rectangles, diagonal, wide run) × G4 / T.4-2D against `tiffcp
-  -c g4` / `-c g3:2d` oracle outputs, plus 13 in-crate unit tests
-  covering the mode-code dictionary entries (V(0), VR/VL(1..3),
-  Pass, Horizontal, Uncompressed-extension) and the
-  `first_change_after` reference-line walker. **Encode** for these
-  variants remains a backlog item — the encoder explicitly returns
-  `InvalidData` for `T4TwoD` / `T6` variants of `CcittVariant`.
+  emits it for normal facsimile content. The decode side is
+  validated through 7 end-to-end `run_roundtrip` fixtures (solid
+  white, two rectangles, diagonal, wide run) × G4 / T.4-2D against
+  `tiffcp -c g4` / `-c g3:2d` oracle outputs, plus 13 in-crate
+  unit tests covering the mode-code dictionary entries (V(0),
+  VR/VL(1..3), Pass, Horizontal, Uncompressed-extension) and the
+  `first_change_after` reference-line walker. The encode side
+  closes the loop through 20 self-roundtrip tests (`tests/
+  encode_ccitt_2d_roundtrip.rs`) that encode + decode all-white,
+  all-black, diagonal, checkerboard, aligned-stripes, blank-then-
+  black-corner (Pass-mode), and non-multiple-of-8 fixtures across
+  T.4-2D and T.6 — exercising the V(0) / V(±1..3) / Pass /
+  Horizontal mode picker, the EOL+tag-bit framing, the
+  byte-aligned-EOL variant, the IFD-level `T4Options` (tag 292)
+  and `T6Options` (tag 293) emission, and a multi-page chain that
+  mixes a T.6 page with a T.4-2D page. The encoder does not model
+  a K-parameter 1-D fallback for T.4-2D — every row is coded 2-D,
+  which the spec allows and our decoder accepts.
 - JPEG-in-TIFF Compression = 6 (old-style, deprecated by TIFF Tech
   Note 2; decoder returns precise `Error::Unsupported`).
   Compression = 7 (new-style) **decodes** as of this round across

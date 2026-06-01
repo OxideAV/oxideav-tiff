@@ -714,25 +714,6 @@ pub fn encode_ccitt(
     variant: CcittVariant,
     fill: FillOrder,
 ) -> Result<Vec<u8>> {
-    // 2-D encode (T.4 2-D and T.6) is out of scope for the present
-    // implementation — only the decode path has been added against
-    // the staged T.4/T.6 mode-code tables. Reject the variants
-    // explicitly rather than silently falling through to the 1-D
-    // path below.
-    match variant {
-        CcittVariant::ModifiedHuffman | CcittVariant::T4OneD { .. } => {}
-        CcittVariant::T4TwoD { .. } => {
-            return Err(Error::invalid(
-                "TIFF/CCITT encode: T.4 2-D (Modified READ / MR) encode not implemented",
-            ));
-        }
-        CcittVariant::T6 => {
-            return Err(Error::invalid(
-                "TIFF/CCITT encode: T.6 (MMR) encode not implemented",
-            ));
-        }
-    }
-
     let row_bytes = (width as usize).div_ceil(8);
     let need = row_bytes * rows as usize;
     if input.len() < need {
@@ -743,50 +724,76 @@ pub fn encode_ccitt(
     }
 
     let mut bw = BitWriter::new();
+
+    // For 2-D variants (T.4 2-D and T.6) we keep a reference line that
+    // mirrors what a decoder would have most-recently produced. Per
+    // T.6 §2.2.1 / T.4 §4.2 the first reference line is "an imaginary
+    // all-white line". For MH and T.4 1-D it stays unused.
+    let mut reference: Vec<u8> = vec![0u8; row_bytes];
+
     for r in 0..rows {
-        // T.4 1-D: each row begins with the 12-bit EOL code, optionally
-        // preceded by zero-fill bits so the trailing 1 lands on a
-        // byte boundary (T4Options bit 2). MH has no EOL codes.
-        if let CcittVariant::T4OneD { eol_byte_aligned } = variant {
-            if eol_byte_aligned {
-                // EOL: 12 bits, the trailing 1 in bit position 7 of a
-                // byte. So the leading 11 zeros plus our zero-fill
-                // pad must end at bit position 7 mod 8 = bit 7 of a
-                // byte; equivalently, the 1-bit lands at byte_pos % 8
-                // == 7, equivalently the bit BEFORE the leading 11
-                // zeros lands at byte_pos % 8 == 4 — i.e. after
-                // emitting the fill we want `bit_count % 8 == 4` so
-                // that 11 zeros + 1 = 12 bits fills the rest of the
-                // current byte and one more byte cleanly. Compute the
-                // pad and emit it as zeros.
-                let cur = bw.bit_count % 8;
-                let pad = (4 + 8 - cur) % 8;
-                for _ in 0..pad {
-                    bw.write(0, 1);
+        let row_off = (r as usize) * row_bytes;
+        let coding_line = &input[row_off..row_off + row_bytes];
+
+        // Row framing per variant:
+        //
+        //   - MH (Compression=2): no inter-row marker; rows align to
+        //     byte boundaries AFTER coding.
+        //   - T.4 1-D: each row begins with a 12-bit EOL code,
+        //     optionally byte-aligned per T4Options bit 2.
+        //   - T.4 2-D: same EOL prefix plus a one-bit tag (`0` selects
+        //     a 2-D coded line for the next row; we always emit `0`
+        //     since this encoder uses 2-D for every row of a T.4 2-D
+        //     strip — TIFF allows this and our decoder accepts the
+        //     all-2-D layout).
+        //   - T.6 (G4): no per-row framing at all (T.6 §2.2.1 "no
+        //     synchronisation codes between scan lines").
+        match variant {
+            CcittVariant::ModifiedHuffman => {}
+            CcittVariant::T4OneD { eol_byte_aligned } => {
+                write_eol(&mut bw, eol_byte_aligned);
+            }
+            CcittVariant::T4TwoD { eol_byte_aligned } => {
+                write_eol(&mut bw, eol_byte_aligned);
+                // Tag bit: 0 = next row is 2-D coded. Every row in a
+                // T.4 2-D strip produced by this encoder is 2-D.
+                bw.write(0, 1);
+            }
+            CcittVariant::T6 => {}
+        }
+
+        // Row coding mode: 1-D (MH-style runs) for MH and T.4 1-D;
+        // 2-D (Pass / Horizontal / Vertical mode codes) for T.4 2-D
+        // and T.6, referenced against the previously coded line.
+        match variant {
+            CcittVariant::ModifiedHuffman | CcittVariant::T4OneD { .. } => {
+                // 1-D MH runs, white-first (a zero-length white run is
+                // emitted if the row starts with black, per §10).
+                let runs = scan_runs(coding_line, width as usize);
+                let mut is_white = true;
+                for &run in &runs {
+                    emit_run(&mut bw, run, is_white);
+                    is_white = !is_white;
                 }
             }
-            // 12-bit EOL = 000000000001.
-            bw.write(0b0000_0000_0001, 12);
+            CcittVariant::T4TwoD { .. } | CcittVariant::T6 => {
+                encode_two_d_row(&mut bw, &reference, coding_line, width as usize);
+            }
         }
 
-        // Decompose the row into alternating white/black runs (white
-        // first, per §10: "all data lines begin with a white
-        // run-length code word set. If the actual scan line begins
-        // with a black run, a white run-length of zero is sent").
-        let row_off = (r as usize) * row_bytes;
-        let runs = scan_runs(&input[row_off..row_off + row_bytes], width as usize);
-        let mut is_white = true;
-        for &run in &runs {
-            emit_run(&mut bw, run, is_white);
-            is_white = !is_white;
-        }
-
-        // §10: "New rows always begin on the next available byte
-        // boundary." This is the row separator for Compression=2. For
-        // Compression=3, the EOL code at the next row's start is the
-        // separator — no inter-row alignment.
-        if matches!(variant, CcittVariant::ModifiedHuffman) {
-            bw.align();
+        // Inter-row alignment / reference refresh.
+        //
+        // MH (Compression=2): "New rows always begin on the next
+        // available byte boundary" (§10). The other variants either
+        // use the EOL+tag prefix (T.4) or have no boundary at all
+        // (T.6). For 2-D variants refresh the reference line so the
+        // next iteration's encoder sees the row we just coded.
+        match variant {
+            CcittVariant::ModifiedHuffman => bw.align(),
+            CcittVariant::T4OneD { .. } => {}
+            CcittVariant::T4TwoD { .. } | CcittVariant::T6 => {
+                reference.copy_from_slice(coding_line);
+            }
         }
     }
 
@@ -795,6 +802,122 @@ pub fn encode_ccitt(
         reverse_bits_in_place(&mut out);
     }
     Ok(out)
+}
+
+/// Write one optionally-byte-aligned EOL code (`000000000001`) into
+/// `bw`. With `byte_aligned`, the writer first pads with leading zero
+/// bits so the trailing 1 bit lands at bit position 0 of a byte (i.e.
+/// the EOL ends on a byte boundary), per T4Options bit 2.
+fn write_eol(bw: &mut BitWriter, byte_aligned: bool) {
+    if byte_aligned {
+        // After the leading zero-fill, the current bit count must be
+        // such that 12 more bits ends on a byte boundary; equivalently
+        // `bit_count % 8 == 4` (since 4 + 12 = 16, a multiple of 8).
+        let cur = bw.bit_count % 8;
+        let pad = (4 + 8 - cur) % 8;
+        for _ in 0..pad {
+            bw.write(0, 1);
+        }
+    }
+    // 12-bit EOL = 000000000001.
+    bw.write(0b0000_0000_0001, 12);
+}
+
+/// Encode one 2-D row of length `width` pixels against `reference`
+/// (the previous decoded / coded row, same `row_bytes` layout) by
+/// emitting the Pass / Horizontal / Vertical mode codes of Table
+/// 4/T.4 = Table 1/T.6.
+///
+/// Algorithm (T.4 §4.2.1.3, T.6 §2.2.1): at each step locate the next
+/// changing element `a1` on the coding line (opposite colour to a0)
+/// and the next two changing elements `b1`, `b2` on the reference line.
+/// Pick the shortest applicable mode:
+///
+/// * **Pass** (`b2 < a1`): the run between `a0` and the column under
+///   `b2` doesn't change colour on the coding line; advance `a0` to
+///   that column, no colour flip.
+/// * **Vertical V(n)** (`|a1 - b1| <= 3`): emit a 1- to 7-bit code
+///   selecting `a1 = b1 + n`; advance `a0` to `a1`, flip colour.
+/// * **Horizontal** (`|a1 - b1| > 3`): emit `001` + MH(`a0..a1`) +
+///   MH(`a1..a2`); advance `a0` to `a2`, no net colour flip (two
+///   MH-coded runs put `a0` back to its starting colour).
+///
+/// `out`-style writes go straight into `bw`. Returns nothing because
+/// every step's input is fully determined by the coding line and
+/// reference (which means `bw` is unconditionally extended by a
+/// well-formed prefix sequence).
+fn encode_two_d_row(bw: &mut BitWriter, reference: &[u8], coding: &[u8], width: usize) {
+    // a0 is the index of the most-recently coded changing element on
+    // the coding line; T.4 §4.2.1.1 puts it "just to the left of the
+    // first picture element of the line" and stipulates the imaginary
+    // white pel at column -1. We mirror what `decode_two_d_row` does:
+    // start at column 0 with `a0_white = true` and let the first
+    // iteration handle the row-start case (where column 0 itself can
+    // be a changing element if the row begins with black).
+    let mut a0: usize = 0;
+    let mut a0_white = true;
+
+    while a0 < width {
+        // a1: first changing element on the coding line strictly
+        // right of a0, opposite colour to a0. Reuses
+        // `first_change_after` (the reference-line walker), which is
+        // colour-agnostic about whose line it's walking; the row-start
+        // case (`a0 == 0`) sees column 0 against an imaginary-white
+        // pel exactly the way the decoder's b1 lookup does.
+        let a1 = first_change_after(coding, a0, !a0_white, width);
+
+        // b1: first changing element on the reference line strictly
+        // right of a0, opposite colour to a0.
+        let b1 = first_change_after(reference, a0, !a0_white, width);
+
+        // b2: next changing element on the reference line strictly
+        // right of b1 (any colour transition).
+        let b2 = next_change_after(reference, b1, width);
+
+        if b2 < a1 {
+            // Pass mode: code word `0001`. The span [a0, b2) keeps
+            // a0's colour; a0 advances to b2 and the colour does NOT
+            // flip (T.4 §4.2.1.3.1).
+            bw.write(0b0001, 4);
+            a0 = b2;
+        } else {
+            // Try Vertical V(n) with -3 <= n <= 3.
+            let diff = a1 as isize - b1 as isize;
+            if (-3..=3).contains(&diff) {
+                emit_vertical(bw, diff);
+                a0 = a1;
+                a0_white = !a0_white;
+            } else {
+                // Horizontal mode: `001` + MH(a0..a1) + MH(a1..a2).
+                // a2 = next changing element on the coding line
+                // strictly right of a1 (opposite colour to a1, i.e.
+                // same colour as a0).
+                let a2 = first_change_after(coding, a1, a0_white, width);
+                bw.write(0b001, 3);
+                emit_run(bw, a1 - a0, a0_white);
+                emit_run(bw, a2 - a1, !a0_white);
+                a0 = a2;
+                // a0 colour is unchanged (two flips = no net flip).
+            }
+        }
+    }
+}
+
+/// Emit the Vertical-mode code word for offset `n` in pixels,
+/// `-3 <= n <= 3`. Code words from Table 4/T.4 = Table 1/T.6:
+/// V(0) = `1`, VR(1) = `011`, VL(1) = `010`, VR(2) = `000011`,
+/// VL(2) = `000010`, VR(3) = `0000011`, VL(3) = `0000010`.
+fn emit_vertical(bw: &mut BitWriter, n: isize) {
+    match n {
+        0 => bw.write(0b1, 1),
+        1 => bw.write(0b011, 3),
+        -1 => bw.write(0b010, 3),
+        2 => bw.write(0b000011, 6),
+        -2 => bw.write(0b000010, 6),
+        3 => bw.write(0b0000011, 7),
+        -3 => bw.write(0b0000010, 7),
+        _ => unreachable!("emit_vertical: caller must clamp |n| <= 3"),
+    }
 }
 
 /// Decompose one row of MSB-first packed bilevel bytes into a

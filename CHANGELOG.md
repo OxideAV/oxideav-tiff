@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Encoder: CCITT T.4 2-D (Modified READ / MR, `Compression = 3`
+  with `T4Options` bit 0 set) and T.6 / Group 4 (Modified
+  Modified READ / MMR, `Compression = 4`) via two new
+  [`TiffCompression`] variants: `CcittT4TwoD { eol_byte_aligned }`
+  and `CcittT6`. Closes the round-130 decode-only loop: both
+  variants are now bit-exact through encode + decode against our
+  own reader (which is validated against `tiffcp -c g4` / `-c
+  g3:2d` external fixtures).
+
+  The 2-D row encoder picks the shortest applicable Pass /
+  Horizontal / Vertical mode at each step, mirroring the standard
+  T.4 / T.6 encoder partition (T.4 §4.2.1.3, T.6 §2.2.1):
+
+  * **Pass** (`0001`, 4 bits) when `b2 < a1` — span [a0, b2)
+    keeps a0's colour, a0 advances to b2, colour unchanged.
+  * **Vertical V(n)** (1-7 bits) when `|a1 − b1| ≤ 3` — `V(0)
+    = 1`, `VR(1) = 011`, `VL(1) = 010`, `VR(2) = 000011`,
+    `VL(2) = 000010`, `VR(3) = 0000011`, `VL(3) = 0000010`.
+    a0 advances to a1, colour flips.
+  * **Horizontal** (`001` + `M(a0..a1)` + `M(a1..a2)`) when the
+    above don't apply — emits two MH-coded runs against the same
+    `WHITE` / `BLACK` tables the existing T.4 1-D encoder uses,
+    a0 advances to a2, colour unchanged (two flips).
+
+  Per-row framing:
+
+  * `CcittT6` — no inter-row marker (T.6 §2.2.1 "no
+    synchronisation codes between scan lines"). First reference
+    line is an imaginary all-white line.
+  * `CcittT4TwoD { eol_byte_aligned }` — each row begins with
+    the 12-bit EOL code (`000000000001`) optionally byte-aligned
+    per `T4Options` bit 2, followed by a one-bit tag set to `0`
+    (selecting 2-D coding for the next row). Every row is coded
+    2-D — this encoder does not model a K-parameter 1-D
+    fallback. TIFF allows the all-2-D layout and our decoder
+    accepts it.
+
+  IFD-level tag emission:
+
+  * `Compression` (tag 259) writes 3 for `CcittT4TwoD` and 4 for
+    `CcittT6`.
+  * `T4Options` (tag 292, LONG, count 1) is written for both T.4
+    variants. Bit 0 is set for `CcittT4TwoD`; bit 2 is set when
+    `eol_byte_aligned = true`; bit 1 (uncompressed mode) is
+    always clear.
+  * `T6Options` (tag 293, LONG, count 1) is written for `CcittT6`
+    with all bits clear (we don't emit the optional T.6
+    uncompressed extension).
+
+  Reused validation gates (already in place for `CcittRle` and
+  `CcittT4OneD`): both new variants are bilevel-only (Bilevel or
+  TransparencyMask input), reject tiled layouts (sub-byte tile
+  slicing isn't implemented on either side), and reject
+  `Predictor = 2` (TIFF 6.0 §14 ties the predictor to the LZW
+  family).
+
+  Validated by a 20-test binary-independent self-roundtrip suite
+  (`tests/encode_ccitt_2d_roundtrip.rs`): every supported geometry
+  encodes through our writer and decodes through our reader back
+  to the original packed bilevel buffer. Coverage spans
+  checkerboard (worst case — every column is a changing element,
+  forces Horizontal mode), aligned stripes (V(0) repeated), a
+  diagonal (V(+1) repeated), a Pass-mode fixture (blank rows
+  except a single black pel at the bottom-right corner),
+  fully-white and fully-black rows, a non-multiple-of-8 width, the
+  byte-aligned-EOL variant of T.4-2D, and a two-page multi-page
+  chain that mixes a T.6 page with a T.4-2D page. Three IFD-level
+  inspection tests confirm `Compression`, `T4Options`, and
+  `T6Options` tag emission; three negative tests pin the
+  bilevel-only / predictor / tiled rejections. No external library
+  or binary is invoked — the suite runs on every CI host.
+
+  The encoder transcription is independent of the round-130
+  decoder: the mode-code dictionary comes from
+  `docs/image/tiff/ccitt-t4-t6-fax-codes.md` §1 (Table 4/T.4 =
+  Table 1/T.6, transcribed clean-room from the staged ITU-T
+  T.4 / T.6 PDFs in `docs/image/tiff/`); no third-party encoder
+  source — `tiffcp`'s 2-D coder or any other reference
+  implementation — was consulted.
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.2...v0.0.3) - 2026-05-29
 
 ### Other

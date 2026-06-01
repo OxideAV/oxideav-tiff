@@ -36,22 +36,25 @@
 //! * Compression: None / PackBits / LZW / Deflate /
 //!   CCITT Modified Huffman (Compression=2) /
 //!   CCITT T.4 1-D (Compression=3, with optional T4Options bit 2
-//!   byte-aligned EOLs)
+//!   byte-aligned EOLs) /
+//!   CCITT T.4 2-D / Modified READ (Compression=3 with T4Options
+//!   bit 0 set) /
+//!   CCITT T.6 / Modified Modified READ / G4 (Compression=4)
 //! * Layout: single strip, `PlanarConfiguration = 2` (separate planes,
 //!   chunky-source), or tiled (TIFF 6.0 §15, chunky) — see
 //!   [`EncodePage::planar`] / [`EncodePage::tiling`]
 //! * Predictor: 2 (horizontal differencing) via [`EncodePage::predictor`]
 //! * Multi-page chain via [`encode_tiff_multi`]
 //!
-//! Out of scope for this round (next-round backlog): CCITT T.4 2-D
-//! and T.6 / Group 4 (Compression=3 with T4Options bit 0 set, and
-//! Compression=4 — the 2-D mode codes are not in the TIFF 6.0
-//! spec, which defers to CCITT Rec. T.4 / T.6), the deprecated
-//! TIFF 6.0 §22 old-style JPEG (Compression=6), and encode-side
-//! CIELab (decode-side CIELab is implemented as of this round; the
-//! `EncodePixelFormat` enum has no Lab variant yet).
-//! Compression=7 (new-style JPEG-in-TIFF, per TIFF Tech Note 2) is
-//! decoded as of round 92.
+//! Out of scope for this round (next-round backlog): the deprecated
+//! TIFF 6.0 §22 old-style JPEG (Compression=6), encode-side CIELab
+//! (decode-side CIELab is implemented; the `EncodePixelFormat`
+//! enum has no Lab variant yet), and JPEG-in-TIFF encode
+//! (Compression=7 decode is round-92; encode would require routing
+//! to `oxideav-mjpeg`'s encoder surface). CCITT T.4 2-D
+//! (Compression=3 + T4Options bit 0) and T.6 / Group 4
+//! (Compression=4) round-trip through both encode and decode as of
+//! this round.
 //!
 //! ## Standalone vs registry-integrated
 //!

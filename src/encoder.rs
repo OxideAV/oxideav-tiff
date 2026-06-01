@@ -188,11 +188,27 @@ pub enum TiffCompression {
     /// Compression=3 — CCITT T.4 1-D (TIFF 6.0 §11). Bilevel only.
     /// Each row is preceded by a 12-bit EOL prefix. With
     /// `eol_byte_aligned`, the EOL is byte-aligned (T4Options bit 2).
-    /// 2-D coding (T4Options bit 0) is not yet supported on either
-    /// the encode or the decode side.
     CcittT4OneD {
         eol_byte_aligned: bool,
     },
+    /// Compression=3, T4Options bit 0 = 1 — CCITT T.4 2-D (Modified
+    /// READ / MR). Bilevel only. Each row is preceded by the 12-bit
+    /// EOL code plus a one-bit tag selecting 2-D coding for the
+    /// following row (this encoder emits every row 2-D, which TIFF
+    /// allows: T4Options encoder K-parameter is not modelled). With
+    /// `eol_byte_aligned`, the EOL is byte-aligned (T4Options bit 2).
+    /// The 2-D rows use the Pass / Horizontal / Vertical mode codes
+    /// of Table 4/T.4 against the previously-coded row, with the
+    /// first reference line being an imaginary all-white line per
+    /// T.4 §4.2.
+    CcittT4TwoD {
+        eol_byte_aligned: bool,
+    },
+    /// Compression=4 — CCITT T.6 / Group 4 (Modified Modified READ /
+    /// MMR). Bilevel only. Every row is 2-D coded against the
+    /// previous row; the first reference line is an imaginary
+    /// all-white line (T.6 §2.2.1). No EOL framing between rows.
+    CcittT6,
 }
 
 impl TiffCompression {
@@ -203,7 +219,10 @@ impl TiffCompression {
             TiffCompression::Lzw => COMPRESSION_LZW,
             TiffCompression::Deflate => COMPRESSION_DEFLATE_ADOBE,
             TiffCompression::CcittRle => COMPRESSION_CCITT_HUFFMAN,
-            TiffCompression::CcittT4OneD { .. } => COMPRESSION_CCITT_T4,
+            TiffCompression::CcittT4OneD { .. } | TiffCompression::CcittT4TwoD { .. } => {
+                COMPRESSION_CCITT_T4
+            }
+            TiffCompression::CcittT6 => COMPRESSION_CCITT_T6,
         }
     }
 
@@ -230,6 +249,16 @@ impl TiffCompression {
                 CcittVariant::T4OneD { eol_byte_aligned },
                 FillOrder::MsbFirst,
             ),
+            TiffCompression::CcittT4TwoD { eol_byte_aligned } => encode_ccitt(
+                raw,
+                width,
+                rows,
+                CcittVariant::T4TwoD { eol_byte_aligned },
+                FillOrder::MsbFirst,
+            ),
+            TiffCompression::CcittT6 => {
+                encode_ccitt(raw, width, rows, CcittVariant::T6, FillOrder::MsbFirst)
+            }
         }
     }
 
@@ -237,7 +266,10 @@ impl TiffCompression {
     fn is_ccitt(self) -> bool {
         matches!(
             self,
-            TiffCompression::CcittRle | TiffCompression::CcittT4OneD { .. }
+            TiffCompression::CcittRle
+                | TiffCompression::CcittT4OneD { .. }
+                | TiffCompression::CcittT4TwoD { .. }
+                | TiffCompression::CcittT6
         )
     }
 }
@@ -1067,17 +1099,44 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         count: 1,
         value: IfdValue::Inline(planar_config.to_le_bytes().to_vec()),
     });
-    // 292 T4Options (LONG) — only for Compression=3. Bit 0 (2D) and
-    // bit 1 (uncompressed mode) are always clear for this encoder;
-    // bit 2 (EOL byte-aligned) is set per the variant flag.
-    if let TiffCompression::CcittT4OneD { eol_byte_aligned } = p.compression {
-        let flags: u32 = if eol_byte_aligned {
+    // 292 T4Options (LONG) — only for Compression=3 (T.4 1-D or 2-D).
+    // Bit 0 (2-D coding) is set for `CcittT4TwoD`; bit 1
+    // (uncompressed mode) is always clear; bit 2 (EOL byte-aligned)
+    // is set per the variant flag.
+    let t4_flags: Option<u32> = match p.compression {
+        TiffCompression::CcittT4OneD { eol_byte_aligned } => Some(if eol_byte_aligned {
             T4OPT_EOL_BYTE_ALIGNED
         } else {
             0
-        };
+        }),
+        TiffCompression::CcittT4TwoD { eol_byte_aligned } => Some(
+            T4OPT_2D_CODING
+                | if eol_byte_aligned {
+                    T4OPT_EOL_BYTE_ALIGNED
+                } else {
+                    0
+                },
+        ),
+        _ => None,
+    };
+    if let Some(flags) = t4_flags {
         entries.push(PageIfdEntry {
             tag: TAG_T4_OPTIONS,
+            field_type: TYPE_LONG,
+            count: 1,
+            value: IfdValue::Inline(flags.to_le_bytes().to_vec()),
+        });
+    }
+    // 293 T6Options (LONG) — only for Compression=4. Bit 1
+    // (uncompressed mode allowed) stays clear (our encoder doesn't
+    // produce the optional T.6 uncompressed extension), so we emit a
+    // zero word. The decoder still requires the tag to be present
+    // (it `find`s tag 293 and defaults to 0 if absent, so the write
+    // is informational — but tiffinfo / tiffcp expect to see it).
+    if matches!(p.compression, TiffCompression::CcittT6) {
+        let flags: u32 = 0;
+        entries.push(PageIfdEntry {
+            tag: TAG_T6_OPTIONS,
             field_type: TYPE_LONG,
             count: 1,
             value: IfdValue::Inline(flags.to_le_bytes().to_vec()),
