@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.3...v0.0.4) - 2026-06-01
+
+### Other
+
+- CCITT T.4 2-D + T.6 (Group 4) write — closes round-130 decode-only loop
+
 ### Added
 
 - Encoder: CCITT T.4 2-D (Modified READ / MR, `Compression = 3`
