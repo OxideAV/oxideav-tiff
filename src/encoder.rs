@@ -20,16 +20,17 @@
 //!   the Adobe Pagemaker 6.0 BigTIFF design), selectable via
 //!   [`EncodePage::bigtiff`].
 //!
-//! Tile write, T.4 2-D / T.6 (Compression=4) encoding, JPEG-in-TIFF,
-//! and YCbCr / CMYK output are intentionally out of scope for this
-//! round. CIELab output (3-sample `(L*, a*, b*)` chunky and 1-sample
-//! `L*`-only, `PhotometricInterpretation = 8` per TIFF 6.0 §23) is
-//! available via [`EncodePixelFormat::CieLab8`] and
-//! [`EncodePixelFormat::CieLabL8`]. The horizontal-differencing
-//! predictor (`Predictor = 2`, TIFF 6.0 §14) is supported on encode via
-//! the [`EncodePage::predictor`] flag, and `PlanarConfiguration = 2`
-//! (separate component planes, §"PlanarConfiguration") via
-//! [`EncodePage::planar`].
+//! JPEG-in-TIFF and YCbCr output are intentionally out of scope for
+//! this round. CMYK output (8-bit 4-sample chunky `(C, M, Y, K)`,
+//! `PhotometricInterpretation = 5` per TIFF 6.0 §16 "CMYK Images") is
+//! available via [`EncodePixelFormat::Cmyk32`]; CIELab output
+//! (3-sample `(L*, a*, b*)` chunky and 1-sample `L*`-only,
+//! `PhotometricInterpretation = 8` per TIFF 6.0 §23) is available via
+//! [`EncodePixelFormat::CieLab8`] and [`EncodePixelFormat::CieLabL8`].
+//! The horizontal-differencing predictor (`Predictor = 2`, TIFF 6.0
+//! §14) is supported on encode via the [`EncodePage::predictor`]
+//! flag, and `PlanarConfiguration = 2` (separate component planes,
+//! §"PlanarConfiguration") via [`EncodePage::planar`].
 
 use crate::ccitt::{encode_ccitt, CcittVariant, FillOrder};
 use crate::compress::{pack_deflate, pack_lzw, pack_packbits};
@@ -209,6 +210,31 @@ pub enum EncodePixelFormat<'a> {
     /// rejected per §"PlanarConfiguration" "irrelevant" for
     /// `SamplesPerPixel = 1`; tiled layout composes.
     CieLabL8 { pixels: &'a [u8] },
+    /// 8-bit chunky CMYK (`PhotometricInterpretation = 5`,
+    /// `SamplesPerPixel = 4`, `BitsPerSample = 8 / 8 / 8 / 8`) per TIFF
+    /// 6.0 §16 "CMYK Images" (page 68). `pixels` is row-major interleaved
+    /// `(C, M, Y, K)` quadruples — `pixels.len() == width * height * 4`.
+    /// Per §16 each byte is the *amount of ink* on the page (0 = no
+    /// ink, 255 = full ink): the encoder writes the caller-supplied bytes
+    /// through verbatim and §16's default `InkSet = 1` (CMYK) plus
+    /// `NumberOfInks = SamplesPerPixel = 4` are left implicit (defaults
+    /// per §16's reader rule), so the on-disk page reads as canonical
+    /// CMYK without any extra tags. Compressors accepted: None /
+    /// PackBits / LZW / Deflate (the byte-aligned, photometric-agnostic
+    /// set the rest of the multi-bit photometric paths use); CCITT
+    /// (`Compression = 2 / 3 / 4`) is bilevel-only per §10 / §11 and
+    /// rejected via the existing CCITT-input gate. `Predictor = 2`
+    /// (TIFF 6.0 §14 horizontal differencing) composes — per-component
+    /// differencing with offset = `SamplesPerPixel = 4`, identical to
+    /// the `Rgb24` path. `PlanarConfiguration = 2` composes (four
+    /// single-component planes — C, M, Y, K — via §"PlanarConfiguration",
+    /// §14 says differencing in planar "works the same as it does for
+    /// grayscale data" so each plane is differenced independently with
+    /// an offset of one sample). Tiled layout (§15) composes for both
+    /// chunky and planar layouts. The decoder collapses the page to
+    /// `Rgb24` using the additive-RGB formula `R = (255 − C) × (255 −
+    /// K) / 255`, etc. — see [`crate::decoder::decode_tiff`].
+    Cmyk32 { pixels: &'a [u8] },
 }
 
 /// Compression scheme for an [`EncodePage`].
@@ -707,7 +733,9 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     if p.planar
         && !matches!(
             p.kind,
-            EncodePixelFormat::Rgb24 { .. } | EncodePixelFormat::CieLab8 { .. }
+            EncodePixelFormat::Rgb24 { .. }
+                | EncodePixelFormat::CieLab8 { .. }
+                | EncodePixelFormat::Cmyk32 { .. }
         )
     {
         return Err(Error::invalid(
@@ -938,6 +966,27 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                 }
                 (1u16, vec![8u16], PHOTO_CIELAB, pixels.to_vec(), None)
             }
+            EncodePixelFormat::Cmyk32 { pixels } => {
+                // TIFF 6.0 §16 "CMYK Images" (page 68): 4 chunky bytes
+                // per pixel ordered C, M, Y, K with each component
+                // expressing the *amount of ink* (0 = no ink,
+                // 255 = full ink) — exactly the byte layout the
+                // decoder's `build_rgb24_from_cmyk` consumes. Defaults
+                // for `InkSet = 1` (CMYK) and `NumberOfInks = 4` per
+                // §16 are left implicit so the IFD stays minimal
+                // while still parsing as canonical CMYK in any
+                // reader (TIFF 6.0 §16 reader rule: "InkSet defaults
+                // to 1 (CMYK)"; "NumberOfInks defaults to
+                // SamplesPerPixel").
+                let want = (p.width as usize) * (p.height as usize) * 4;
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/Cmyk32: pixel buffer is {} bytes, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                (4u16, vec![8u16, 8, 8, 8], PHOTO_CMYK, pixels.to_vec(), None)
+            }
         };
 
     // Build the page's compressed image segments. Chunky pages are a
@@ -990,10 +1039,15 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
             )?
         }
     } else if p.planar {
-        // De-interleave chunky RGBRGB… into separate R / G / B planes
-        // (TIFF 6.0 §"PlanarConfiguration": "Red components in one
-        // component plane, the Green in another, and the Blue in
-        // another"). Only Rgb24 (SPP=3, 8 bits) reaches here.
+        // De-interleave the chunky N-sample raster into N separate
+        // component planes (TIFF 6.0 §"PlanarConfiguration": "Red
+        // components in one component plane, the Green in another, and
+        // the Blue in another"). Multi-sample inputs that reach here:
+        // `Rgb24` (SPP=3, 8 bits/sample), `CieLab8` (SPP=3, 8 bits/
+        // sample), `Cmyk32` (SPP=4, 8 bits/sample). The per-plane work
+        // is identical for each — one component slot at offset `plane`
+        // in the interleaved input becomes one full-width / full-height
+        // plane buffer.
         let spp = samples_per_pixel as usize;
         let bytes_per_sample = bps / 8;
         let pixels = (p.width as usize) * (p.height as usize);

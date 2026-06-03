@@ -1435,3 +1435,115 @@ fn encoder_ccitt_t6_tiffinfo_reports_group4() {
         eprintln!("skipping: tiffinfo not available");
     }
 }
+
+// ---- CMYK encode validators (TIFF 6.0 §16 "CMYK Images") ----
+
+/// 4-sample CMYK test pattern: each pixel covers a distinct corner of
+/// the ink space so the photometric / sample-count tags can be checked
+/// by tiffinfo.
+fn pattern_cmyk(w: u32, h: u32) -> Vec<u8> {
+    let mut v = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h as u8 {
+        for x in 0..w as u8 {
+            v.push(x.wrapping_mul(5));
+            v.push(y.wrapping_mul(7));
+            v.push((x ^ y).wrapping_mul(11));
+            v.push((x.wrapping_add(y)).wrapping_mul(3));
+        }
+    }
+    v
+}
+
+/// `tiffinfo` reports the CMYK photometric and 4-sample layout on our
+/// `Cmyk32` output (TIFF 6.0 §16 "CMYK Images", PhotometricInterpretation
+/// = 5 / SamplesPerPixel = 4 / BitsPerSample = 8/8/8/8).
+#[test]
+fn encoder_cmyk32_tiffinfo_reports_separated_cmyk() {
+    let pixels = pattern_cmyk(32, 16);
+    let page = EncodePage {
+        width: 32,
+        height: 16,
+        kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+        compression: TiffCompression::None,
+        predictor: false,
+        planar: false,
+        tiling: None,
+        bigtiff: false,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    if let Some(info) = run_tiffinfo(&bytes) {
+        let lc = info.to_lowercase();
+        // tiffinfo prints "Photometric Interpretation: separated" (the
+        // canonical TIFF 6.0 §16 label for PhotometricInterpretation =
+        // 5; "separated" is the §16 wording, not a CMYK-specific
+        // string) and "Samples/Pixel: 4".
+        assert!(
+            lc.contains("separated") || lc.contains("cmyk"),
+            "tiffinfo missing Photometric Interpretation: separated line: {info}"
+        );
+        assert!(
+            lc.contains("samples/pixel: 4") || lc.contains("samplesperpixel: 4"),
+            "tiffinfo missing SamplesPerPixel = 4: {info}"
+        );
+    } else {
+        eprintln!("skipping: tiffinfo not available");
+    }
+}
+
+/// `tiffcp -c none` transcodes our `Cmyk32` output back to an
+/// uncompressed CMYK TIFF (forcing the external binary to walk our
+/// IFD + strip fields). The transcoded file must decode through our
+/// own decoder to the same Rgb24 the direct decode of our output
+/// produces — proving the external tool reads our CMYK metadata and
+/// ink-byte stream correctly.
+#[test]
+fn encoder_cmyk32_lzw_transcodes_via_tiffcp() {
+    if !binary_available("tiffcp") {
+        eprintln!("skipping: tiffcp not available");
+        return;
+    }
+    let pixels = pattern_cmyk(32, 16);
+    let page = EncodePage {
+        width: 32,
+        height: 16,
+        kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+        compression: TiffCompression::Lzw,
+        predictor: false,
+        planar: false,
+        tiling: None,
+        bigtiff: false,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    let direct = decode_tiff(&bytes).expect("direct decode of our LZW CMYK");
+
+    let dir = tmp_dir();
+    let in_path = dir.join("cmyk-lzw.tiff");
+    let out_path = dir.join("cmyk-none.tiff");
+    fs::write(&in_path, &bytes).unwrap();
+    let st = Command::new("tiffcp")
+        .arg("-c")
+        .arg("none")
+        .arg(&in_path)
+        .arg(&out_path)
+        .status();
+    let st = match st {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("tiffcp spawn failed: {e}");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+    if !st.success() {
+        let _ = fs::remove_dir_all(&dir);
+        panic!("tiffcp could not transcode our CMYK output to uncompressed");
+    }
+    let trans = fs::read(&out_path).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded uncompressed CMYK TIFF");
+    assert_eq!((d.width, d.height), (32, 16));
+    assert_eq!(
+        d.frame.planes[0].data, direct.frame.planes[0].data,
+        "pixel mismatch after CMYK LZW encode + tiffcp -c none transcode"
+    );
+}

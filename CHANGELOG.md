@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encoder: `PhotometricInterpretation = 5` (CMYK), per TIFF 6.0 §16
+  "CMYK Images" (page 68). New [`EncodePixelFormat::Cmyk32`] variant
+  — 4-sample chunky `(C, M, Y, K)` at 8 bits per sample. The on-disk
+  bit interpretation is fixed by §16 (each byte is the *amount of
+  ink* on the page, 0 = no ink, 255 = full ink) so the encoder takes
+  the caller-supplied bytes through verbatim, exactly the inverse of
+  the decoder's verbatim strip read. Writes
+  `PhotometricInterpretation = 5`, `SamplesPerPixel = 4`,
+  `BitsPerSample = [8, 8, 8, 8]`; the §16 defaults for `InkSet = 1`
+  (CMYK) and `NumberOfInks = SamplesPerPixel` are left implicit so
+  the IFD stays minimal while still parsing as canonical CMYK in any
+  reader. Compressors accepted: None / PackBits / LZW / Deflate (the
+  byte-aligned, photometric-agnostic set the other multi-bit
+  photometric paths use); CCITT (`Compression = 2 / 3 / 4`) is
+  bilevel-only per §10 / §11 and rejected via the existing
+  CCITT-input gate. `Predictor = 2` (TIFF 6.0 §14 horizontal
+  differencing) composes — per-component differencing with offset =
+  `SamplesPerPixel = 4`, identical to the Rgb24 path.
+  `PlanarConfiguration = 2` composes (four single-component C / M /
+  Y / K planes via §"PlanarConfiguration"; §14 says differencing in
+  planar "works the same as it does for grayscale data" so each plane
+  is differenced independently with an offset of one sample). Tiled
+  layout (§15) composes for both chunky and planar (one tile grid per
+  plane, §15 `TileOffsets`). BigTIFF composes unchanged — the 4-entry
+  `BitsPerSample` SHORT array (8 bytes) stays inline in the widened
+  8-byte value/offset slot. The decoder's existing CMYK -> Rgb24
+  collapse (`build_rgb24_from_cmyk`) handles the read side unchanged.
+  New `tests/encode_cmyk_roundtrip.rs` (7 binary-independent
+  encode → decode self-roundtrips covering K-gradient + primaries
+  hand-built oracle, byte-level IFD inspection for photometric=5 +
+  spp=4 + bps=[8,8,8,8], all 4 compressors, predictor / planar /
+  tiled chunky / tiled planar / predictor+planar / BigTIFF compose,
+  plus negative-path rejection of CCITT-on-CMYK and short-buffer
+  input). `tests/encode_imagemagick_validators.rs` adds two
+  cross-validation tests: `tiffinfo` reports `Photometric
+  Interpretation: separated` (§16's label for
+  `PhotometricInterpretation = 5`) plus `Samples/Pixel: 4`, and
+  `tiffcp -c none` transcodes our LZW CMYK output back to an
+  uncompressed CMYK TIFF that re-decodes to the same Rgb24. Sources
+  used: `docs/image/tiff/tiff6.pdf` §16 "CMYK Images" (page 68:
+  per-component byte = amount of ink; default InkSet = 1 (CMYK);
+  default NumberOfInks = SamplesPerPixel; reader collapses to
+  additive RGB via R = (255 − C) × (255 − K) / 255 etc.); TIFF 6.0
+  §14 "Differencing Predictor" (predictor composes per-component with
+  offset = SPP); TIFF 6.0 §"PlanarConfiguration" (planar layout
+  composes with each plane differenced as grayscale); TIFF 6.0 §15
+  "Tiled Images" (tiled layout, one tile grid per plane under planar).
+
 - Encoder: CCITT T.4 2-D / Modified READ
   ([`TiffCompression::CcittT4TwoD`], `Compression = 3` with
   `T4Options` bit 0 set) and CCITT T.6 / MMR / Group 4

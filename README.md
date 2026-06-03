@@ -206,6 +206,7 @@ out-of-range values (≥ 5) are also rejected.
 | Palette        | 8         | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Palette8`  |
 | **CIELab (3 chan)** | 8    | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::CieLab8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 3, BitsPerSample = [8,8,8]) |
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate                          | `EncodePixelFormat::CieLabL8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 1) |
+| **CMYK (4 chan)** | 8     | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Cmyk32` (writes PhotometricInterpretation = 5, SamplesPerPixel = 4, BitsPerSample = [8,8,8,8]) |
 
 `TiffCompression::CcittRle` selects Modified Huffman
 (`Compression = 2`, TIFF 6.0 §10), `TiffCompression::CcittT4OneD`
@@ -233,6 +234,41 @@ written either, as the decoder stops at `rows` rows regardless.
 All CCITT writers reject non-bilevel inputs with a precise
 error.
 
+### CMYK (PhotometricInterpretation = 5)
+
+Per TIFF 6.0 §16 "CMYK Images" (page 68), `PhotometricInterpretation = 5`
+identifies a four-sample-per-pixel image whose 8-bit C / M / Y / K
+samples express the *amount of ink* on the page (0 = no ink, 255 =
+full ink) — the inverse of additive RGB. Encode-side CMYK is available
+via [`EncodePixelFormat::Cmyk32`] (3-sample chunky `(C, M, Y, K)`); the
+encoder writes the caller-supplied bytes verbatim and sets
+`PhotometricInterpretation = 5`, `SamplesPerPixel = 4`, `BitsPerSample
+= [8, 8, 8, 8]`. The §16 defaults for `InkSet = 1` (CMYK) and
+`NumberOfInks = SamplesPerPixel` are left implicit so the IFD stays
+minimal while still parsing as canonical CMYK in any reader. The same
+compressor set the other multi-bit photometric paths accept (None /
+PackBits / LZW / Deflate) works on the encode side; CCITT
+(`Compression = 2 / 3 / 4`) is bilevel-only per §10 / §11 and rejected
+via the existing CCITT-input gate. `Predictor = 2` composes
+(per-component horizontal differencing with offset = `SamplesPerPixel
+= 4`, identical to the `Rgb24` path); `PlanarConfiguration = 2`
+composes (four single-component C / M / Y / K planes, §14: "If
+PlanarConfiguration is 2 … Differencing works the same as it does for
+grayscale data," so each plane is differenced independently with an
+offset of one sample); tiled layout (§15) composes for both chunky and
+planar (one tile grid per plane, §15 `TileOffsets`); BigTIFF composes
+unchanged — the 4-entry `BitsPerSample` SHORT array (8 bytes) stays
+inline in the widened 8-byte value/offset slot that classic TIFF spills
+out-of-line. The decoder collapses the page to `Rgb24` via the
+additive-RGB formula `R = (255 − C) × (255 − K) / 255`,
+`G = (255 − M) × (255 − K) / 255`,
+`B = (255 − Y) × (255 − K) / 255` (TIFF 6.0 §16 `InkSet = 1`).
+`tiffcp -c none` transcodes our CMYK output back to an uncompressed
+TIFF that re-decodes to the same Rgb24 our direct decode produces,
+and `tiffinfo` reports `Photometric Interpretation: separated` (§16's
+canonical label for `PhotometricInterpretation = 5`) plus
+`Samples/Pixel: 4`.
+
 The horizontal-differencing predictor (`Predictor = 2`, TIFF 6.0 §14)
 is available on encode via the `EncodePage::predictor` flag. When set,
 the encoder writes first differences (per-component, offset
@@ -240,8 +276,8 @@ the encoder writes first differences (per-component, offset
 tag (317) so the decoder reverses the step — the exact inverse of the
 decoder's cumulative add. It applies to the lossless byte-aligned
 formats whose decode path already supports it (`Gray8`, `Gray16Le`,
-`Rgb24`, `Palette8`); combining it with the bilevel CCITT schemes or
-with `Bilevel` input is rejected. `tiffinfo` reports
+`Rgb24`, `Palette8`, `Cmyk32`, `CieLab8`, `CieLabL8`); combining it
+with the bilevel CCITT schemes or with `Bilevel` input is rejected. `tiffinfo` reports
 `Predictor: horizontal differencing 2 (0x2)` on the output and
 `tiffcp -c none` transcodes our `Predictor = 2` streams back to
 uncompressed TIFFs that re-decode to the original pixels.
@@ -377,14 +413,20 @@ errors out — classic and BigTIFF IFD layouts are wire-incompatible).
   `PlanarConfiguration = 2` on `CieLab8`, tiled layout, and BigTIFF
   per the §23 / §14 / §15 spec rules).
 - DNG / GeoTIFF / EXIF blob extraction
+- CMYK encode (`PhotometricInterpretation = 5`, 8-bit chunky `(C, M,
+  Y, K)`) **encodes** as of this round (None / PackBits / LZW /
+  Deflate, with optional `Predictor = 2`, `PlanarConfiguration = 2`
+  (four C / M / Y / K planes), tiled layout (chunky and planar), and
+  BigTIFF) per TIFF 6.0 §16 "CMYK Images".
 - Encoder-side planar (`PlanarConfiguration = 2`) writing is now
-  supported for `Rgb24` under None / PackBits / LZW / Deflate (with or
-  without `Predictor = 2`), both strip-based and tiled (one tile grid
-  per component plane, §15); decode covers the same plus CCITT. Tiled
-  write (chunky, §15) covers `Gray8` / `Gray16Le` / `Rgb24` /
-  `Palette8` under None / PackBits / LZW / Deflate with the optional
-  `Predictor = 2`. The remaining gap is planar / tiled write for the
-  not-yet-encodable photometrics (CMYK / YCbCr)
+  supported for `Rgb24` / `CieLab8` / `Cmyk32` under None / PackBits /
+  LZW / Deflate (with or without `Predictor = 2`), both strip-based
+  and tiled (one tile grid per component plane, §15); decode covers
+  the same plus CCITT. Tiled write (chunky, §15) covers `Gray8` /
+  `Gray16Le` / `Rgb24` / `Palette8` / `Cmyk32` / `CieLab8` under None
+  / PackBits / LZW / Deflate with the optional `Predictor = 2`. The
+  remaining gap is YCbCr encode (the only baseline photometric still
+  decode-only).
 
 ## Registration
 

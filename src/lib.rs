@@ -34,7 +34,9 @@
 //!   NewSubfileType bit 2 per TIFF 6.0 §"PhotometricInterpretation"
 //!   value 4 + §"NewSubfileType" bit 2) / CIELab (8-bit chunky
 //!   `(L*, a*, b*)` and 1-sample L*-only, PhotometricInterpretation = 8
-//!   per TIFF 6.0 §23 "CIE L*a*b* Images")
+//!   per TIFF 6.0 §23 "CIE L*a*b* Images") / CMYK (8-bit chunky
+//!   `(C, M, Y, K)`, PhotometricInterpretation = 5 per TIFF 6.0 §16
+//!   "CMYK Images")
 //! * Compression: None / PackBits / LZW / Deflate /
 //!   CCITT Modified Huffman (Compression=2) /
 //!   CCITT T.4 1-D (Compression=3, with optional T4Options bit 2
