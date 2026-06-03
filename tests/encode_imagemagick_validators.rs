@@ -1267,3 +1267,171 @@ fn encoder_tiled_planar_tiffinfo_reports_tiles_and_separate_planes() {
         eprintln!("skipping: tiffinfo not available");
     }
 }
+
+#[test]
+fn encoder_ccitt_t4_2d_decodes_via_tiffcp_to_uncompressed() {
+    // End-to-end black-box validator: encode CCITT T.4 2-D
+    // (Compression=3 + T4Options bit 0), ask `tiffcp -c none` to
+    // recompress to uncompressed, then decode the result with our
+    // reader. Pixels must match the original bilevel pattern.
+    if !binary_available("tiffcp") {
+        eprintln!("skipping: tiffcp not available");
+        return;
+    }
+    let (packed, gray_expected) = bilevel_stripes_and_gray8(48, 8, 4);
+    let page = EncodePage {
+        width: 48,
+        height: 8,
+        kind: EncodePixelFormat::Bilevel { pixels: &packed },
+        compression: TiffCompression::CcittT4TwoD {
+            eol_byte_aligned: false,
+        },
+        predictor: false,
+        planar: false,
+        tiling: None,
+        bigtiff: false,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    let dir = tmp_dir();
+    let in_path = dir.join("ccitt_t4_2d.tiff");
+    let out_path = dir.join("none.tiff");
+    fs::write(&in_path, &bytes).unwrap();
+    let st = Command::new("tiffcp")
+        .arg("-c")
+        .arg("none")
+        .arg(&in_path)
+        .arg(&out_path)
+        .status();
+    let st = match st {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("tiffcp spawn failed: {e}");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+    if !st.success() {
+        let _ = fs::remove_dir_all(&dir);
+        panic!("tiffcp could not transcode our CCITT T.4 2-D output to uncompressed");
+    }
+    let trans = fs::read(&out_path).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
+    assert_eq!((d.width, d.height), (48, 8));
+    assert_eq!(
+        d.frame.planes[0].data, gray_expected,
+        "pixel mismatch after CCITT T.4 2-D encode + tiffcp -c none"
+    );
+}
+
+#[test]
+fn encoder_ccitt_t6_decodes_via_tiffcp_to_uncompressed() {
+    // End-to-end black-box validator: encode CCITT T.6 / Group 4
+    // (Compression=4), ask `tiffcp -c none` to recompress to
+    // uncompressed, then decode the result with our reader.
+    if !binary_available("tiffcp") {
+        eprintln!("skipping: tiffcp not available");
+        return;
+    }
+    let (packed, gray_expected) = bilevel_stripes_and_gray8(64, 8, 4);
+    let page = EncodePage {
+        width: 64,
+        height: 8,
+        kind: EncodePixelFormat::Bilevel { pixels: &packed },
+        compression: TiffCompression::CcittT6,
+        predictor: false,
+        planar: false,
+        tiling: None,
+        bigtiff: false,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    let dir = tmp_dir();
+    let in_path = dir.join("ccitt_t6.tiff");
+    let out_path = dir.join("none.tiff");
+    fs::write(&in_path, &bytes).unwrap();
+    let st = Command::new("tiffcp")
+        .arg("-c")
+        .arg("none")
+        .arg(&in_path)
+        .arg(&out_path)
+        .status();
+    let st = match st {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("tiffcp spawn failed: {e}");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+    if !st.success() {
+        let _ = fs::remove_dir_all(&dir);
+        panic!("tiffcp could not transcode our CCITT T.6 output to uncompressed");
+    }
+    let trans = fs::read(&out_path).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
+    assert_eq!((d.width, d.height), (64, 8));
+    assert_eq!(
+        d.frame.planes[0].data, gray_expected,
+        "pixel mismatch after CCITT T.6 encode + tiffcp -c none"
+    );
+}
+
+#[test]
+fn encoder_ccitt_t4_2d_tiffinfo_reports_2d_coding() {
+    // `tiffinfo` should report Compression scheme 3 and T4Options
+    // with bit 0 set (2-D coding). We don't pin the exact wording.
+    let (packed, _) = bilevel_stripes_and_gray8(32, 8, 4);
+    let page = EncodePage {
+        width: 32,
+        height: 8,
+        kind: EncodePixelFormat::Bilevel { pixels: &packed },
+        compression: TiffCompression::CcittT4TwoD {
+            eol_byte_aligned: false,
+        },
+        predictor: false,
+        planar: false,
+        tiling: None,
+        bigtiff: false,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    if let Some(info) = run_tiffinfo(&bytes) {
+        let lc = info.to_lowercase();
+        assert!(
+            lc.contains("ccitt") || lc.contains("group 3") || lc.contains("g3"),
+            "tiffinfo missing CCITT/Group3 line: {info}"
+        );
+        assert!(
+            lc.contains("2-d") || lc.contains("2d-encoded") || lc.contains("2d "),
+            "tiffinfo missing 2-D coding line: {info}"
+        );
+    } else {
+        eprintln!("skipping: tiffinfo not available");
+    }
+}
+
+#[test]
+fn encoder_ccitt_t6_tiffinfo_reports_group4() {
+    // `tiffinfo` should report Compression scheme 4 / Group 4.
+    let (packed, _) = bilevel_stripes_and_gray8(32, 8, 4);
+    let page = EncodePage {
+        width: 32,
+        height: 8,
+        kind: EncodePixelFormat::Bilevel { pixels: &packed },
+        compression: TiffCompression::CcittT6,
+        predictor: false,
+        planar: false,
+        tiling: None,
+        bigtiff: false,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    if let Some(info) = run_tiffinfo(&bytes) {
+        let lc = info.to_lowercase();
+        assert!(
+            lc.contains("ccitt") && (lc.contains("group 4") || lc.contains("g4")),
+            "tiffinfo missing CCITT Group 4 line: {info}"
+        );
+    } else {
+        eprintln!("skipping: tiffinfo not available");
+    }
+}

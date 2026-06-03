@@ -199,7 +199,7 @@ out-of-range values (≥ 5) are also rejected.
 
 | Photometric    | Bit depth | Compression                                                 | API call                |
 | -------------- | --------- | ----------------------------------------------------------- | ----------------------- |
-| WhiteIsZero    | 1         | None / CCITT-MH / T.4-1D                                    | `EncodePixelFormat::Bilevel`   |
+| WhiteIsZero    | 1         | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)**       | `EncodePixelFormat::Bilevel`   |
 | **Transparency Mask** | 1  | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate         | `EncodePixelFormat::TransparencyMask` (sets PhotometricInterpretation = 4 and NewSubfileType bit 2) |
 | BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Gray8` / `::Gray16Le` |
 | RGB            | 8         | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Rgb24`     |
@@ -208,12 +208,30 @@ out-of-range values (≥ 5) are also rejected.
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate                          | `EncodePixelFormat::CieLabL8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 1) |
 
 `TiffCompression::CcittRle` selects Modified Huffman
-(`Compression = 2`, TIFF 6.0 §10) and `TiffCompression::CcittT4OneD`
+(`Compression = 2`, TIFF 6.0 §10), `TiffCompression::CcittT4OneD`
 selects T.4 1-D (`Compression = 3`, §11) with an optional
-`eol_byte_aligned` flag that writes `T4Options` bit 2. Both
-encoders use the same `WHITE` / `BLACK` run-length tables we
-transcribed from the TIFF 6.0 PDF for decode. The CCITT writer
-rejects non-bilevel inputs with a precise error.
+`eol_byte_aligned` flag that writes `T4Options` bit 2,
+`TiffCompression::CcittT4TwoD` selects T.4 2-D / Modified READ
+(`Compression = 3` with `T4Options` bit 0 set) and
+`TiffCompression::CcittT6` selects T.6 / MMR / Group 4
+(`Compression = 4`, `T6Options` written as LONG zero — bit 1
+"uncompressed mode allowed" is never set). The 1-D writers all
+share the `WHITE` / `BLACK` MH run-length tables transcribed from
+the TIFF 6.0 PDF; the 2-D writers additionally emit the Pass /
+Horizontal / Vertical mode codes from
+[`docs/image/tiff/ccitt-t4-t6-fax-codes.md`](docs/image/tiff/ccitt-t4-t6-fax-codes.md)
+§1 (Table 4/T.4 = Table 1/T.6), selecting between modes per
+T.4 §4.2.1.3 ("if `b2 < a1` → Pass; else if `|a1 − b1| ≤ 3` →
+`V(a1 − b1)`; else Horizontal"). For `T4TwoD` the encoder codes
+row 0 as 1-D (tag bit 1) so its decode is independent of the
+imaginary-white reference, then every subsequent row as 2-D
+(tag bit 0) against the previously coded row — K-parameter
+resync is unused. `T6` codes every row 2-D against the previous
+row (the first against the imaginary all-white reference per
+T.6 §2.2.1) and emits no EOL framing; no EOFB sentinel is
+written either, as the decoder stops at `rows` rows regardless.
+All CCITT writers reject non-bilevel inputs with a precise
+error.
 
 The horizontal-differencing predictor (`Predictor = 2`, TIFF 6.0 §14)
 is available on encode via the `EncodePage::predictor` flag. When set,
@@ -321,24 +339,31 @@ errors out — classic and BigTIFF IFD layouts are wire-incompatible).
 ## Backlog (not yet implemented)
 
 - CCITT T.4 2-D coding (`Compression = 3` with `T4Options` bit 0
-  set) and T.6 / Group 4 (`Compression = 4`) **decode** as of this
-  round. The 2-D Pass / Horizontal / Vertical mode codes —
-  transcribed clean-room from ITU-T T.4 §4.2 / T.6 into
+  set) and T.6 / Group 4 (`Compression = 4`) **decode + encode**
+  as of this round. The 2-D Pass / Horizontal / Vertical mode
+  codes — transcribed clean-room from ITU-T T.4 §4.2 / T.6 into
   `docs/image/tiff/ccitt-t4-t6-fax-codes.md` §1 — drive the same
   READ algorithm both variants share. T.6 adds the
   "imaginary all-white first reference line" + no-EOL framing rule;
   T.4 2-D layers the EOL+tag-bit row separator on top of it. The
   optional uncompressed-mode extension (`0000001111` followed by
-  Table 5/T.4 patterns) is explicitly rejected — `tiffcp` never
-  emits it for normal facsimile content. Validated through 7
-  end-to-end `run_roundtrip` fixtures (solid white, two
-  rectangles, diagonal, wide run) × G4 / T.4-2D against `tiffcp
-  -c g4` / `-c g3:2d` oracle outputs, plus 13 in-crate unit tests
-  covering the mode-code dictionary entries (V(0), VR/VL(1..3),
+  Table 5/T.4 patterns) is explicitly rejected on both sides —
+  `tiffcp` never emits it for normal facsimile content. Decode is
+  validated through 7 end-to-end `run_roundtrip` fixtures (solid
+  white, two rectangles, diagonal, wide run) × G4 / T.4-2D against
+  `tiffcp -c g4` / `-c g3:2d` oracle outputs, plus 13 in-crate unit
+  tests covering the mode-code dictionary entries (V(0), VR/VL(1..3),
   Pass, Horizontal, Uncompressed-extension) and the
-  `first_change_after` reference-line walker. **Encode** for these
-  variants remains a backlog item — the encoder explicitly returns
-  `InvalidData` for `T4TwoD` / `T6` variants of `CcittVariant`.
+  `first_change_after` reference-line walker. Encode is validated
+  through 11 in-crate ccitt-module self-roundtrips (every mode-code
+  branch + the byte-aligned EOL pad + the LSB-first fill order), 13
+  binary-independent integration self-roundtrips in
+  `tests/encode_ccitt_2d_roundtrip.rs` (solid white / black, two
+  rectangles, diagonal, wide pattern × T.4 2-D + T.6, plus T4Options
+  bit 2 byte-aligned EOL and Gray8 negative-path rejection), and
+  black-box cross-checks against `tiffcp -c none` and `tiffinfo`
+  (independent transcode + verbose-report inspection confirms
+  `T4Options = 1` for T.4 2-D and `Group 4` for T.6).
 - JPEG-in-TIFF Compression = 6 (old-style, deprecated by TIFF Tech
   Note 2; decoder returns precise `Error::Unsupported`).
   Compression = 7 (new-style) **decodes** as of this round across

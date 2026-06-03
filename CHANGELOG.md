@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encoder: CCITT T.4 2-D / Modified READ
+  ([`TiffCompression::CcittT4TwoD`], `Compression = 3` with
+  `T4Options` bit 0 set) and CCITT T.6 / MMR / Group 4
+  ([`TiffCompression::CcittT6`], `Compression = 4`). Row 0 of a
+  `T4TwoD` stream is coded 1-D (tag bit 1 in the EOL framing) and
+  every subsequent row is coded 2-D (tag bit 0) against the
+  previously coded row; `T6` codes every row 2-D against the
+  previous row, the first against the imaginary all-white
+  reference line per T.6 §2.2.1, with no EOL framing in between.
+  Both encoders walk Table 4/T.4 = Table 1/T.6 (Pass, Horizontal
+  with M(a0a1) + M(a1a2) MH-coded sub-runs, V(0) / V(±1) / V(±2)
+  / V(±3)) per the mode-selection rule of T.4 §4.2.1.3 ("if
+  b2 < a1 → Pass; else if |a1 − b1| ≤ 3 → Vertical(a1 − b1); else
+  Horizontal"). The encoder writes the matching IFD bookkeeping:
+  `T4Options` (tag 292) with bit 0 set for `T4TwoD`; `T6Options`
+  (tag 293, LONG zero) for `T6`. Both variants accept
+  `eol_byte_aligned` for the T4Options-bit-2 byte-aligned EOL
+  framing (T4 2-D only — T.6 has no EOL). They reject non-bilevel
+  input and refuse to compose with the §14 predictor / planar /
+  tiled flags, matching the existing CCITT 1-D paths. New
+  `tests/encode_ccitt_2d_roundtrip.rs` (13 binary-independent
+  encode→decode self-roundtrips covering solid-white / solid-black
+  / two-rectangles / diagonal / wide-pattern across `T4TwoD` and
+  `T6`, plus `T4TwoD` byte-aligned-EOL and `BlackIsZero` polarity
+  via input inversion, plus negative-path rejection of Gray8
+  input). `tests/encode_imagemagick_validators.rs` adds four
+  cross-validation tests against `tiffcp -c none` (black-box
+  transcode of our T.4-2D + T.6 streams back to uncompressed,
+  then re-decode and compare pixels) and `tiffinfo` reporting
+  ("Group 3 2-d-encoded" / "Group 4"). Sources used:
+  `docs/image/tiff/ccitt-t4-t6-fax-codes.md` §1 (mode-code table),
+  `docs/image/tiff/tiff6.pdf` §11 (T4Options / T6Options bit
+  meanings), `docs/image/tiff/T-REC-T.4.pdf` §4.2 (READ algorithm
+  + mode-selection rule), `docs/image/tiff/T-REC-T.6.pdf` §2.2.1
+  (imaginary-all-white first reference line / no EOL framing).
 - Decoder: `SampleFormat` tag (339) inspection, per TIFF 6.0
   §SampleFormat (page 80). The decoder now reads the field when
   present and routes through the unsigned-integer path for values

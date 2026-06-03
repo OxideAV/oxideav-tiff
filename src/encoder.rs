@@ -226,11 +226,26 @@ pub enum TiffCompression {
     /// Compression=3 — CCITT T.4 1-D (TIFF 6.0 §11). Bilevel only.
     /// Each row is preceded by a 12-bit EOL prefix. With
     /// `eol_byte_aligned`, the EOL is byte-aligned (T4Options bit 2).
-    /// 2-D coding (T4Options bit 0) is not yet supported on either
-    /// the encode or the decode side.
     CcittT4OneD {
         eol_byte_aligned: bool,
     },
+    /// Compression=3 — CCITT T.4 2-D / Modified READ (TIFF 6.0 §11
+    /// with T4Options bit 0 set). Bilevel only. Row 0 is coded 1-D
+    /// (tag bit 1) and seeds the reference line for row 1; rows
+    /// 1.. are coded 2-D (tag bit 0) against the previously coded
+    /// row using the Pass / Horizontal / Vertical mode codes from
+    /// Table 4/T.4 (docs §1). `eol_byte_aligned` mirrors T4Options
+    /// bit 2 just as in [`TiffCompression::CcittT4OneD`].
+    CcittT4TwoD {
+        eol_byte_aligned: bool,
+    },
+    /// Compression=4 — CCITT T.6 / Modified Modified READ (MMR)
+    /// (TIFF 6.0 §11). Bilevel only. Every row is 2-D against the
+    /// previously coded row; the first row's reference is an
+    /// imaginary all-white line per T.6 §2.2.1. No EOL framing
+    /// between rows. The decoder stops at `rows` rows so no EOFB
+    /// sentinel is written.
+    CcittT6,
 }
 
 impl TiffCompression {
@@ -241,7 +256,12 @@ impl TiffCompression {
             TiffCompression::Lzw => COMPRESSION_LZW,
             TiffCompression::Deflate => COMPRESSION_DEFLATE_ADOBE,
             TiffCompression::CcittRle => COMPRESSION_CCITT_HUFFMAN,
-            TiffCompression::CcittT4OneD { .. } => COMPRESSION_CCITT_T4,
+            // Compression=3 covers both T.4 1-D and T.4 2-D; the
+            // T4Options tag (292) distinguishes them on the wire.
+            TiffCompression::CcittT4OneD { .. } | TiffCompression::CcittT4TwoD { .. } => {
+                COMPRESSION_CCITT_T4
+            }
+            TiffCompression::CcittT6 => COMPRESSION_CCITT_T6,
         }
     }
 
@@ -268,6 +288,16 @@ impl TiffCompression {
                 CcittVariant::T4OneD { eol_byte_aligned },
                 FillOrder::MsbFirst,
             ),
+            TiffCompression::CcittT4TwoD { eol_byte_aligned } => encode_ccitt(
+                raw,
+                width,
+                rows,
+                CcittVariant::T4TwoD { eol_byte_aligned },
+                FillOrder::MsbFirst,
+            ),
+            TiffCompression::CcittT6 => {
+                encode_ccitt(raw, width, rows, CcittVariant::T6, FillOrder::MsbFirst)
+            }
         }
     }
 
@@ -275,7 +305,10 @@ impl TiffCompression {
     fn is_ccitt(self) -> bool {
         matches!(
             self,
-            TiffCompression::CcittRle | TiffCompression::CcittT4OneD { .. }
+            TiffCompression::CcittRle
+                | TiffCompression::CcittT4OneD { .. }
+                | TiffCompression::CcittT4TwoD { .. }
+                | TiffCompression::CcittT6
         )
     }
 }
@@ -1150,21 +1183,49 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         count: 1,
         value: IfdValue::Inline(planar_config.to_le_bytes().to_vec()),
     });
-    // 292 T4Options (LONG) — only for Compression=3. Bit 0 (2D) and
-    // bit 1 (uncompressed mode) are always clear for this encoder;
+    // 292 T4Options (LONG) — only for Compression=3. Bit 0 (2D
+    // coding, T4OPT_2D_CODING) is set for the T.4 2-D variant per
+    // TIFF 6.0 §11; bit 1 (uncompressed mode) is always clear
+    // (uncompressed mode is unsupported on both sides of the codec);
     // bit 2 (EOL byte-aligned) is set per the variant flag.
-    if let TiffCompression::CcittT4OneD { eol_byte_aligned } = p.compression {
-        let flags: u32 = if eol_byte_aligned {
-            T4OPT_EOL_BYTE_ALIGNED
-        } else {
-            0
-        };
-        entries.push(PageIfdEntry {
-            tag: TAG_T4_OPTIONS,
-            field_type: TYPE_LONG,
-            count: 1,
-            value: IfdValue::Inline(flags.to_le_bytes().to_vec()),
-        });
+    match p.compression {
+        TiffCompression::CcittT4OneD { eol_byte_aligned } => {
+            let mut flags: u32 = 0;
+            if eol_byte_aligned {
+                flags |= T4OPT_EOL_BYTE_ALIGNED;
+            }
+            entries.push(PageIfdEntry {
+                tag: TAG_T4_OPTIONS,
+                field_type: TYPE_LONG,
+                count: 1,
+                value: IfdValue::Inline(flags.to_le_bytes().to_vec()),
+            });
+        }
+        TiffCompression::CcittT4TwoD { eol_byte_aligned } => {
+            let mut flags: u32 = T4OPT_2D_CODING;
+            if eol_byte_aligned {
+                flags |= T4OPT_EOL_BYTE_ALIGNED;
+            }
+            entries.push(PageIfdEntry {
+                tag: TAG_T4_OPTIONS,
+                field_type: TYPE_LONG,
+                count: 1,
+                value: IfdValue::Inline(flags.to_le_bytes().to_vec()),
+            });
+        }
+        TiffCompression::CcittT6 => {
+            // 293 T6Options (LONG). Per §11, bit 0 is reserved and
+            // bit 1 ("uncompressed mode allowed") is the only
+            // defined option flag; we never emit T.6 uncompressed
+            // extensions so the field is all zeros.
+            entries.push(PageIfdEntry {
+                tag: TAG_T6_OPTIONS,
+                field_type: TYPE_LONG,
+                count: 1,
+                value: IfdValue::Inline(0u32.to_le_bytes().to_vec()),
+            });
+        }
+        _ => {}
     }
     // 317 Predictor (SHORT) — only when horizontal differencing is on.
     // Default (Predictor=1, no prediction) is omitted; the decoder

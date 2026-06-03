@@ -714,25 +714,6 @@ pub fn encode_ccitt(
     variant: CcittVariant,
     fill: FillOrder,
 ) -> Result<Vec<u8>> {
-    // 2-D encode (T.4 2-D and T.6) is out of scope for the present
-    // implementation — only the decode path has been added against
-    // the staged T.4/T.6 mode-code tables. Reject the variants
-    // explicitly rather than silently falling through to the 1-D
-    // path below.
-    match variant {
-        CcittVariant::ModifiedHuffman | CcittVariant::T4OneD { .. } => {}
-        CcittVariant::T4TwoD { .. } => {
-            return Err(Error::invalid(
-                "TIFF/CCITT encode: T.4 2-D (Modified READ / MR) encode not implemented",
-            ));
-        }
-        CcittVariant::T6 => {
-            return Err(Error::invalid(
-                "TIFF/CCITT encode: T.6 (MMR) encode not implemented",
-            ));
-        }
-    }
-
     let row_bytes = (width as usize).div_ceil(8);
     let need = row_bytes * rows as usize;
     if input.len() < need {
@@ -742,52 +723,85 @@ pub fn encode_ccitt(
         )));
     }
 
+    // The 2-D variants (T.4 2-D and T.6) need a "reference line"
+    // standing in for the previously coded row. T.6 §2.2.1 and T.4
+    // §4.2 both stipulate an "imaginary all-white" first reference
+    // line; thereafter the reference is the previous coding line
+    // verbatim (in the same MSB-first 0=white / 1=black layout as
+    // `input`).
+    let mut reference: Vec<u8> = vec![0u8; row_bytes];
+
     let mut bw = BitWriter::new();
     for r in 0..rows {
-        // T.4 1-D: each row begins with the 12-bit EOL code, optionally
-        // preceded by zero-fill bits so the trailing 1 lands on a
-        // byte boundary (T4Options bit 2). MH has no EOL codes.
-        if let CcittVariant::T4OneD { eol_byte_aligned } = variant {
-            if eol_byte_aligned {
-                // EOL: 12 bits, the trailing 1 in bit position 7 of a
-                // byte. So the leading 11 zeros plus our zero-fill
-                // pad must end at bit position 7 mod 8 = bit 7 of a
-                // byte; equivalently, the 1-bit lands at byte_pos % 8
-                // == 7, equivalently the bit BEFORE the leading 11
-                // zeros lands at byte_pos % 8 == 4 — i.e. after
-                // emitting the fill we want `bit_count % 8 == 4` so
-                // that 11 zeros + 1 = 12 bits fills the rest of the
-                // current byte and one more byte cleanly. Compute the
-                // pad and emit it as zeros.
-                let cur = bw.bit_count % 8;
-                let pad = (4 + 8 - cur) % 8;
-                for _ in 0..pad {
+        let row_off = (r as usize) * row_bytes;
+        let row = &input[row_off..row_off + row_bytes];
+
+        // Variant-specific row framing.
+        //
+        // * MH: no row prefix; rows align to byte boundaries after
+        //   their run-length codes (§10).
+        // * T.4 1-D: 12-bit EOL prefix (optionally byte-aligned).
+        // * T.4 2-D: 12-bit EOL prefix (optionally byte-aligned),
+        //   then a one-bit tag selecting 1-D (tag = 1) or 2-D
+        //   (tag = 0) for the row that follows. We code row 0 as 1-D
+        //   (so its decode does not depend on the imaginary-white
+        //   reference) and every subsequent row as 2-D against the
+        //   previous coded row. K-parameter resync (§11) is not used:
+        //   the docs note "implementation defined" for K and the
+        //   decoder treats every (tag = 0) row identically.
+        // * T.6: no EOL framing; every row is 2-D against the
+        //   previous coded row (the first against imaginary white).
+        let row_is_two_d: bool;
+        match variant {
+            CcittVariant::ModifiedHuffman => {
+                row_is_two_d = false;
+            }
+            CcittVariant::T4OneD { eol_byte_aligned } => {
+                emit_eol(&mut bw, eol_byte_aligned);
+                row_is_two_d = false;
+            }
+            CcittVariant::T4TwoD { eol_byte_aligned } => {
+                emit_eol(&mut bw, eol_byte_aligned);
+                // r == 0 → tag = 1 (1-D); r > 0 → tag = 0 (2-D
+                // against the previously coded row).
+                if r == 0 {
+                    bw.write(1, 1);
+                    row_is_two_d = false;
+                } else {
                     bw.write(0, 1);
+                    row_is_two_d = true;
                 }
             }
-            // 12-bit EOL = 000000000001.
-            bw.write(0b0000_0000_0001, 12);
+            CcittVariant::T6 => {
+                row_is_two_d = true;
+            }
         }
 
-        // Decompose the row into alternating white/black runs (white
-        // first, per §10: "all data lines begin with a white
-        // run-length code word set. If the actual scan line begins
-        // with a black run, a white run-length of zero is sent").
-        let row_off = (r as usize) * row_bytes;
-        let runs = scan_runs(&input[row_off..row_off + row_bytes], width as usize);
-        let mut is_white = true;
-        for &run in &runs {
-            emit_run(&mut bw, run, is_white);
-            is_white = !is_white;
+        if row_is_two_d {
+            encode_two_d_row(&mut bw, &reference, row, width as usize);
+        } else {
+            // 1-D row (MH-style runs). White-first per §10; a row
+            // beginning with black emits a zero-length white run.
+            let runs = scan_runs(row, width as usize);
+            let mut is_white = true;
+            for &run in &runs {
+                emit_run(&mut bw, run, is_white);
+                is_white = !is_white;
+            }
+
+            // §10: "New rows always begin on the next available byte
+            // boundary." Compression=2 only — for the EOL-framed
+            // variants the next row's EOL is the separator.
+            if matches!(variant, CcittVariant::ModifiedHuffman) {
+                bw.align();
+            }
         }
 
-        // §10: "New rows always begin on the next available byte
-        // boundary." This is the row separator for Compression=2. For
-        // Compression=3, the EOL code at the next row's start is the
-        // separator — no inter-row alignment.
-        if matches!(variant, CcittVariant::ModifiedHuffman) {
-            bw.align();
-        }
+        // Refresh the reference line for the next iteration's 2-D
+        // encode. We copy unconditionally so that mid-stream
+        // 1-D-to-2-D transitions (e.g. T.4 2-D resync via the tag
+        // bit) inherit the most recent coded row.
+        reference.copy_from_slice(row);
     }
 
     let mut out = bw.finish();
@@ -795,6 +809,96 @@ pub fn encode_ccitt(
         reverse_bits_in_place(&mut out);
     }
     Ok(out)
+}
+
+/// Emit the 12-bit EOL code `000000000001`, optionally preceded by
+/// zero-fill bits so its trailing 1 lands on a byte boundary
+/// (T4Options bit 2 / T.4 §4.1.2 "Synchronization with fill bits").
+fn emit_eol(bw: &mut BitWriter, byte_aligned: bool) {
+    if byte_aligned {
+        // After emitting `pad` zero-fill bits we want
+        // `bit_count % 8 == 4` so that 11 zeros + 1 (12 bits)
+        // completes the current byte exactly. The same alignment
+        // arithmetic the decoder's `expect_eol` reverses.
+        let cur = bw.bit_count % 8;
+        let pad = (4 + 8 - cur) % 8;
+        for _ in 0..pad {
+            bw.write(0, 1);
+        }
+    }
+    bw.write(0b0000_0000_0001, 12);
+}
+
+/// Encode one 2-D coded row of length `width` pixels against
+/// `reference` (the previously coded row, same `row_bytes` MSB-first
+/// 0=white / 1=black layout) by emitting Pass / Horizontal / Vertical
+/// mode codes per Table 4/T.4 = Table 1/T.6 (docs §1). The READ
+/// encoder is the dual of the decoder's `decode_two_d_row`: we walk
+/// `a0` along the coding line and at each step pick the cheapest
+/// mode that advances `a0`, per T.4 §4.2.1.3 "Mode selection".
+fn encode_two_d_row(bw: &mut BitWriter, reference: &[u8], row: &[u8], width: usize) {
+    let mut a0: usize = 0;
+    let mut a0_is_white = true;
+
+    while a0 < width {
+        // T.4 §4.2.1.2 element definitions:
+        //   a1 = next changing element on the coding line strictly to
+        //        the right of a0 (i.e. of the opposite colour to a0).
+        //   a2 = the next changing element on the coding line strictly
+        //        to the right of a1.
+        //   b1 = first changing element on the reference line
+        //        strictly to the right of a0 of opposite colour to a0.
+        //   b2 = the next changing element on the reference line
+        //        strictly to the right of b1.
+        let a1 = first_change_after(row, a0, !a0_is_white, width);
+        // a2 is "the next changing element to the right of a1"
+        // irrespective of colour (it's simply the next transition on
+        // the coding line); equivalent to the b1→b2 step on the
+        // reference line.
+        let a2 = next_change_after(row, a1, width);
+        let b1 = first_change_after(reference, a0, !a0_is_white, width);
+        let b2 = next_change_after(reference, b1, width);
+
+        // Mode selection per T.4 §4.2.1.3:
+        //   1. If b2 is strictly to the left of a1 → Pass mode.
+        //   2. Else if |a1 - b1| ≤ 3 → Vertical mode V(a1 - b1).
+        //   3. Else → Horizontal mode.
+        if b2 < a1 {
+            // Pass: "0001". a0 jumps to the column under b2; colour
+            // is unchanged (T.4 §4.2.1.3.1).
+            bw.write(0b0001, 4);
+            a0 = b2;
+        } else {
+            let diff = a1 as isize - b1 as isize;
+            if (-3..=3).contains(&diff) {
+                // Vertical mode. The code words come straight from
+                // docs §1 / Table 4/T.4: V(0) = "1", VR(1..3) =
+                // "011" / "000011" / "0000011", VL(1..3) = "010" /
+                // "000010" / "0000010".
+                match diff {
+                    0 => bw.write(0b1, 1),
+                    1 => bw.write(0b011, 3),
+                    2 => bw.write(0b000011, 6),
+                    3 => bw.write(0b0000011, 7),
+                    -1 => bw.write(0b010, 3),
+                    -2 => bw.write(0b000010, 6),
+                    -3 => bw.write(0b0000010, 7),
+                    _ => unreachable!("vertical diff filtered to [-3..=3]"),
+                }
+                a0 = a1;
+                a0_is_white = !a0_is_white;
+            } else {
+                // Horizontal: "001" + M(a0a1) + M(a1a2). Both runs
+                // are MH-coded; the first uses a0's colour, the
+                // second the opposite. After H mode a0 advances to
+                // a2 and the colour is unchanged (two flips).
+                bw.write(0b001, 3);
+                emit_run(bw, a1 - a0, a0_is_white);
+                emit_run(bw, a2 - a1, !a0_is_white);
+                a0 = a2;
+            }
+        }
+    }
 }
 
 /// Decompose one row of MSB-first packed bilevel bytes into a
@@ -1676,6 +1780,188 @@ mod tests {
             FillOrder::MsbFirst,
         );
         assert!(r.is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // 2-D encode self-roundtrip tests (T.4 2-D and T.6).
+    //
+    // The encoder writes Pass / Horizontal / Vertical mode codes from
+    // Table 4/T.4 = Table 1/T.6 (docs §1); the decoder consumes the
+    // same code words and reconstructs the row against the previously
+    // decoded line. We assert encode → decode is the identity for a
+    // range of patterns exercising each mode code at least once.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn encode_t4_2d_solid_white_8x4() {
+        // Every coding row is identical to the imaginary-white /
+        // previous reference line. The 2-D rows should emit only
+        // V(0) codes. Row 0 is 1-D (tag=1) per the encoder.
+        ccitt_roundtrip(
+            &[0u8; 32],
+            8,
+            4,
+            CcittVariant::T4TwoD {
+                eol_byte_aligned: false,
+            },
+        );
+    }
+
+    #[test]
+    fn encode_t4_2d_solid_black_8x4() {
+        // Row 0 (1-D) emits a 0-length white + 8 black; subsequent
+        // rows mirror it via V(0) against the previous all-black
+        // line.
+        ccitt_roundtrip(
+            &[1u8; 32],
+            8,
+            4,
+            CcittVariant::T4TwoD {
+                eol_byte_aligned: false,
+            },
+        );
+    }
+
+    #[test]
+    fn encode_t4_2d_horizontal_pattern() {
+        // 8 px alternating black/white on row 0, then a wholly
+        // different pattern on row 1: forces a Horizontal mode at
+        // some point since |a1 - b1| > 3 for the first transition.
+        let row0: Vec<u8> = (0..8).map(|i| (i % 2) as u8).collect();
+        let row1: Vec<u8> = vec![1, 1, 1, 1, 1, 1, 1, 1];
+        let row2: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        let mut all = Vec::new();
+        all.extend_from_slice(&row0);
+        all.extend_from_slice(&row1);
+        all.extend_from_slice(&row2);
+        ccitt_roundtrip(
+            &all,
+            8,
+            3,
+            CcittVariant::T4TwoD {
+                eol_byte_aligned: false,
+            },
+        );
+    }
+
+    #[test]
+    fn encode_t4_2d_pass_mode() {
+        // A long horizontal run on the reference (row 0) followed by
+        // a shorter run on the coding line (row 1) drives Pass mode:
+        // b2 lands left of a1 because the reference's transition
+        // pair lies entirely inside row 1's first run.
+        // Row 0: WWWWBBBBWWWWBBBB (transitions at 0,4,8,12)
+        // Row 1: WWWWWWWWWWWWBBBB (transitions at 0,12) — a1 at 12,
+        // b1 at 4 (first black > a0=0), b2 at 8: b2 < a1 → Pass.
+        let row0: Vec<u8> = vec![0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1];
+        let row1: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1];
+        let mut all = Vec::new();
+        all.extend_from_slice(&row0);
+        all.extend_from_slice(&row1);
+        ccitt_roundtrip(
+            &all,
+            16,
+            2,
+            CcittVariant::T4TwoD {
+                eol_byte_aligned: false,
+            },
+        );
+    }
+
+    #[test]
+    fn encode_t4_2d_byte_aligned_eol() {
+        // T4Options bit 2: every row's EOL ends on a byte boundary.
+        // Three rows of mixed content exercise the byte-alignment
+        // pad logic from row to row.
+        let r0: Vec<u8> = (0..16).map(|i| (i % 2) as u8).collect();
+        let r1 = vec![0u8; 16];
+        let r2 = vec![1u8; 16];
+        let mut all = Vec::new();
+        all.extend_from_slice(&r0);
+        all.extend_from_slice(&r1);
+        all.extend_from_slice(&r2);
+        ccitt_roundtrip(
+            &all,
+            16,
+            3,
+            CcittVariant::T4TwoD {
+                eol_byte_aligned: true,
+            },
+        );
+    }
+
+    #[test]
+    fn encode_t6_solid_white_8x4() {
+        // T.6: no EOL framing. Reference for row 0 is imaginary
+        // white, every row identical → V(0) only.
+        ccitt_roundtrip(&[0u8; 32], 8, 4, CcittVariant::T6);
+    }
+
+    #[test]
+    fn encode_t6_solid_black_8x4() {
+        // Row 0 differs from imaginary-white reference; emit
+        // Horizontal (a0a1=0 white, a1a2=8 black) on row 0, then
+        // V(0) for rows 1..3.
+        ccitt_roundtrip(&[1u8; 32], 8, 4, CcittVariant::T6);
+    }
+
+    #[test]
+    fn encode_t6_diagonal_8x8() {
+        // Single black diagonal pixel per row at column = row.
+        // Drives Vertical mode codes V(-3..3) plus Horizontals at
+        // the edges; covers most of the mode-code table.
+        let mut pixels: Vec<u8> = vec![0u8; 64];
+        for r in 0..8 {
+            pixels[r * 8 + r] = 1;
+        }
+        ccitt_roundtrip(&pixels, 8, 8, CcittVariant::T6);
+    }
+
+    #[test]
+    fn encode_t6_pass_mode() {
+        // Same row patterns as `encode_t4_2d_pass_mode`, sans the
+        // EOL framing. Exercises the Pass-mode emission path inside
+        // the T.6 row stream.
+        let row0: Vec<u8> = vec![0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1];
+        let row1: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1];
+        let mut all = Vec::new();
+        all.extend_from_slice(&row0);
+        all.extend_from_slice(&row1);
+        ccitt_roundtrip(&all, 16, 2, CcittVariant::T6);
+    }
+
+    #[test]
+    fn encode_t6_long_runs_2624x1() {
+        // Row 0 is wider than the 2624-run threshold; exercises the
+        // make-up + terminating code emission inside a Horizontal
+        // mode against the imaginary-white reference.
+        let mut pixels: Vec<u8> = vec![0u8; 2624];
+        for p in pixels.iter_mut().take(2000) {
+            *p = 1;
+        }
+        ccitt_roundtrip(&pixels, 2624, 1, CcittVariant::T6);
+    }
+
+    #[test]
+    fn encode_t4_2d_lsb_first_matches_msb_after_bit_reverse() {
+        // The FillOrder=2 output is the byte-reversed MSB-first
+        // stream; decoding it with FillOrder::LsbFirst recovers the
+        // input identically.
+        let row0: Vec<u8> = (0..16).map(|i| (i % 2) as u8).collect();
+        let row1: Vec<u8> = vec![1u8; 16];
+        let mut all = Vec::new();
+        all.extend_from_slice(&row0);
+        all.extend_from_slice(&row1);
+        let packed = pack_row_msb(&all);
+        let variant = CcittVariant::T4TwoD {
+            eol_byte_aligned: false,
+        };
+        let msb_stream = encode_ccitt(&packed, 16, 2, variant, FillOrder::MsbFirst).unwrap();
+        let lsb_stream = encode_ccitt(&packed, 16, 2, variant, FillOrder::LsbFirst).unwrap();
+        let lsb_expected: Vec<u8> = msb_stream.iter().map(|&b| b.reverse_bits()).collect();
+        assert_eq!(lsb_stream, lsb_expected);
+        let decoded = decode_ccitt(&lsb_stream, 16, 2, variant, FillOrder::LsbFirst).unwrap();
+        assert_eq!(decoded, packed);
     }
 
     // -----------------------------------------------------------------
