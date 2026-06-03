@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encoder: CMYK ([`EncodePixelFormat::Cmyk32`],
+  `PhotometricInterpretation = 5`, `SamplesPerPixel = 4`,
+  `BitsPerSample = [8, 8, 8, 8]`) per TIFF 6.0 §16 "CMYK Images"
+  (page 69). 4 chunky 8-bit samples per pixel ordered cyan,
+  magenta, yellow, black, written verbatim to the strip / tile /
+  plane payload — the on-disk convention is fixed by §16: 0 means
+  0 % ink coverage and 255 means 100 % ink coverage (`InkSet` page
+  70: "Usually, a value of 0 represents 0 % ink coverage and a
+  value of 255 represents 100 % ink coverage for that component").
+  The encoder additionally emits the two optional §16
+  separated-image tags `InkSet = 1` (tag 332, the canonical CMYK
+  ordering) and `NumberOfInks = 4` (tag 334) so a reader keying
+  on those fields does not have to fall back on the §16
+  defaults; `InkNames` (tag 333) is only required when
+  `InkSet = 2` ("not CMYK") per §16 InkSet ("The InkNames field
+  should not exist when InkSet=1") and is therefore never
+  emitted. The decoder collapses CMYK to `Rgb24` via the
+  existing §16 additive-RGB path (`build_rgb24_from_cmyk` in
+  `src/decoder.rs`): each output channel is computed as
+  `(255 − X) * (255 − K) / 255` for X = C, M, Y respectively.
+  Compressors accepted: None / PackBits / LZW / Deflate, the
+  byte-aligned photometric-agnostic set the other multi-bit
+  paths use; CCITT is bilevel-only per §10 / §11 and rejected
+  with a precise error. The §14 horizontal-differencing
+  predictor (per-component with offset = `SamplesPerPixel = 4`),
+  `PlanarConfiguration = 2` (four single-component planes per
+  §"PlanarConfiguration", §14 "Differencing works the same as
+  it does for grayscale data" for the planar predictor), and
+  tiled layout (§15, chunky and planar) all compose, identical
+  to the existing 3-sample RGB / CIELab encode paths. New
+  `src/encoder.rs` tests cover uncompressed self-roundtrip
+  (encoder Rgb24 output matches a hand-built classic CMYK TIFF
+  decoded through `decode_tiff`); cross-compressor identity
+  (PackBits / LZW / Deflate yield the same decoded Rgb24 as
+  uncompressed); the §14 predictor; planar; tiled (16 × 16
+  grid); BigTIFF (BitsPerSample[4] fits the widened 8-byte
+  value slot inline); CCITT rejection; buffer-size validation;
+  IFD-tag layout (262 = 5, 332 = 1, 334 = 4); and the
+  pure-ink-channel orientation pin (full cyan `(255, 0, 0, 0)`
+  → `(0, 255, 255)`, etc., locking `0 = no ink` per §16).
+  Source: `docs/image/tiff/tiff6.pdf` §16 (CMYK Images, pages
+  69 – 71: Motivation, Requirements, Fields including InkSet /
+  NumberOfInks / DotRange / TargetPrinter, History).
 - Encoder: CCITT T.4 2-D / Modified READ
   ([`TiffCompression::CcittT4TwoD`], `Compression = 3` with
   `T4Options` bit 0 set) and CCITT T.6 / MMR / Group 4

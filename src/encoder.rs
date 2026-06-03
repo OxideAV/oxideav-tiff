@@ -21,11 +21,13 @@
 //!   [`EncodePage::bigtiff`].
 //!
 //! Tile write, T.4 2-D / T.6 (Compression=4) encoding, JPEG-in-TIFF,
-//! and YCbCr / CMYK output are intentionally out of scope for this
-//! round. CIELab output (3-sample `(L*, a*, b*)` chunky and 1-sample
-//! `L*`-only, `PhotometricInterpretation = 8` per TIFF 6.0 §23) is
-//! available via [`EncodePixelFormat::CieLab8`] and
-//! [`EncodePixelFormat::CieLabL8`]. The horizontal-differencing
+//! and YCbCr output are intentionally out of scope for this round.
+//! CIELab output (3-sample `(L*, a*, b*)` chunky and 1-sample `L*`-only,
+//! `PhotometricInterpretation = 8` per TIFF 6.0 §23) is available via
+//! [`EncodePixelFormat::CieLab8`] and [`EncodePixelFormat::CieLabL8`].
+//! CMYK output (4-sample chunky `(C, M, Y, K)`,
+//! `PhotometricInterpretation = 5` per TIFF 6.0 §16) is available via
+//! [`EncodePixelFormat::Cmyk32`]. The horizontal-differencing
 //! predictor (`Predictor = 2`, TIFF 6.0 §14) is supported on encode via
 //! the [`EncodePage::predictor`] flag, and `PlanarConfiguration = 2`
 //! (separate component planes, §"PlanarConfiguration") via
@@ -209,6 +211,40 @@ pub enum EncodePixelFormat<'a> {
     /// rejected per §"PlanarConfiguration" "irrelevant" for
     /// `SamplesPerPixel = 1`; tiled layout composes.
     CieLabL8 { pixels: &'a [u8] },
+    /// 8-bit chunky CMYK per TIFF 6.0 §16 "CMYK Images" (page 69):
+    /// `PhotometricInterpretation = 5`, `SamplesPerPixel = 4`,
+    /// `BitsPerSample = 8, 8, 8, 8`. `pixels` is row-major interleaved
+    /// cyan, magenta, yellow, black quadruples — its length must equal
+    /// `width * height * 4`. The on-disk bit interpretation is fixed
+    /// by §16: each component is the amount of that ink at the pixel
+    /// on the canonical `InkSet = 1` CMYK ordering, where 0 means no
+    /// ink and 255 means full coverage (§16 `InkSet` page 70: "Usually,
+    /// a value of 0 represents 0 % ink coverage and a value of 255
+    /// represents 100 % ink coverage for that component"). The encoder
+    /// writes the caller-supplied bytes through to the strip, tile, or
+    /// plane payload verbatim — the caller owns the colourimetric
+    /// encoding, exactly as the decoder takes them verbatim off disk
+    /// and collapses them into additive RGB by the §16 "amount of dye"
+    /// convention. Alongside the §16-required Baseline tags
+    /// `SamplesPerPixel`, `BitsPerSample`, and `PhotometricInterpretation`,
+    /// the encoder also writes the two optional §16 separated-image
+    /// tags `InkSet = 1` (tag 332, the "CMYK" InkSet value) and
+    /// `NumberOfInks = 4` (tag 334). Both match their §16 defaults,
+    /// but emitting them explicitly makes the written file
+    /// self-describing to readers that key on those fields. Compressors
+    /// accepted: the byte-aligned, photometric-agnostic set the other
+    /// multi-bit photometric paths use (None, PackBits, LZW, Deflate).
+    /// CCITT is bilevel-only per §10 and §11 and rejected here.
+    /// `Predictor = 2` (TIFF 6.0 §14 horizontal differencing,
+    /// per-component on chunky multi-sample data with offset
+    /// `SamplesPerPixel = 4`) composes. `PlanarConfiguration = 2`
+    /// composes too: each of the four component planes is written as
+    /// its own strip per §"PlanarConfiguration", and the §14 predictor
+    /// differences each plane independently with an offset of one
+    /// sample (§14: "Differencing works the same as it does for
+    /// grayscale data" when PlanarConfiguration is 2). Tiled layout
+    /// (§15) composes for both chunky and planar.
+    Cmyk32 { pixels: &'a [u8] },
 }
 
 /// Compression scheme for an [`EncodePage`].
@@ -701,13 +737,16 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     // §"PlanarConfiguration" (page 38): "If SamplesPerPixel is 1,
     // PlanarConfiguration is irrelevant." Reject the single-sample
     // formats and the bit-packed bilevel format up front. The
-    // multi-sample formats the encoder writes are Rgb24 (SPP=3) and
+    // multi-sample formats the encoder writes are Rgb24 (SPP=3),
     // CieLab8 (SPP=3 — three 8-bit L*/a*/b* component planes per
-    // §"PlanarConfiguration").
+    // §"PlanarConfiguration"), and Cmyk32 (SPP=4 — four 8-bit
+    // C / M / Y / K component planes per §16 + §"PlanarConfiguration").
     if p.planar
         && !matches!(
             p.kind,
-            EncodePixelFormat::Rgb24 { .. } | EncodePixelFormat::CieLab8 { .. }
+            EncodePixelFormat::Rgb24 { .. }
+                | EncodePixelFormat::CieLab8 { .. }
+                | EncodePixelFormat::Cmyk32 { .. }
         )
     {
         return Err(Error::invalid(
@@ -757,8 +796,9 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         // the first component plane are stored first, followed by all the
         // offsets for the second component plane, and so on") is handled
         // by `build_tiles_planar` below. It is only meaningful for the
-        // multi-sample format, which `p.planar` already restricts to
-        // Rgb24 (rejected above for single-sample formats).
+        // multi-sample formats, which `p.planar` already restricts to
+        // Rgb24 (SPP=3) / CieLab8 (SPP=3) / Cmyk32 (SPP=4) — the
+        // single-sample formats are rejected above.
     }
 
     // The §14 horizontal-differencing predictor operates on whole
@@ -937,6 +977,30 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                     )));
                 }
                 (1u16, vec![8u16], PHOTO_CIELAB, pixels.to_vec(), None)
+            }
+            EncodePixelFormat::Cmyk32 { pixels } => {
+                // TIFF 6.0 §16 "CMYK Images" (page 69) — 4-sample chunky
+                // (C, M, Y, K) at 8 bits per sample. The on-disk bit
+                // interpretation is fixed by the spec (§16 Requirements:
+                // "SamplesPerPixel = N. SHORT. The number of inks. … For
+                // CMYK, … N = 4 … BitsPerSample = 8,8,8,8 … the
+                // larger component values represent a higher percentage
+                // of ink dot coverage and smaller values represent less
+                // coverage"), so the encoder writes the caller-supplied
+                // bytes through verbatim. BitsPerSample is a 4-entry
+                // [8, 8, 8, 8] SHORT array (8 bytes) — it spills
+                // out-of-line on classic TIFF (8 > 4 inline threshold)
+                // and stays inline on BigTIFF (8 <= 8), exactly as the
+                // existing `bps_inline_bytes <= inline_threshold` switch
+                // already handles.
+                let want = (p.width as usize) * (p.height as usize) * 4;
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/Cmyk32: pixel buffer is {} bytes, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                (4u16, vec![8u16, 8, 8, 8], PHOTO_CMYK, pixels.to_vec(), None)
             }
         };
 
@@ -1288,10 +1352,38 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         });
     }
 
+    // 332 InkSet (SHORT) and 334 NumberOfInks (SHORT) — TIFF 6.0 §16
+    // pages 70 / 70. Both are optional in §16 (defaults: `InkSet = 1`,
+    // CMYK; `NumberOfInks = 4`), but the encoder emits them on every
+    // CMYK page so a reader keying on `InkSet` does not need to fall
+    // back on the default. We write `InkSet = 1` (canonical CMYK
+    // ordering: cyan, magenta, yellow, black) and `NumberOfInks = 4`
+    // to match the four `BitsPerSample` entries. The `InkNames` field
+    // (tag 333, ASCII per-ink names) only exists when `InkSet = 2`
+    // ("not CMYK") per §16 InkSet ("The InkNames field should not
+    // exist when InkSet=1"), so it is never emitted here. Tags 332 +
+    // 334 sit between 325 (TileByteCounts) and 338 (ExtraSamples, the
+    // next baseline tag the encoder might later add) in ascending
+    // IFD-tag order.
+    if matches!(p.kind, EncodePixelFormat::Cmyk32 { .. }) {
+        entries.push(PageIfdEntry {
+            tag: TAG_INK_SET,
+            field_type: TYPE_SHORT,
+            count: 1,
+            value: IfdValue::Inline(INK_SET_CMYK.to_le_bytes().to_vec()),
+        });
+        entries.push(PageIfdEntry {
+            tag: TAG_NUMBER_OF_INKS,
+            field_type: TYPE_SHORT,
+            count: 1,
+            value: IfdValue::Inline(4u16.to_le_bytes().to_vec()),
+        });
+    }
+
     // Spec: entries must be in ascending tag order. The pushes
     // above are already sorted (254/256/257/258/259/262/273?/277/
-    // 278?/279?/284/292?/317?/320?/322?/323?/324?/325?), but assert
-    // defensively.
+    // 278?/279?/284/292?/317?/320?/322?/323?/324?/325?/332?/334?),
+    // but assert defensively.
     debug_assert!(entries.windows(2).all(|w| w[0].tag <= w[1].tag));
 
     Ok(PlannedPage {
@@ -3141,5 +3233,454 @@ mod tests {
             }
         }
         assert_eq!(found, Some(8), "expected PhotometricInterpretation = 8");
+    }
+
+    // ---- CMYK (TIFF 6.0 §16) encode tests ---------------------------
+    //
+    // §16 fixes the on-disk bit layout: 4 chunky samples per pixel
+    // ordered (C, M, Y, K), each unsigned 8-bit with `0` = 0 % ink
+    // and `255` = 100 % ink. The encoder writes those bytes through
+    // verbatim, so a self-roundtrip compares strip-bytes-in vs
+    // strip-bytes-out at the strip layer; the §16 additive-RGB
+    // collapse the decoder performs (`build_rgb24_from_cmyk` in
+    // `src/decoder.rs`) is exercised separately by tests against the
+    // hand-built classic fixture below.
+
+    /// Build a deterministic CMYK raster that exercises pure ink
+    /// channels, neutrals, and a black-only column so the encoder
+    /// sees a non-trivial value distribution per component.
+    fn cmyk_pattern_4sample(w: u32, h: u32) -> Vec<u8> {
+        let mut v = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                // C sweeps the row, M sweeps the column, Y is the
+                // XOR plane, K is a per-row ramp. Each of the four
+                // components gets a meaningful 0..=255 distribution.
+                let c = ((x.wrapping_mul(7)) & 0xFF) as u8;
+                let m = ((y.wrapping_mul(11)) & 0xFF) as u8;
+                let y_byte = ((x ^ y).wrapping_mul(13) & 0xFF) as u8;
+                let k = ((y * 255) / h.max(1).saturating_sub(1).max(1)) as u8;
+                v.extend_from_slice(&[c, m, y_byte, k]);
+            }
+        }
+        v
+    }
+
+    /// Hand-build a classic chunky CMYK TIFF (no encoder), decode it
+    /// through `decode_tiff`, and return the resulting Rgb24 plane.
+    /// This anchors what an §16-conforming CMYK page is supposed to
+    /// look like off-disk so the encoder output can be checked
+    /// against the *same* decoded image. Mirrors the
+    /// `decode_3sample_cielab` helper above.
+    fn decode_cmyk_4sample(pixels: &[u8], w: u32, h: u32) -> Vec<u8> {
+        let row_bytes = (w as u64) * 4;
+        let strip_bytes = row_bytes * (h as u64);
+        assert_eq!(pixels.len() as u64, strip_bytes);
+        // 254 + 256/257/258/259/262/273/277/279 + 332/334 = 11 entries.
+        let num_entries: u16 = 11;
+        let ifd_offset: u32 = 8;
+        let ifd_size: u32 = 2 + (num_entries as u32) * 12 + 4;
+        let bps_blob_bytes: u32 = 4 * 2; // four SHORT entries — spills out-of-line in classic TIFF (8 > 4)
+        let blobs_offset: u32 = ifd_offset + ifd_size;
+        let bps_off = blobs_offset;
+        let pixels_off = bps_off + bps_blob_bytes;
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"II");
+        buf.extend_from_slice(&42u16.to_le_bytes());
+        buf.extend_from_slice(&ifd_offset.to_le_bytes());
+        buf.extend_from_slice(&num_entries.to_le_bytes());
+        let push = |buf: &mut Vec<u8>, tag: u16, ft: u16, count: u32, v: [u8; 4]| {
+            buf.extend_from_slice(&tag.to_le_bytes());
+            buf.extend_from_slice(&ft.to_le_bytes());
+            buf.extend_from_slice(&count.to_le_bytes());
+            buf.extend_from_slice(&v);
+        };
+        // 254 NewSubfileType = 0.
+        push(&mut buf, 254, 4, 1, 0u32.to_le_bytes());
+        // 256 ImageWidth, 257 ImageLength (LONG).
+        push(&mut buf, 256, 4, 1, w.to_le_bytes());
+        push(&mut buf, 257, 4, 1, h.to_le_bytes());
+        // 258 BitsPerSample = [8,8,8,8] SHORT (spills out-of-line).
+        push(&mut buf, 258, 3, 4, bps_off.to_le_bytes());
+        // 259 Compression = 1.
+        let mut comp = [0u8; 4];
+        comp[..2].copy_from_slice(&1u16.to_le_bytes());
+        push(&mut buf, 259, 3, 1, comp);
+        // 262 PhotometricInterpretation = 5 (CMYK).
+        let mut ph = [0u8; 4];
+        ph[..2].copy_from_slice(&5u16.to_le_bytes());
+        push(&mut buf, 262, 3, 1, ph);
+        // 273 StripOffsets (LONG, inline for 1 strip).
+        push(&mut buf, 273, 4, 1, pixels_off.to_le_bytes());
+        // 277 SamplesPerPixel = 4.
+        let mut spp = [0u8; 4];
+        spp[..2].copy_from_slice(&4u16.to_le_bytes());
+        push(&mut buf, 277, 3, 1, spp);
+        // 279 StripByteCounts (LONG, inline).
+        push(&mut buf, 279, 4, 1, (strip_bytes as u32).to_le_bytes());
+        // 332 InkSet = 1 (CMYK).
+        let mut ink = [0u8; 4];
+        ink[..2].copy_from_slice(&1u16.to_le_bytes());
+        push(&mut buf, 332, 3, 1, ink);
+        // 334 NumberOfInks = 4.
+        let mut nink = [0u8; 4];
+        nink[..2].copy_from_slice(&4u16.to_le_bytes());
+        push(&mut buf, 334, 3, 1, nink);
+        // Next IFD = 0.
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        // BitsPerSample blob (four SHORTs = 8 bytes).
+        for _ in 0..4u16 {
+            buf.extend_from_slice(&8u16.to_le_bytes());
+        }
+        buf.extend_from_slice(pixels);
+        decode_tiff(&buf).unwrap().frame.planes[0].data.clone()
+    }
+
+    #[test]
+    fn encode_cmyk32_uncompressed_roundtrip() {
+        // 4-sample chunky (C, M, Y, K) at 8 bits each — encoder must
+        // write PhotometricInterpretation = 5, SamplesPerPixel = 4,
+        // BitsPerSample = [8,8,8,8], so the decoder takes the strip
+        // bytes through the §16 additive-RGB collapse. The encoder
+        // output's Rgb24 must match the hand-built fixture's decode.
+        let pixels = cmyk_pattern_4sample(8, 8);
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        assert_eq!((d.width, d.height), (8, 8));
+        assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
+        let want = decode_cmyk_4sample(&pixels, 8, 8);
+        assert_eq!(d.frame.planes[0].data, want);
+    }
+
+    #[test]
+    fn encode_cmyk32_compressors_match_uncompressed() {
+        // PackBits / LZW / Deflate must all produce decoder output
+        // identical to the uncompressed encode — they are lossless
+        // byte-aligned compressors, photometric-agnostic.
+        let pixels = cmyk_pattern_4sample(16, 8);
+        let baseline = {
+            let page = EncodePage {
+                width: 16,
+                height: 8,
+                kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+                compression: TiffCompression::None,
+                predictor: false,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        for c in [
+            TiffCompression::PackBits,
+            TiffCompression::Lzw,
+            TiffCompression::Deflate,
+        ] {
+            let page = EncodePage {
+                width: 16,
+                height: 8,
+                kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+                compression: c,
+                predictor: false,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+            };
+            let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
+            assert_eq!(d.frame.planes[0].data, baseline, "compressor {:?}", c);
+        }
+    }
+
+    #[test]
+    fn encode_cmyk32_predictor_composes() {
+        // Predictor=2 must round-trip on chunky 4-sample CMYK — the
+        // decoder undoes the per-component differencing with
+        // SamplesPerPixel = 4 (analogous to the Rgb24 / CieLab8 paths
+        // that already exercise SPP=3).
+        let pixels = cmyk_pattern_4sample(20, 12);
+        let no_pred = {
+            let page = EncodePage {
+                width: 20,
+                height: 12,
+                kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+                compression: TiffCompression::Lzw,
+                predictor: false,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        let with_pred = {
+            let page = EncodePage {
+                width: 20,
+                height: 12,
+                kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+                compression: TiffCompression::Lzw,
+                predictor: true,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        assert_eq!(no_pred, with_pred);
+    }
+
+    #[test]
+    fn encode_cmyk32_planar_composes() {
+        // PlanarConfiguration = 2 splits C / M / Y / K into four
+        // single-component planes (§"PlanarConfiguration"). The
+        // re-interleaved decode must match the chunky path.
+        let pixels = cmyk_pattern_4sample(16, 8);
+        let chunky = {
+            let page = EncodePage {
+                width: 16,
+                height: 8,
+                kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+                compression: TiffCompression::Deflate,
+                predictor: false,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        let planar = {
+            let page = EncodePage {
+                width: 16,
+                height: 8,
+                kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+                compression: TiffCompression::Deflate,
+                predictor: false,
+                planar: true,
+                tiling: None,
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        assert_eq!(chunky, planar);
+    }
+
+    #[test]
+    fn encode_cmyk32_tiled_composes() {
+        // Tiled §15 chunky write — the strip-vs-tile decode must
+        // collapse to the same Rgb24, mirroring the Rgb24 / CieLab8
+        // tiled-roundtrip tests.
+        let pixels = cmyk_pattern_4sample(32, 32);
+        let strip = {
+            let page = EncodePage {
+                width: 32,
+                height: 32,
+                kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+                compression: TiffCompression::Lzw,
+                predictor: false,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        let tiled = {
+            let page = EncodePage {
+                width: 32,
+                height: 32,
+                kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+                compression: TiffCompression::Lzw,
+                predictor: false,
+                planar: false,
+                tiling: Some((16, 16)),
+                bigtiff: false,
+            };
+            decode_tiff(&encode_tiff(&page).unwrap())
+                .unwrap()
+                .frame
+                .planes[0]
+                .data
+                .clone()
+        };
+        assert_eq!(strip, tiled);
+    }
+
+    #[test]
+    fn encode_cmyk32_bigtiff_composes() {
+        // BigTIFF: BitsPerSample[4] (8 bytes) now sits inline in the
+        // widened 8-byte value/offset slot. Self-roundtrip the same
+        // as the classic path.
+        let pixels = cmyk_pattern_4sample(8, 8);
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+            compression: TiffCompression::Deflate,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: true,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        assert_eq!(&bytes[..2], b"II");
+        assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 43);
+        let d = decode_tiff(&bytes).unwrap();
+        let want = decode_cmyk_4sample(&pixels, 8, 8);
+        assert_eq!(d.frame.planes[0].data, want);
+    }
+
+    #[test]
+    fn encode_cmyk32_rejects_ccitt() {
+        // CCITT is bilevel-only per §10 / §11; Cmyk32 is 4-sample
+        // 8-bit, so the bilevel-input gate must reject.
+        let pixels = cmyk_pattern_4sample(8, 8);
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+            compression: TiffCompression::CcittRle,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        };
+        let err = encode_tiff(&page).unwrap_err();
+        assert!(format!("{err}").contains("CCITT"));
+    }
+
+    #[test]
+    fn encode_cmyk32_wrong_buffer_size_rejected() {
+        // 8x8 wants 256 bytes (4 * 64); pass 100 to exercise the size
+        // validator.
+        let bad = vec![0u8; 100];
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::Cmyk32 { pixels: &bad },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        };
+        let err = encode_tiff(&page).unwrap_err();
+        assert!(format!("{err}").contains("Cmyk32"));
+    }
+
+    #[test]
+    fn encode_cmyk32_writes_photometric_inkset_and_numberofinks() {
+        // Decode the encoder's output through a byte-level IFD walker
+        // (independent of our decoder) and confirm
+        // PhotometricInterpretation = 5 lands in tag 262, InkSet = 1
+        // in tag 332, and NumberOfInks = 4 in tag 334.
+        let pixels = cmyk_pattern_4sample(8, 8);
+        let page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let ifd_off = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        let count = u16::from_le_bytes([bytes[ifd_off], bytes[ifd_off + 1]]) as usize;
+        let mut photo = None;
+        let mut ink_set = None;
+        let mut num_inks = None;
+        for k in 0..count {
+            let entry_off = ifd_off + 2 + k * 12;
+            let tag = u16::from_le_bytes([bytes[entry_off], bytes[entry_off + 1]]);
+            let val = u16::from_le_bytes([bytes[entry_off + 8], bytes[entry_off + 9]]);
+            match tag {
+                262 => photo = Some(val),
+                332 => ink_set = Some(val),
+                334 => num_inks = Some(val),
+                _ => {}
+            }
+        }
+        assert_eq!(photo, Some(5), "expected PhotometricInterpretation = 5");
+        assert_eq!(ink_set, Some(1), "expected InkSet = 1 (CMYK)");
+        assert_eq!(num_inks, Some(4), "expected NumberOfInks = 4");
+    }
+
+    #[test]
+    fn encode_cmyk32_pure_inks_collapse_to_expected_rgb() {
+        // §16 fixes the additive-RGB collapse as `R = (1-C)(1-K)`,
+        // `G = (1-M)(1-K)`, `B = (1-Y)(1-K)` (all scaled to 8-bit),
+        // implemented by `build_rgb24_from_cmyk` in the decoder.
+        // Check the four canonical "pure ink" pixels — pure C, pure
+        // M, pure Y, pure K — land at the spec-mandated RGB triples
+        // through the full encode -> decode path. This pins the
+        // §16-required `0 = no ink` orientation: writing `(255, 0, 0,
+        // 0)` (full cyan, no other ink, no black) must decode to a
+        // red-absent pixel `(0, 255, 255)`, not the opposite.
+        let pixels = [
+            255, 0, 0, 0, // pure cyan
+            0, 255, 0, 0, // pure magenta
+            0, 0, 255, 0, // pure yellow
+            0, 0, 0, 255, // pure black
+        ];
+        let page = EncodePage {
+            width: 4,
+            height: 1,
+            kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        };
+        let bytes = encode_tiff(&page).unwrap();
+        let d = decode_tiff(&bytes).unwrap();
+        assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
+        let rgb = &d.frame.planes[0].data;
+        // Pure cyan -> R = (1-1)(1-0) = 0, G = B = 255.
+        assert_eq!(&rgb[0..3], &[0, 255, 255]);
+        // Pure magenta -> R = 255, G = 0, B = 255.
+        assert_eq!(&rgb[3..6], &[255, 0, 255]);
+        // Pure yellow -> R = 255, G = 255, B = 0.
+        assert_eq!(&rgb[6..9], &[255, 255, 0]);
+        // Pure black -> all zero (the (1-K) factor multiplies out).
+        assert_eq!(&rgb[9..12], &[0, 0, 0]);
     }
 }

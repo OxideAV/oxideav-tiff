@@ -206,6 +206,7 @@ out-of-range values (≥ 5) are also rejected.
 | Palette        | 8         | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Palette8`  |
 | **CIELab (3 chan)** | 8    | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::CieLab8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 3, BitsPerSample = [8,8,8]) |
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate                          | `EncodePixelFormat::CieLabL8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 1) |
+| **CMYK (4 chan)** | 8     | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Cmyk32` (writes PhotometricInterpretation = 5, SamplesPerPixel = 4, BitsPerSample = [8,8,8,8], plus optional `InkSet = 1` / `NumberOfInks = 4`) |
 
 `TiffCompression::CcittRle` selects Modified Huffman
 (`Compression = 2`, TIFF 6.0 §10), `TiffCompression::CcittT4OneD`

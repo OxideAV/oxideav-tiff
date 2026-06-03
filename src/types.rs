@@ -70,6 +70,19 @@ pub const TAG_COLOR_MAP: u16 = 320;
 pub const TAG_EXTRA_SAMPLES: u16 = 338;
 pub const TAG_SAMPLE_FORMAT: u16 = 339;
 
+// --- CMYK / separated-image tags (Section 16) ---------------------------
+// TIFF 6.0 §16 "CMYK Images" page 70/71:
+//   InkSet         (tag 332, SHORT, N = 1, default 1 / CMYK)
+//   NumberOfInks   (tag 334, SHORT, N = 1, default 4)
+// `InkSet = 1` is the only writer-side value this encoder emits — the
+// canonical 4-ink CMYK ordering (cyan, magenta, yellow, black). Higher-
+// fidelity "more than 4 inks" separations (§16 motivation paragraph)
+// would carry `InkSet = 2` plus `InkNames` (tag 333); both are out of
+// scope here.
+pub const TAG_INK_SET: u16 = 332;
+pub const TAG_NUMBER_OF_INKS: u16 = 334;
+pub const INK_SET_CMYK: u16 = 1;
+
 // --- Tile tags (Section 15) ---------------------------------------------
 pub const TAG_TILE_WIDTH: u16 = 322;
 pub const TAG_TILE_LENGTH: u16 = 323;
