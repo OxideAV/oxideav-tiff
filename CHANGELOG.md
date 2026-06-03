@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.3...v0.0.4) - 2026-06-03
+
+### Other
+
+- PhotometricInterpretation = 5 (CMYK) per TIFF 6.0 §16
+- CCITT T.4 2-D (Modified READ) + T.6 (MMR / Group 4) encode
+- SampleFormat (tag 339) inspection per TIFF 6.0 §SampleFormat
+- PhotometricInterpretation = 8 (CIE L*a*b*) per TIFF 6.0 §23
+
 ### Added
 
 - Encoder: `PhotometricInterpretation = 5` (CMYK), per TIFF 6.0 §16
