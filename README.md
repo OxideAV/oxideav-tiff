@@ -181,6 +181,20 @@ TIFF 6.0 §FillOrder (page 32). Any other combination of FillOrder=2
 with non-bilevel data or with a non-CCITT compressor is rejected with
 a precise error.
 
+`SampleFormat` (tag 339, TIFF 6.0 §SampleFormat page 80) is inspected
+on every IFD. Value `1` (unsigned integer, the spec default) and value
+`4` (undefined — the §SampleFormat note recommends "treat … as if the
+field were not present, i.e. as unsigned integer data") route through
+the unsigned-integer decoder path that the rest of the codec is built
+around. Values `2` (two's-complement signed integer) and `3` (IEEE
+floating-point) are surfaced as precise typed errors, enforcing the
+§SampleFormat reader rule: "If the SampleFormat field is present and
+the value is not 1, a Baseline TIFF reader that cannot handle the
+SampleFormat value must terminate the import process gracefully." An
+absent field defaults to unsigned (so every existing TIFF fixture
+decodes byte-for-byte unchanged); non-uniform per-component values and
+out-of-range values (≥ 5) are also rejected.
+
 ## Encode
 
 | Photometric    | Bit depth | Compression                                                 | API call                |

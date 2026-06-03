@@ -151,6 +151,69 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         )));
     }
 
+    // SampleFormat (TIFF 6.0 §SampleFormat tag 339, page 80). When
+    // present the field has one entry per sample, all of which must
+    // share an interpretation for this decoder's uniform-bit-depth
+    // assembly path to apply consistently. The spec mandates: "If the
+    // SampleFormat field is present and the value is not 1, a Baseline
+    // TIFF reader that cannot handle the SampleFormat value must
+    // terminate the import process gracefully." This decoder reads
+    // only unsigned-integer pixel data, so values 2 (two's-complement
+    // signed) and 3 (IEEE floating-point) are rejected with a precise
+    // error; value 4 (undefined) folds back to unsigned per the
+    // §SampleFormat note "A reader would typically treat an image with
+    // 'undefined' data as if the field were not present (i.e. as
+    // unsigned integer data)." An absent field also defaults to
+    // unsigned per the §SampleFormat default-1 paragraph.
+    if let Some(sf_entry) = find(entries, TAG_SAMPLE_FORMAT) {
+        // The §SampleFormat header line "N = SamplesPerPixel" sets the
+        // expected count. Some writers under-state the count (one
+        // entry meant to apply to every sample); accept either the
+        // spec-required SamplesPerPixel-long array or a single-entry
+        // shorthand, but never a mismatched non-1 count.
+        let sf = sf_entry.as_u32_vec(bo)?;
+        if sf.len() != samples_per_pixel as usize && sf.len() != 1 {
+            return Err(Error::invalid(format!(
+                "TIFF: SampleFormat count {} != SamplesPerPixel {}",
+                sf.len(),
+                samples_per_pixel
+            )));
+        }
+        if !sf.iter().all(|&v| v == sf[0]) {
+            return Err(Error::Unsupported(
+                "TIFF: per-component SampleFormat values must be uniform".into(),
+            ));
+        }
+        let fmt = sf[0] as u16;
+        match fmt {
+            SAMPLE_FORMAT_UINT | SAMPLE_FORMAT_UNDEFINED => {
+                // Both interpretations route through the unsigned
+                // integer path; nothing else to do.
+            }
+            SAMPLE_FORMAT_SINT => {
+                return Err(Error::Unsupported(
+                    "TIFF: SampleFormat=2 (signed integer) not supported; \
+                     §SampleFormat requires readers that cannot handle the value to \
+                     terminate gracefully"
+                        .into(),
+                ));
+            }
+            SAMPLE_FORMAT_IEEE_FP => {
+                return Err(Error::Unsupported(
+                    "TIFF: SampleFormat=3 (IEEE floating-point) not supported; \
+                     §SampleFormat requires readers that cannot handle the value to \
+                     terminate gracefully"
+                        .into(),
+                ));
+            }
+            other => {
+                return Err(Error::invalid(format!(
+                    "TIFF: SampleFormat={other} unknown (spec defines 1..=4)"
+                )));
+            }
+        }
+    }
+
     // ---- Tiles vs. strips ----
     let bps_first = bits_per_sample[0];
     if !bits_per_sample.iter().all(|&b| b == bps_first) {

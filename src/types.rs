@@ -133,6 +133,31 @@ pub const PHOTO_CIELAB: u16 = 8;
 pub const PREDICTOR_NONE: u16 = 1;
 pub const PREDICTOR_HORIZONTAL: u16 = 2;
 
+// --- SampleFormat (TIFF 6.0 §SampleFormat, tag 339 page 80) -------------
+//
+// TIFF 6.0 lists four sample interpretations:
+//
+//   1 = unsigned integer data    (default; what every Baseline TIFF carries)
+//   2 = two's-complement signed integer data
+//   3 = IEEE floating-point data
+//   4 = undefined data format    (writer disclaims a known interpretation;
+//                                 readers may treat as unsigned)
+//
+// The §SampleFormat description ends with: "If the SampleFormat field is
+// present and the value is not 1, a Baseline TIFF reader that cannot
+// handle the SampleFormat value must terminate the import process
+// gracefully." This decoder supports only the unsigned-integer
+// interpretation, so values 2 and 3 are rejected with a precise error
+// rather than silently re-interpreting signed / floating-point samples as
+// unsigned bytes / words (which would produce garbage pixels). Value 4 is
+// folded into 1 per the §SampleFormat note: "A reader would typically
+// treat an image with 'undefined' data as if the field were not present
+// (i.e. as unsigned integer data)."
+pub const SAMPLE_FORMAT_UINT: u16 = 1;
+pub const SAMPLE_FORMAT_SINT: u16 = 2;
+pub const SAMPLE_FORMAT_IEEE_FP: u16 = 3;
+pub const SAMPLE_FORMAT_UNDEFINED: u16 = 4;
+
 // --- Planar config (Section 7) ------------------------------------------
 pub const PLANAR_CHUNKY: u16 = 1;
 pub const PLANAR_SEPARATE: u16 = 2;

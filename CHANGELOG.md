@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decoder: `SampleFormat` tag (339) inspection, per TIFF 6.0
+  §SampleFormat (page 80). The decoder now reads the field when
+  present and routes through the unsigned-integer path for values
+  `1` (unsigned, the spec default) and `4` (undefined — folded back
+  to unsigned per the §SampleFormat note "A reader would typically
+  treat an image with 'undefined' data as if the field were not
+  present"). Values `2` (two's-complement signed integer) and `3`
+  (IEEE floating-point) are rejected with a precise typed error
+  rather than silently re-interpreted as unsigned bytes — this
+  enforces the §SampleFormat reader rule: "If the SampleFormat
+  field is present and the value is not 1, a Baseline TIFF reader
+  that cannot handle the SampleFormat value must terminate the
+  import process gracefully." Per-component non-uniform values and
+  out-of-range values (≥ 5) are also rejected. An absent field
+  continues to default to unsigned, so every existing fixture
+  decodes byte-for-byte unchanged. New integration test file
+  `tests/decode_sample_format.rs` covers all six branches (absent,
+  1, 2, 3, 4, 99) against a hand-rolled 1×1 Gray8 classic-TIFF
+  byte string.
+
 - Encoder: `PhotometricInterpretation = 8` (1976 CIE L*a*b*), per
   TIFF 6.0 §23 "CIE L*a*b* Images" (page 110). Two new
   `EncodePixelFormat` variants:
