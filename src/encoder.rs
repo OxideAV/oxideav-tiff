@@ -20,14 +20,17 @@
 //!   the Adobe Pagemaker 6.0 BigTIFF design), selectable via
 //!   [`EncodePage::bigtiff`].
 //!
-//! Tile write, T.4 2-D / T.6 (Compression=4) encoding, JPEG-in-TIFF,
-//! and YCbCr output are intentionally out of scope for this round.
+//! Tile write, T.4 2-D / T.6 (Compression=4) encoding, and JPEG-in-TIFF
+//! encode are intentionally out of scope for this round.
 //! CIELab output (3-sample `(L*, a*, b*)` chunky and 1-sample `L*`-only,
 //! `PhotometricInterpretation = 8` per TIFF 6.0 §23) is available via
 //! [`EncodePixelFormat::CieLab8`] and [`EncodePixelFormat::CieLabL8`].
 //! CMYK output (4-sample chunky `(C, M, Y, K)`,
 //! `PhotometricInterpretation = 5` per TIFF 6.0 §16) is available via
-//! [`EncodePixelFormat::Cmyk32`]. The horizontal-differencing
+//! [`EncodePixelFormat::Cmyk32`]. YCbCr output (3-sample chunky
+//! `(Y, Cb, Cr)` at 4:4:4 chroma sampling, `PhotometricInterpretation = 6`
+//! per TIFF 6.0 §21 "YCbCr Images") is available via
+//! [`EncodePixelFormat::YCbCr24`]. The horizontal-differencing
 //! predictor (`Predictor = 2`, TIFF 6.0 §14) is supported on encode via
 //! the [`EncodePage::predictor`] flag, and `PlanarConfiguration = 2`
 //! (separate component planes, §"PlanarConfiguration") via
@@ -245,6 +248,58 @@ pub enum EncodePixelFormat<'a> {
     /// grayscale data" when PlanarConfiguration is 2). Tiled layout
     /// (§15) composes for both chunky and planar.
     Cmyk32 { pixels: &'a [u8] },
+    /// 8-bit chunky `(Y, Cb, Cr)` per TIFF 6.0 §21 "YCbCr Images"
+    /// (page 89), `PhotometricInterpretation = 6`, `SamplesPerPixel = 3`,
+    /// `BitsPerSample = 8, 8, 8` at the §21 chroma-subsampling-1:1
+    /// (`YCbCrSubSampling = [1, 1]`) layout. `pixels` is row-major,
+    /// interleaved `(Y, Cb, Cr)` triples — `pixels.len() == width *
+    /// height * 3`. At `YCbCrSubSampling = [1, 1]` the §21 "Ordering
+    /// of Component Samples" rule for `PlanarConfiguration = 1`
+    /// collapses to one Y sample per data unit (1×1 luminance grid)
+    /// followed by one Cb sample and one Cr sample — i.e. the bytes
+    /// are written through to the strip / tile payload exactly as the
+    /// caller supplied them, with no re-tiling. The caller owns the
+    /// RGB→YCbCr conversion; the encoder transports the supplied bytes
+    /// verbatim, matching the decoder's `build_rgb24_from_ycbcr` path
+    /// which treats §21's stated chunky data-unit layout as fact.
+    /// Alongside the §21 / Baseline tags (`SamplesPerPixel`,
+    /// `BitsPerSample`, `PhotometricInterpretation`), the encoder
+    /// emits the three §21 fields with their full-range
+    /// no-headroom/no-footroom values fixed by §20
+    /// "ReferenceBlackWhite" page 87 ("Useful ReferenceBlackWhite
+    /// values for YCbCr images are: `[0, 255, 128, 255, 128, 255]`
+    /// no headroom/footroom"):
+    ///
+    /// * `YCbCrSubSampling = [1, 1]` (tag 530), the chunky-444 layout
+    ///   the encoder writes;
+    /// * `YCbCrPositioning = 1` (tag 531), §21 "centered" — the
+    ///   tag's documented default and the only positioning that
+    ///   matters when both subsampling factors are 1;
+    /// * `ReferenceBlackWhite = [0/1, 255/1, 128/1, 255/1, 128/1,
+    ///   255/1]` (tag 532), the §20 page 87 "no headroom/footroom"
+    ///   reference coding range — §21 says this field "must be used
+    ///   explicitly" for Class Y images.
+    ///
+    /// The §21 default `YCbCrCoefficients` (tag 529, CCIR
+    /// Recommendation 601-1's `{299/1000, 587/1000, 114/1000}`
+    /// luma weights) are omitted: §21 explicitly defaults to those
+    /// values and the decoder's `ycbcr_to_rgb` matrix is the Q16
+    /// inverse of the same `{0.299, 0.587, 0.114}` coefficients, so
+    /// emitting the tag would just restate the spec default. Future
+    /// rounds add chroma-subsampled (`YCbCrSubSampling = [2, 1]`,
+    /// `[2, 2]`, etc.) and `PlanarConfiguration = 2` writers; the
+    /// 1:1 chunky surface here is the minimal §21-conformant slice.
+    /// Compressors accepted: None / PackBits / LZW / Deflate (the
+    /// byte-aligned photometric-agnostic set the other multi-bit
+    /// photometric paths use). CCITT is bilevel-only per §10 / §11
+    /// and rejected here. `Predictor = 2`,
+    /// `PlanarConfiguration = 2`, and tiled layout are deferred —
+    /// the §21 sample-ordering rule changes shape under non-1:1
+    /// subsampling, so the encoder pins those flags off in this
+    /// initial YCbCr round and rejects the combinations with a
+    /// precise error rather than emitting something the decoder
+    /// might mis-tile.
+    YCbCr24 { pixels: &'a [u8] },
 }
 
 /// Compression scheme for an [`EncodePage`].
@@ -459,11 +514,17 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
         }
         let mut ext_addrs = Vec::with_capacity(plan.externals.len());
         for (id, blob) in &plan.externals {
-            // SHORT / LONG arrays should be 2-/4-byte aligned. Align
-            // conservatively to 2 bytes — enough for SHORTs which is
-            // what we emit (ColorMap = SHORTs, BitsPerSample = SHORTs).
-            if cursor % 2 != 0 {
-                cursor += 1;
+            // SHORT arrays are 2-byte aligned; RATIONAL arrays are
+            // 4-byte aligned (each value is a 4-byte LONG numerator
+            // followed by a 4-byte LONG denominator, so a 4-byte
+            // alignment is the natural one). The 4-byte choice is
+            // a safe superset for the SHORT blobs too.
+            let align: u64 = match id {
+                BlobId::ReferenceBlackWhite => 4,
+                BlobId::BitsPerSample | BlobId::ColorMapWords => 2,
+            };
+            if cursor % align != 0 {
+                cursor += align - (cursor % align);
             }
             ext_addrs.push((*id, cursor, blob.len() as u64));
             cursor += blob.len() as u64;
@@ -681,6 +742,11 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
 enum BlobId {
     BitsPerSample,
     ColorMapWords,
+    /// 6-RATIONAL `ReferenceBlackWhite` (tag 532) blob — six
+    /// 8-byte RATIONAL values = 48 bytes, always out of line.
+    /// Carries the §20 "no headroom/footroom" full-range YCbCr
+    /// reference coding ([0/1, 255/1, 128/1, 255/1, 128/1, 255/1]).
+    ReferenceBlackWhite,
 }
 
 #[derive(Debug, Clone)]
@@ -758,6 +824,36 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     }
     // CCITT schemes are bilevel-only (rejected above) so they never
     // reach the planar path; the predictor is handled per-plane below.
+
+    // YCbCr24 encode is restricted to the chunky-444 surface in this
+    // round: `PlanarConfiguration = 2` and tiled layout both depend on
+    // the §21 "Ordering of Component Samples" data-unit shape, which
+    // collapses to the trivial `(Y, Cb, Cr)` interleave only at
+    // `YCbCrSubSampling = [1, 1]`. Future rounds add the
+    // chroma-subsampled data-unit packer plus the planar / tiled
+    // §21 layouts; until then, reject the combinations precisely so
+    // the writer never emits something the decoder might mis-tile.
+    if matches!(p.kind, EncodePixelFormat::YCbCr24 { .. }) {
+        if p.planar {
+            return Err(Error::invalid(
+                "TIFF encode: PlanarConfiguration=2 with YCbCr24 is not supported in this round \
+                 (the §21 data-unit ordering changes shape under non-1:1 subsampling)",
+            ));
+        }
+        if p.tiling.is_some() {
+            return Err(Error::invalid(
+                "TIFF encode: tiled layout with YCbCr24 is not supported in this round \
+                 (planned alongside the chroma-subsampled YCbCr write path)",
+            ));
+        }
+        if p.predictor {
+            return Err(Error::invalid(
+                "TIFF encode: Predictor=2 with YCbCr24 is not supported in this round \
+                 (the §21 chroma-difference samples and the §14 cumulative-add reversal \
+                 interact through the §22 / §20 reference coding range)",
+            ));
+        }
+    }
 
     // Tiled layout (TIFF 6.0 §15). Validate the geometry up front.
     if let Some((tw, th)) = p.tiling {
@@ -1001,6 +1097,35 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                     )));
                 }
                 (4u16, vec![8u16, 8, 8, 8], PHOTO_CMYK, pixels.to_vec(), None)
+            }
+            EncodePixelFormat::YCbCr24 { pixels } => {
+                // TIFF 6.0 §21 "YCbCr Images" (page 89) — 3-sample
+                // chunky `(Y, Cb, Cr)` at 8 bits per sample under the
+                // chunky-444 layout (`YCbCrSubSampling = [1, 1]`,
+                // `PlanarConfiguration = 1`). At the 1:1 chroma
+                // sampling factor the §21 "Ordering of Component
+                // Samples" data-unit (ChromaSubsampleVert rows of
+                // ChromaSubsampleHoriz Y samples, then one Cb and one
+                // Cr) collapses to a single Y followed by Cb and Cr
+                // per pixel — i.e. the caller-supplied bytes are the
+                // on-disk byte order. BitsPerSample is a 3-entry
+                // [8, 8, 8] SHORT array (6 bytes) — it spills
+                // out-of-line on classic TIFF (6 > 4) and stays inline
+                // on BigTIFF (6 <= 8), same as the Rgb24 / CieLab8
+                // paths. The §21-required `YCbCrSubSampling = [1, 1]`
+                // (tag 530), `YCbCrPositioning = 1` (tag 531,
+                // "centered"), and `ReferenceBlackWhite = [0/1, 255/1,
+                // 128/1, 255/1, 128/1, 255/1]` (tag 532, the §20
+                // page 87 "no headroom/footroom" full-range value)
+                // are emitted further down in the IFD-build pass.
+                let want = (p.width as usize) * (p.height as usize) * 3;
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/YCbCr24: pixel buffer is {} bytes, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                (3u16, vec![8u16, 8, 8], PHOTO_YCBCR, pixels.to_vec(), None)
             }
         };
 
@@ -1380,10 +1505,69 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         });
     }
 
+    // 530 YCbCrSubSampling (SHORT × 2), 531 YCbCrPositioning (SHORT),
+    // 532 ReferenceBlackWhite (RATIONAL × 6) — TIFF 6.0 §21 "YCbCr
+    // Images" pages 91 / 92 + §20 "ReferenceBlackWhite" page 87.
+    // YCbCrCoefficients (tag 529) is omitted because §21 says its
+    // default is the CCIR Recommendation 601-1 luma weights
+    // `{299/1000, 587/1000, 114/1000}` and the decoder's matrix is the
+    // Q16 inverse of those same weights — writing the tag would just
+    // restate the spec default. The three tags sit between 334
+    // (NumberOfInks) and the §20-only TransferRange (342) / 700 (XMP)
+    // / 33432 (Copyright) tags the encoder might later add.
+    if matches!(p.kind, EncodePixelFormat::YCbCr24 { .. }) {
+        // 530 YCbCrSubSampling — `[1, 1]` (chunky 4:4:4). Two SHORTs
+        // pack into 4 bytes and so fit inline on classic TIFF.
+        let mut ss = [0u8; 4];
+        ss[..2].copy_from_slice(&1u16.to_le_bytes());
+        ss[2..4].copy_from_slice(&1u16.to_le_bytes());
+        entries.push(PageIfdEntry {
+            tag: TAG_YCBCR_SUBSAMPLING,
+            field_type: TYPE_SHORT,
+            count: 2,
+            value: IfdValue::Inline(ss.to_vec()),
+        });
+        // 531 YCbCrPositioning — 1 (centered). §21: "Field value 1
+        // (centered) must be specified for compatibility with
+        // industry standards such as PostScript Level 2 and
+        // QuickTime." At `YCbCrSubSampling = [1, 1]` the positioning
+        // choice is degenerate (no subsampling means there is no
+        // Cb/Cr offset to specify), but the §21 default is 1 so
+        // emit it explicitly for self-describing files.
+        entries.push(PageIfdEntry {
+            tag: TAG_YCBCR_POSITIONING,
+            field_type: TYPE_SHORT,
+            count: 1,
+            value: IfdValue::Inline(1u16.to_le_bytes().to_vec()),
+        });
+        // 532 ReferenceBlackWhite — six RATIONALs carrying the §20
+        // page 87 "no headroom/footroom" full-range YCbCr values:
+        // `[0/1, 255/1, 128/1, 255/1, 128/1, 255/1]`. §21 says
+        // ReferenceBlackWhite "must be used explicitly" for Class Y
+        // images, and §20 page 87 lists the no-headroom variant
+        // first among the "Useful ReferenceBlackWhite values for
+        // YCbCr images." Six RATIONALs = 48 bytes, always
+        // out-of-line. Each RATIONAL is two LONGs: numerator,
+        // denominator.
+        let rbw_pairs: [(u32, u32); 6] = [(0, 1), (255, 1), (128, 1), (255, 1), (128, 1), (255, 1)];
+        let mut rbw_bytes: Vec<u8> = Vec::with_capacity(48);
+        for (num, den) in rbw_pairs {
+            rbw_bytes.extend_from_slice(&num.to_le_bytes());
+            rbw_bytes.extend_from_slice(&den.to_le_bytes());
+        }
+        externals.push((BlobId::ReferenceBlackWhite, rbw_bytes));
+        entries.push(PageIfdEntry {
+            tag: TAG_REFERENCE_BLACK_WHITE,
+            field_type: TYPE_RATIONAL,
+            count: 6,
+            value: IfdValue::ExternalBlob(BlobId::ReferenceBlackWhite),
+        });
+    }
+
     // Spec: entries must be in ascending tag order. The pushes
     // above are already sorted (254/256/257/258/259/262/273?/277/
-    // 278?/279?/284/292?/317?/320?/322?/323?/324?/325?/332?/334?),
-    // but assert defensively.
+    // 278?/279?/284/292?/317?/320?/322?/323?/324?/325?/332?/334?/
+    // 530?/531?/532?), but assert defensively.
     debug_assert!(entries.windows(2).all(|w| w[0].tag <= w[1].tag));
 
     Ok(PlannedPage {

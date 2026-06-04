@@ -207,6 +207,7 @@ out-of-range values (≥ 5) are also rejected.
 | **CIELab (3 chan)** | 8    | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::CieLab8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 3, BitsPerSample = [8,8,8]) |
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate                          | `EncodePixelFormat::CieLabL8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 1) |
 | **CMYK (4 chan)** | 8     | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Cmyk32` (writes PhotometricInterpretation = 5, SamplesPerPixel = 4, BitsPerSample = [8,8,8,8], plus optional `InkSet = 1` / `NumberOfInks = 4`) |
+| **YCbCr (3 chan, 4:4:4)** | 8 | None / PackBits / LZW / Deflate                          | `EncodePixelFormat::YCbCr24` (writes PhotometricInterpretation = 6, SamplesPerPixel = 3, BitsPerSample = [8,8,8], `YCbCrSubSampling = [1, 1]`, `YCbCrPositioning = 1`, `ReferenceBlackWhite = [0,255,128,255,128,255]` no-headroom full-range) |
 
 `TiffCompression::CcittRle` selects Modified Huffman
 (`Compression = 2`, TIFF 6.0 §10), `TiffCompression::CcittT4OneD`
@@ -317,6 +318,51 @@ outputs additionally validate by asking `tiffcp -c none` to
 transcode our `Compression = 3` stream back to uncompressed and
 checking the resulting pixels match the original input.
 
+### YCbCr write (PhotometricInterpretation = 6, chunky 4:4:4)
+
+`EncodePixelFormat::YCbCr24` writes per TIFF 6.0 §21 "YCbCr Images"
+(page 89): `PhotometricInterpretation = 6`, `SamplesPerPixel = 3`,
+`BitsPerSample = [8, 8, 8]`, `PlanarConfiguration = 1` (chunky), and
+`YCbCrSubSampling = [1, 1]` (chunky 4:4:4 — one luminance sample per
+chroma pair). At the 1:1 subsampling factor the §21 "Ordering of
+Component Samples" data-unit (`ChromaSubsampleVert` rows of
+`ChromaSubsampleHoriz` Y samples, then one Cb and one Cr) collapses to
+a single `(Y, Cb, Cr)` triple per pixel, so the caller-supplied bytes
+are the on-disk strip / tile payload exactly as given. The caller owns
+the RGB→YCbCr conversion; the encoder transports the bytes verbatim,
+matching the decoder's existing §21 chunky walker.
+
+Alongside the §21 / Baseline tags, the encoder emits three §21-required
+fields with the §20 / §21 defaults the decoder uses:
+
+* `YCbCrSubSampling = [1, 1]` (tag 530), two inline SHORTs — the
+  chunky-444 layout the encoder writes.
+* `YCbCrPositioning = 1` (tag 531) — §21 "centered". The positioning
+  choice is degenerate at 1:1 subsampling but the §21 default is 1
+  so the file is explicit.
+* `ReferenceBlackWhite = [0/1, 255/1, 128/1, 255/1, 128/1, 255/1]`
+  (tag 532, six RATIONALs out-of-line) — the §20 page 87
+  "no headroom/footroom" full-range YCbCr coding value. §21 says
+  this field "must be used explicitly" for Class Y images.
+
+The §21 `YCbCrCoefficients` (tag 529) is omitted: its §21 default is
+the CCIR Recommendation 601-1 luma weights
+`{299/1000, 587/1000, 114/1000}` and the decoder's matrix is the Q16
+inverse of those same weights, so writing the tag would just restate
+the spec default. Compressors accepted: None / PackBits / LZW /
+Deflate (the byte-aligned photometric-agnostic set). CCITT is
+bilevel-only per §10 / §11 and rejected with a precise error.
+`Predictor = 2`, `PlanarConfiguration = 2`, tiled layout, and the
+chroma-subsampled `YCbCrSubSampling` values are deferred to a future
+round (the §21 data-unit shape changes shape under non-1:1
+subsampling, so the encoder pins those flags off here and rejects the
+combinations rather than emit something the decoder might mis-tile).
+Hand-built classic-II fixtures carrying the same `(Y, Cb, Cr)` bytes
+decode to the same `Rgb24` as the encoder's output across the four
+accepted compressors; the IFD bytes are inspected byte-for-byte to
+confirm tags 262 / 277 / 284 / 530 / 531 / 532 carry the documented
+values.
+
 ### BigTIFF write
 
 `EncodePage::bigtiff = true` switches the writer from classic TIFF
@@ -384,8 +430,12 @@ errors out — classic and BigTIFF IFD layouts are wire-incompatible).
   per component plane, §15); decode covers the same plus CCITT. Tiled
   write (chunky, §15) covers `Gray8` / `Gray16Le` / `Rgb24` /
   `Palette8` under None / PackBits / LZW / Deflate with the optional
-  `Predictor = 2`. The remaining gap is planar / tiled write for the
-  not-yet-encodable photometrics (CMYK / YCbCr)
+  `Predictor = 2`. Encoder-side YCbCr is `YCbCrSubSampling = [1, 1]`
+  chunky 4:4:4 only as of this round; chroma-subsampled writes
+  (`[2, 1]` / `[2, 2]` / `[4, 1]` / `[4, 2]` / `[1, 2]`) and YCbCr
+  planar / tiled / predictor combinations are deferred — the §21
+  "Ordering of Component Samples" data-unit shape changes under
+  non-1:1 subsampling and needs the dedicated packer.
 
 ## Registration
 

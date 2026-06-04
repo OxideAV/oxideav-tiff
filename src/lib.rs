@@ -34,7 +34,11 @@
 //!   NewSubfileType bit 2 per TIFF 6.0 §"PhotometricInterpretation"
 //!   value 4 + §"NewSubfileType" bit 2) / CIELab (8-bit chunky
 //!   `(L*, a*, b*)` and 1-sample L*-only, PhotometricInterpretation = 8
-//!   per TIFF 6.0 §23 "CIE L*a*b* Images")
+//!   per TIFF 6.0 §23 "CIE L*a*b* Images") / CMYK (8-bit chunky
+//!   `(C, M, Y, K)`, PhotometricInterpretation = 5 per TIFF 6.0 §16
+//!   "CMYK Images") / YCbCr (8-bit chunky `(Y, Cb, Cr)` at
+//!   `YCbCrSubSampling = [1, 1]` chunky 4:4:4,
+//!   PhotometricInterpretation = 6 per TIFF 6.0 §21 "YCbCr Images")
 //! * Compression: None / PackBits / LZW / Deflate /
 //!   CCITT Modified Huffman (Compression=2) /
 //!   CCITT T.4 1-D (Compression=3, with optional T4Options bit 2
@@ -45,13 +49,16 @@
 //! * Predictor: 2 (horizontal differencing) via [`EncodePage::predictor`]
 //! * Multi-page chain via [`encode_tiff_multi`]
 //!
-//! Out of scope for this round (next-round backlog): CCITT T.4 2-D
-//! and T.6 / Group 4 encode (the read side covers both as of round
-//! 200; the writer still returns InvalidData for those CcittVariants),
-//! the deprecated TIFF 6.0 §22 old-style JPEG (Compression=6), and
-//! encode-side JPEG-in-TIFF (Compression=7) / YCbCr / CMYK output.
-//! Decode-side Compression=7 (new-style JPEG-in-TIFF, per TIFF Tech
-//! Note 2) is implemented as of round 92.
+//! Out of scope for this round (next-round backlog): the deprecated
+//! TIFF 6.0 §22 old-style JPEG (Compression=6) and encode-side
+//! JPEG-in-TIFF (Compression=7). YCbCr encode is currently
+//! `YCbCrSubSampling = [1, 1]` chunky 4:4:4 only; the
+//! chroma-subsampled writes (`[2, 1]` / `[2, 2]` / `[4, 1]` /
+//! `[4, 2]` / `[1, 2]`) and the YCbCr planar / tiled / predictor
+//! compositions are deferred — the §21 "Ordering of Component
+//! Samples" data-unit shape changes under non-1:1 subsampling and
+//! needs the dedicated packer. Decode-side Compression=7 (new-style
+//! JPEG-in-TIFF, per TIFF Tech Note 2) is implemented as of round 92.
 //!
 //! ## Standalone vs registry-integrated
 //!

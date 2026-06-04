@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encoder: YCbCr ([`EncodePixelFormat::YCbCr24`],
+  `PhotometricInterpretation = 6`, `SamplesPerPixel = 3`,
+  `BitsPerSample = [8, 8, 8]`, `PlanarConfiguration = 1`,
+  `YCbCrSubSampling = [1, 1]`) per TIFF 6.0 §21 "YCbCr Images"
+  (page 89). 3 chunky 8-bit samples per pixel ordered Y, Cb, Cr,
+  written verbatim to the strip payload — at the 1:1 chroma sampling
+  factor §21's "Ordering of Component Samples" data-unit
+  (`ChromaSubsampleVert` rows of `ChromaSubsampleHoriz` Y, then one
+  Cb and one Cr) collapses to one `(Y, Cb, Cr)` triple per pixel, so
+  the caller-supplied bytes are the on-disk byte order with no
+  re-tiling. The caller owns the RGB→YCbCr conversion; the encoder
+  transports the supplied bytes verbatim, matching the decoder's
+  `build_rgb24_from_ycbcr` walker which treats the chunky data-unit
+  layout as fact. Alongside the §21 / Baseline tags
+  (`SamplesPerPixel`, `BitsPerSample`, `PhotometricInterpretation`),
+  the encoder emits three §21-required fields with the §20 page 87
+  full-range no-headroom values: `YCbCrSubSampling = [1, 1]`
+  (tag 530, two inline SHORTs), `YCbCrPositioning = 1` (tag 531,
+  §21 "centered" — the §21 default, degenerate at 1:1 subsampling
+  but emitted explicitly so the file is self-describing),
+  `ReferenceBlackWhite = [0/1, 255/1, 128/1, 255/1, 128/1, 255/1]`
+  (tag 532, six RATIONALs out-of-line, §20 page 87 "no
+  headroom/footroom" full-range coding — §21 says this field "must
+  be used explicitly" for Class Y images). `YCbCrCoefficients`
+  (tag 529) is omitted: its §21 default is the CCIR Recommendation
+  601-1 luma weights `{299/1000, 587/1000, 114/1000}` and the
+  decoder's matrix is the Q16 inverse of those same weights, so
+  writing the tag would just restate the spec default. Compressors
+  accepted: None / PackBits / LZW / Deflate (the byte-aligned
+  photometric-agnostic set the other multi-bit photometric paths
+  use). CCITT is bilevel-only per §10 / §11 and rejected with a
+  precise error. `Predictor = 2`, `PlanarConfiguration = 2`, tiled
+  layout, and chroma-subsampled `YCbCrSubSampling` values are
+  deferred to a future round — the §21 data-unit ordering changes
+  shape under non-1:1 subsampling, so the encoder pins those flags
+  off here and rejects the combinations rather than emit something
+  the decoder might mis-tile. Hand-built classic-II fixtures
+  carrying the same `(Y, Cb, Cr)` bytes plus matching tag content
+  decode to the same `Rgb24` as the encoder's output across the four
+  accepted compressors; the IFD bytes are inspected byte-for-byte to
+  confirm tags 262 / 277 / 284 / 530 / 531 / 532 carry the documented
+  values; BigTIFF compositions and multi-page chains round-trip
+  through `decode_tiff_all`. The new `BlobId::ReferenceBlackWhite`
+  external-blob variant required a 4-byte alignment refinement to
+  the encoder's `plan_page_full` external layout (the existing
+  SHORT-only path was 2-byte aligned, which is insufficient for a
+  RATIONAL blob; the alignment now picks the right step per blob).
+
 - Encoder: CMYK ([`EncodePixelFormat::Cmyk32`],
   `PhotometricInterpretation = 5`, `SamplesPerPixel = 4`,
   `BitsPerSample = [8, 8, 8, 8]`) per TIFF 6.0 §16 "CMYK Images"
