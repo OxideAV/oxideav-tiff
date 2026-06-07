@@ -214,6 +214,47 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         }
     }
 
+    // Orientation (TIFF 6.0 §Orientation tag 274, page 36). SHORT,
+    // N = 1, default 1. The spec defines eight values: 1 = the 0th
+    // row is the visual top and the 0th column is the visual
+    // left-hand side (the canonical "as-stored == as-displayed"
+    // layout); 2..=8 cover the remaining horizontal flip / vertical
+    // flip / 90° / 180° / 270° / transpose / antitranspose
+    // permutations a writer may declare. The spec page 36 closing
+    // note reads: "Default is 1. Support for orientations other than
+    // 1 is not a Baseline TIFF requirement." This decoder is one
+    // such Baseline-only reader — it surfaces pixels in storage
+    // order and does not rotate or mirror them, so the canonical
+    // value 1 is the only orientation it can honour without
+    // silently mis-rendering. Values 2..=8 are surfaced as precise
+    // typed errors rather than silently decoded as 1 (which would
+    // produce a correctly-coloured but geometrically-wrong image);
+    // value 0 and values ≥ 9 are surfaced as invalid-data errors
+    // because the spec lists 1..=8 only. An absent field defaults
+    // to 1 per the §Orientation "Default is 1" line.
+    if let Some(orient_entry) = find(entries, TAG_ORIENTATION) {
+        let orient = orient_entry.as_u32(bo)? as u16;
+        match orient {
+            1 => {
+                // Canonical "as-stored == as-displayed" — nothing
+                // to do; the rest of the decoder writes pixels in
+                // storage order which is also display order.
+            }
+            2..=8 => {
+                return Err(Error::Unsupported(format!(
+                    "TIFF: Orientation={orient} not supported; \
+                     §Orientation page 36 states 'Support for orientations \
+                     other than 1 is not a Baseline TIFF requirement'"
+                )));
+            }
+            other => {
+                return Err(Error::invalid(format!(
+                    "TIFF: Orientation={other} unknown (spec defines 1..=8)"
+                )));
+            }
+        }
+    }
+
     // ---- Tiles vs. strips ----
     let bps_first = bits_per_sample[0];
     if !bits_per_sample.iter().all(|&b| b == bps_first) {

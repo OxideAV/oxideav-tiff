@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decoder: `Orientation` tag (274) inspection per TIFF 6.0 §Orientation
+  (page 36). The spec defines eight values mapping the stored 0th row
+  / 0th column onto the displayed image — `1` is the canonical
+  top-left layout this decoder writes pixels in, and `2..=8` cover the
+  remaining horizontal-flip / vertical-flip / 90° / 180° / 270° /
+  transpose / antitranspose permutations a writer may declare. The
+  spec closes with "Default is 1. Support for orientations other than
+  1 is not a Baseline TIFF requirement." This decoder is one such
+  Baseline-only reader: an absent field or an explicit `Orientation =
+  1` decode unchanged through the existing storage-order path; values
+  `2..=8` are surfaced as `Error::Unsupported` rather than silently
+  treated as `1` (which would yield a correctly-coloured but
+  geometrically wrong image); values `0` and `≥ 9` are surfaced as
+  `Error::InvalidData` because the spec lists `1..=8` only. The
+  per-IFD inspection happens immediately after the `SampleFormat`
+  block in `decode_ifd` so the geometric guard runs before any strip
+  or tile buffer is sized. Twelve new tests in
+  `tests/decode_orientation.rs` exercise the absent-tag default,
+  explicit `Orientation = 1`, each of the seven non-canonical values
+  `2..=8`, the malformed values `0` / `9` / `65535`, and assert each
+  error message names the offending value verbatim.
+
 - Encoder: YCbCr ([`EncodePixelFormat::YCbCr24`],
   `PhotometricInterpretation = 6`, `SamplesPerPixel = 3`,
   `BitsPerSample = [8, 8, 8]`, `PlanarConfiguration = 1`,

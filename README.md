@@ -195,6 +195,24 @@ absent field defaults to unsigned (so every existing TIFF fixture
 decodes byte-for-byte unchanged); non-uniform per-component values and
 out-of-range values (≥ 5) are also rejected.
 
+`Orientation` (tag 274, TIFF 6.0 §Orientation page 36) is inspected on
+every IFD. The spec defines eight values mapping the stored 0th row /
+0th column onto the displayed image: `1` is canonical (0th row = visual
+top, 0th column = visual left-hand side), `2..=8` cover the remaining
+horizontal-flip / vertical-flip / 90° / 180° / 270° / transpose /
+antitranspose permutations a writer may declare, and the spec closes
+with "Default is 1. Support for orientations other than 1 is not a
+Baseline TIFF requirement." The decoder is one such Baseline-only
+reader: it surfaces pixels in storage order without rotating or
+mirroring them, so the canonical value `1` is the only orientation it
+can honour without silently mis-rendering. An absent field defaults to
+`1` (every existing TIFF fixture decodes unchanged); an explicit
+`Orientation = 1` routes through the same path. Values `2..=8` are
+surfaced as precise typed errors rather than silently treated as `1`
+(which would yield a correctly-coloured but geometrically wrong
+image), and values `0` / `≥ 9` are surfaced as invalid-data errors
+because the spec lists `1..=8` only.
+
 ## Encode
 
 | Photometric    | Bit depth | Compression                                                 | API call                |
