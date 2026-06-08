@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.3...v0.0.4) - 2026-06-08
+
+### Other
+
+- NewSubfileType (tag 254) inspection per TIFF 6.0 §NewSubfileType
+- Orientation (tag 274) inspection per TIFF 6.0 §Orientation
+- drop release-plz.toml — use release-plz defaults across the workspace
+- YCbCr (TIFF 6.0 §21) chunky 4:4:4 via EncodePixelFormat::YCbCr24
+- CMYK (TIFF 6.0 §16) via EncodePixelFormat::Cmyk32
+- CCITT T.4 2-D (Modified READ) + T.6 (MMR / Group 4) encode
+- SampleFormat (tag 339) inspection per TIFF 6.0 §SampleFormat
+- PhotometricInterpretation = 8 (CIE L*a*b*) per TIFF 6.0 §23
+
 ### Added
 
 - Decoder: `NewSubfileType` tag (254) inspection per TIFF 6.0
