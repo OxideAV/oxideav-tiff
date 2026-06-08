@@ -255,6 +255,36 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         }
     }
 
+    // ResolutionUnit (TIFF 6.0 §"Physical Dimensions" / ResolutionUnit
+    // tag 296, page 18). SHORT, N = 1, "Default = 2 (inch)." Spec defines
+    // three values:
+    //
+    //   1 = No absolute unit of measurement (non-square aspect ratio
+    //       with no meaningful absolute dimensions).
+    //   2 = Inch.
+    //   3 = Centimeter.
+    //
+    // The on-disk pixel bytes are independent of the resolution
+    // metadata, so the decoder does not dispatch on this field — but a
+    // spec-conformant reader still benefits from rejecting malformed
+    // writers up front (rather than silently dropping the field).
+    // Absent → default 2 (inch) per spec; explicit 1 / 2 / 3 → accept;
+    // 0 / ≥ 4 → InvalidData because the spec lists 1..=3 only.
+    if let Some(unit_entry) = find(entries, TAG_RESOLUTION_UNIT) {
+        let unit = unit_entry.as_u32(bo)? as u16;
+        match unit {
+            RESOLUTION_UNIT_NONE | RESOLUTION_UNIT_INCH | RESOLUTION_UNIT_CENTIMETER => {
+                // Spec-defined; pixel decode does not depend on the
+                // resolution unit so nothing further to do.
+            }
+            other => {
+                return Err(Error::invalid(format!(
+                    "TIFF: ResolutionUnit={other} unknown (spec defines 1..=3)"
+                )));
+            }
+        }
+    }
+
     // ---- Tiles vs. strips ----
     let bps_first = bits_per_sample[0];
     if !bits_per_sample.iter().all(|&b| b == bps_first) {

@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decoder: `ResolutionUnit` tag (296) inspection per TIFF 6.0
+  §"Physical Dimensions" (page 18). The spec defines three values for
+  the unit of measurement that `XResolution` (tag 282) and
+  `YResolution` (tag 283) are denominated in — `1` = "No absolute unit
+  of measurement" (non-square aspect ratio with no meaningful absolute
+  dimensions), `2` = "Inch", `3` = "Centimeter" — and specifies
+  "Default = 2 (inch)." The decoder treats this field as metadata
+  only: the on-disk pixel bytes are independent of the resolution
+  unit, so an absent field decodes unchanged through the default-inch
+  path, and explicit values `1` / `2` / `3` all route through the
+  unchanged pixel path. Values `0` and `≥ 4` are surfaced as
+  `Error::InvalidData` because the spec lists `1..=3` only, rather
+  than silently swallowing the malformed writer's output. The per-IFD
+  inspection happens immediately after the `Orientation` block in
+  `decode_ifd`. Seven new tests in `tests/decode_resolution_unit.rs`
+  exercise the absent-tag default, each of the three spec-defined
+  values, and the malformed values `0` / `4` / `65535`, asserting each
+  error message names the offending value verbatim. Three new value
+  constants (`RESOLUTION_UNIT_NONE`, `RESOLUTION_UNIT_INCH`,
+  `RESOLUTION_UNIT_CENTIMETER`) are added to `src/types.rs` alongside
+  the existing `TAG_RESOLUTION_UNIT` constant so the
+  `match` in `decode_ifd` reads symbolically rather than against bare
+  integer literals.
+
 - Decoder: `Orientation` tag (274) inspection per TIFF 6.0 §Orientation
   (page 36). The spec defines eight values mapping the stored 0th row
   / 0th column onto the displayed image — `1` is the canonical

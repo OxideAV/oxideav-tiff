@@ -213,6 +213,20 @@ surfaced as precise typed errors rather than silently treated as `1`
 image), and values `0` / `≥ 9` are surfaced as invalid-data errors
 because the spec lists `1..=8` only.
 
+`ResolutionUnit` (tag 296, TIFF 6.0 §"Physical Dimensions" page 18) is
+inspected on every IFD. The spec defines three values for the unit of
+measurement that `XResolution` (tag 282) and `YResolution` (tag 283)
+are denominated in: `1` = "No absolute unit of measurement" (used for
+images with a non-square aspect ratio but no meaningful absolute
+dimensions), `2` = "Inch", `3` = "Centimeter", with "Default = 2
+(inch)." The decoder treats this field as metadata only — the on-disk
+pixel bytes are independent of the resolution unit, so an absent field
+decodes through the same default-inch path and explicit values
+`1` / `2` / `3` all route through the unchanged pixel path. Values `0`
+and `≥ 4` are surfaced as `Error::InvalidData` because the spec lists
+`1..=3` only, rather than silently swallowing the malformed writer's
+output.
+
 ## Encode
 
 | Photometric    | Bit depth | Compression                                                 | API call                |

@@ -174,3 +174,22 @@ pub const SAMPLE_FORMAT_UNDEFINED: u16 = 4;
 // --- Planar config (Section 7) ------------------------------------------
 pub const PLANAR_CHUNKY: u16 = 1;
 pub const PLANAR_SEPARATE: u16 = 2;
+
+// --- ResolutionUnit (Section 8 / "Physical Dimensions" page 18) ---------
+//
+// TIFF 6.0 §ResolutionUnit (tag 296, SHORT, N = 1) defines the unit of
+// measurement that `XResolution` (tag 282) and `YResolution` (tag 283)
+// are denominated in:
+//
+//   1 = No absolute unit of measurement. Used for images that may have a
+//       non-square aspect ratio but no meaningful absolute dimensions.
+//   2 = Inch.
+//   3 = Centimeter.
+//
+// "Default = 2 (inch)." The decoder only inspects the value for spec
+// conformance — the on-disk pixel bytes are unaffected by the resolution
+// metadata — so the field is treated as a passive integrity check rather
+// than a feature the decoder dispatches on.
+pub const RESOLUTION_UNIT_NONE: u16 = 1;
+pub const RESOLUTION_UNIT_INCH: u16 = 2;
+pub const RESOLUTION_UNIT_CENTIMETER: u16 = 3;
