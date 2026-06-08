@@ -79,6 +79,69 @@ pub fn decode_tiff_all(input: &[u8]) -> Result<Vec<TiffImage>> {
     Ok(out)
 }
 
+/// Walk the IFD chain and return the [`NewSubfileType`] (tag 254,
+/// TIFF 6.0 page 36) reported by every IFD, in file order.
+///
+/// Returns one entry per IFD: [`NewSubfileType::ZERO`] when the tag is
+/// absent (per the spec's "Default is 0" line), otherwise the parsed
+/// flag-bit value. The same per-IFD validation [`decode_tiff_all`]
+/// applies is run here too — undefined high bits or a transparency-mask
+/// bit without `PhotometricInterpretation = 4` produce
+/// [`Error::InvalidData`].
+///
+/// Pairs with [`decode_tiff_all`] when the caller wants the pixel data
+/// AND the per-page classification; multi-page reduced-resolution pyramids
+/// (page 0 full-res, pages 1..N tagged with bit 0) are the canonical use.
+pub fn decode_tiff_subfile_types(input: &[u8]) -> Result<Vec<NewSubfileType>> {
+    let header = parse_header(input)?;
+    let bo = header.byte_order;
+    let variant = header.variant;
+    let mut out = Vec::new();
+    let mut next = header.first_ifd_offset;
+    let mut visited: Vec<u64> = Vec::new();
+    while next != 0 {
+        if visited.contains(&next) {
+            return Err(Error::invalid("TIFF: cyclic next-IFD pointer"));
+        }
+        visited.push(next);
+        let (entries, n) = parse_ifd(input, bo, variant, next)?;
+        // Re-run the same validation gate decode_ifd applies, so
+        // calling this accessor on a malformed file surfaces the same
+        // error the real decode would.
+        let photometric = find(&entries, TAG_PHOTOMETRIC_INTERPRETATION)
+            .map(|e| e.as_u32(bo))
+            .transpose()?
+            .ok_or_else(|| Error::invalid("TIFF: missing PhotometricInterpretation"))?
+            as u16;
+        let nst = if let Some(entry) = find(&entries, TAG_NEW_SUBFILE_TYPE) {
+            let raw = entry.as_u32(bo)?;
+            if (raw & !NEW_SUBFILE_DEFINED_MASK) != 0 {
+                return Err(Error::invalid(format!(
+                    "TIFF: NewSubfileType=0x{raw:08x} sets undefined bits \
+                     (spec §NewSubfileType page 36: 'Unused bits are expected to be 0')"
+                )));
+            }
+            let nst = NewSubfileType::from_raw(raw);
+            if nst.is_transparency_mask() && photometric != PHOTO_TRANSPARENCY_MASK {
+                return Err(Error::invalid(format!(
+                    "TIFF: NewSubfileType bit 2 (transparency mask) is set but \
+                     PhotometricInterpretation={photometric} (spec §NewSubfileType \
+                     page 36 mandates 'The PhotometricInterpretation value must be 4')"
+                )));
+            }
+            nst
+        } else {
+            NewSubfileType::ZERO
+        };
+        out.push(nst);
+        next = n;
+    }
+    if out.is_empty() {
+        return Err(Error::invalid("TIFF: no IFDs in file"));
+    }
+    Ok(out)
+}
+
 /// Decode one IFD (already parsed into `entries`) into a [`TiffImage`].
 fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImage> {
     // ---- Mandatory tags ----
@@ -212,6 +275,52 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
                 )));
             }
         }
+    }
+
+    // NewSubfileType (TIFF 6.0 §NewSubfileType tag 254, page 36).
+    // LONG, N = 1, default 0. A 32-bit field of flag bits describing
+    // the role of this IFD in the file. The spec defines three bits:
+    //   * Bit 0: reduced-resolution version of another image in the
+    //            same TIFF file.
+    //   * Bit 1: single page of a multi-page image (paired with the
+    //            §PageNumber field).
+    //   * Bit 2: transparency mask for another image in the same TIFF
+    //            file. The spec then says: "The PhotometricInterpretation
+    //            value must be 4, designating a transparency mask." —
+    //            making it a normative invariant rather than a hint.
+    // Plus an explicit "Unused bits are expected to be 0" line, which
+    // we treat as enforceable: a high bit set above bit 2 is a writer
+    // mistake (or an extension not in the staged spec) and is rejected
+    // with a precise error so the round-trip property holds — a file
+    // we accept can be re-emitted without losing flag bits we silently
+    // ignored. The three defined bits are accepted in any combination
+    // and recorded for the caller to read via
+    // [`decode_tiff_subfile_types`]; the only cross-tag check is the
+    // bit-2/Photometric=4 invariant above.
+    if let Some(nst_entry) = find(entries, TAG_NEW_SUBFILE_TYPE) {
+        let raw = nst_entry.as_u32(bo)?;
+        if (raw & !NEW_SUBFILE_DEFINED_MASK) != 0 {
+            return Err(Error::invalid(format!(
+                "TIFF: NewSubfileType=0x{raw:08x} sets undefined bits \
+                 (spec §NewSubfileType page 36: 'Unused bits are expected to be 0')"
+            )));
+        }
+        let nst = NewSubfileType::from_raw(raw);
+        if nst.is_transparency_mask() && photometric != PHOTO_TRANSPARENCY_MASK {
+            return Err(Error::invalid(format!(
+                "TIFF: NewSubfileType bit 2 (transparency mask) is set but \
+                 PhotometricInterpretation={photometric} (spec §NewSubfileType \
+                 page 36 mandates 'The PhotometricInterpretation value must be 4')"
+            )));
+        }
+        // The converse direction (Photometric=4 implies bit 2) is a
+        // SHOULD in practice rather than a MUST in the spec wording
+        // — the §NewSubfileType bit-2 paragraph is one-way ("bit 2 is
+        // 1 if the image defines a transparency mask"). The encoder
+        // sets it when it emits Photometric=4 so our writer-side
+        // round-trip is consistent; the decoder doesn't reject the
+        // reverse omission to preserve interop with third-party
+        // writers that omit the flag.
     }
 
     // Orientation (TIFF 6.0 §Orientation tag 274, page 36). SHORT,

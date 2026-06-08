@@ -174,3 +174,79 @@ pub const SAMPLE_FORMAT_UNDEFINED: u16 = 4;
 // --- Planar config (Section 7) ------------------------------------------
 pub const PLANAR_CHUNKY: u16 = 1;
 pub const PLANAR_SEPARATE: u16 = 2;
+
+// --- NewSubfileType (TIFF 6.0 §NewSubfileType tag 254, page 36) ---------
+//
+// TIFF 6.0 defines NewSubfileType as "a general indication of the kind of
+// data contained in this subfile". Tag 254, type LONG, N = 1, default 0.
+// The 32-bit value is interpreted as a set of independent flag bits; the
+// spec says "Unused bits are expected to be 0. Bit 0 is the low-order
+// bit." Three bits are currently defined:
+//
+//   * Bit 0: 1 if the image is a reduced-resolution version of another
+//            image in this TIFF file.
+//   * Bit 1: 1 if the image is a single page of a multi-page image (see
+//            the PageNumber field description).
+//   * Bit 2: 1 if the image defines a transparency mask for another
+//            image in this TIFF file. The PhotometricInterpretation
+//            value MUST be 4, designating a transparency mask.
+//
+// The decoder validates two normative constraints when the tag is
+// present: (a) the "Unused bits are expected to be 0" rule, by rejecting
+// any high-bit set above bit 2 (defined-as-of-1992 ceiling); and (b) the
+// bit-2 / Photometric = 4 invariant, since silently decoding a TRUE
+// transparency mask whose Photometric was forgotten would produce
+// composite-incorrect output downstream.
+pub const NEW_SUBFILE_REDUCED_RESOLUTION: u32 = 1 << 0;
+pub const NEW_SUBFILE_PAGE_OF_MULTIPAGE: u32 = 1 << 1;
+pub const NEW_SUBFILE_TRANSPARENCY_MASK: u32 = 1 << 2;
+/// Bitmask of all spec-defined NewSubfileType bits. Any high bit set
+/// outside this mask is a spec violation per §NewSubfileType "Unused
+/// bits are expected to be 0".
+pub const NEW_SUBFILE_DEFINED_MASK: u32 =
+    NEW_SUBFILE_REDUCED_RESOLUTION | NEW_SUBFILE_PAGE_OF_MULTIPAGE | NEW_SUBFILE_TRANSPARENCY_MASK;
+
+/// Parsed NewSubfileType (TIFF 6.0 tag 254). Exposes the three
+/// spec-defined flag bits via typed accessors; the raw `u32` is also
+/// surfaced for callers that want to inspect undefined high bits
+/// directly (e.g. for archival / metadata-preservation tooling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NewSubfileType {
+    raw: u32,
+}
+
+impl NewSubfileType {
+    /// The default-0 value (full-resolution single-image, no flags set).
+    pub const ZERO: Self = Self { raw: 0 };
+
+    /// Construct from the raw 32-bit value (no spec-validation; for
+    /// internal use). Public callers should obtain instances through
+    /// the decode-side accessor functions instead.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self { raw }
+    }
+
+    /// The raw 32-bit value as stored in the IFD.
+    pub const fn raw(self) -> u32 {
+        self.raw
+    }
+
+    /// True if bit 0 is set (reduced-resolution version of another
+    /// image in the same TIFF file).
+    pub const fn is_reduced_resolution(self) -> bool {
+        (self.raw & NEW_SUBFILE_REDUCED_RESOLUTION) != 0
+    }
+
+    /// True if bit 1 is set (single page of a multi-page image; see
+    /// the §PageNumber field description).
+    pub const fn is_page_of_multipage(self) -> bool {
+        (self.raw & NEW_SUBFILE_PAGE_OF_MULTIPAGE) != 0
+    }
+
+    /// True if bit 2 is set (defines a transparency mask for another
+    /// image in the same TIFF file; PhotometricInterpretation must
+    /// be 4 — the decoder enforces that invariant).
+    pub const fn is_transparency_mask(self) -> bool {
+        (self.raw & NEW_SUBFILE_TRANSPARENCY_MASK) != 0
+    }
+}

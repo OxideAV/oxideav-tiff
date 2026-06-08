@@ -93,12 +93,13 @@ pub const CODEC_ID_STR: &str = "tiff";
 
 // Standalone, framework-free API. Available regardless of the
 // `registry` feature.
-pub use decoder::{decode_tiff, decode_tiff_all, DecodedTiff};
+pub use decoder::{decode_tiff, decode_tiff_all, decode_tiff_subfile_types, DecodedTiff};
 pub use encoder::{
     encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat, RgbColor, TiffCompression,
 };
 pub use error::{Result, TiffError};
 pub use image::{TiffImage, TiffPixelFormat, TiffPlane};
+pub use types::NewSubfileType;
 
 // Framework-integrated API (`oxideav-core`-dependent). Gated behind
 // `registry` so image-library callers can build the crate without

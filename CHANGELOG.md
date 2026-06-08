@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decoder: `NewSubfileType` tag (254) inspection per TIFF 6.0
+  §NewSubfileType (page 36). The spec defines the field as a 32-bit
+  LONG carrying three flag bits — bit 0 (reduced-resolution version),
+  bit 1 (single page of a multi-page image), bit 2 (transparency mask;
+  the spec then mandates `PhotometricInterpretation = 4`) — plus a
+  strict "Unused bits are expected to be 0" rule. The per-IFD
+  validation gate (added to `decode_ifd` immediately before
+  `Orientation`) runs two normative checks whenever the tag is
+  present: (a) any high bit set outside the spec-defined mask `0x07`
+  is rejected as `Error::InvalidData` so a writer cannot smuggle a
+  private extension through the unused-bit slot silently; (b) bit 2
+  set together with a non-`4` photometric is rejected, since silently
+  decoding a TRUE transparency mask whose photometric was forgotten
+  would feed a downstream compositor a misclassified plane. The
+  reverse direction (`Photometric = 4` implies bit 2) is left as a
+  SHOULD per the spec's one-way bit-2 wording. A new
+  `decode_tiff_subfile_types(input) -> Result<Vec<NewSubfileType>>`
+  public accessor mirrors `decode_tiff_all` and returns one
+  `NewSubfileType` per page. The new `NewSubfileType` value-type (in
+  `oxideav_tiff::types`) exposes typed accessors
+  (`is_reduced_resolution()` / `is_page_of_multipage()` /
+  `is_transparency_mask()`) plus a `raw()` getter that preserves the
+  exact bit pattern on disk so archival workflows can roundtrip the
+  field byte-for-byte. The encoder already wrote bit 2 on every
+  `TransparencyMask` page (`PHOTO_TRANSPARENCY_MASK` round-1 work),
+  so a `encode_tiff(...)` + `decode_tiff_subfile_types(...)`
+  roundtrip surfaces the bit correctly without any extra caller
+  plumbing — verified by a new test exercising the single-page
+  Photometric=4 case alongside the multi-page (page 0 RGB, page 1
+  mask) walk. Nine new tests in `tests/decode_subfile_type.rs` cover
+  the absent-tag default, the encoder-roundtrip path (single-page
+  RGB, single-page transparency mask, two-page mixed), the four
+  rejection paths (undefined bit alone, undefined bit + valid bit
+  combined, bit 2 without Photometric=4, raw bit pattern preserved),
+  and the legal `bit 0 | bit 1` reduced-resolution-multi-page-pyramid
+  combination.
+
 - Decoder: `Orientation` tag (274) inspection per TIFF 6.0 §Orientation
   (page 36). The spec defines eight values mapping the stored 0th row
   / 0th column onto the displayed image — `1` is the canonical

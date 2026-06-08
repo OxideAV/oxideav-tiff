@@ -213,6 +213,45 @@ surfaced as precise typed errors rather than silently treated as `1`
 image), and values `0` / `≥ 9` are surfaced as invalid-data errors
 because the spec lists `1..=8` only.
 
+`NewSubfileType` (tag 254, TIFF 6.0 §NewSubfileType page 36) is
+inspected on every IFD. The spec defines the field as a 32-bit
+LONG with three flag bits and a strict "Unused bits are expected to
+be 0" rule:
+
+* **Bit 0** — reduced-resolution version of another image in this
+  TIFF file.
+* **Bit 1** — single page of a multi-page image (paired with
+  `PageNumber`).
+* **Bit 2** — transparency mask for another image in this TIFF
+  file; the spec then mandates `PhotometricInterpretation = 4`.
+
+The decoder runs two normative validations whenever the tag is
+present: (a) any high bit set above bit 2 (i.e. outside the
+spec-defined mask `0x07`) is rejected as `InvalidData` so a writer
+that smuggles a private extension through the unused-bit slot can't
+slip past silently; (b) bit 2 set together with a non-`4`
+photometric is rejected, since silently decoding a TRUE transparency
+mask whose photometric was forgotten would feed a downstream
+compositor a misclassified plane. The reverse direction
+(`Photometric = 4` implies bit 2) is left as a SHOULD per the spec's
+one-way bit-2 wording, so the decoder preserves interop with
+third-party writers that omit the flag. An absent field defaults to
+`0` (every existing TIFF fixture decodes unchanged); the legal bit
+combinations (e.g. bit 0 + bit 1 for a "single page of a
+reduced-resolution pyramid") are accepted in full.
+
+The parsed flags are surfaced via [`decode_tiff_subfile_types`],
+which walks the entire next-IFD chain and returns one
+[`NewSubfileType`] per page (mirroring [`decode_tiff_all`]). The
+companion [`NewSubfileType`] type exposes typed accessors
+(`is_reduced_resolution()` / `is_page_of_multipage()` /
+`is_transparency_mask()`) plus a `raw()` getter for archival /
+metadata-preservation tooling that wants byte-exact preservation
+across a decode-and-re-encode loop. The encoder already sets bit 2
+on every `TransparencyMask` page (see "Transparency Mask" above),
+so a roundtrip through `encode_tiff(...)` + `decode_tiff_subfile_types(...)`
+exposes the bit correctly without any extra caller plumbing.
+
 ## Encode
 
 | Photometric    | Bit depth | Compression                                                 | API call                |
