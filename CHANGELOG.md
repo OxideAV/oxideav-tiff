@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decoder: `ExtraSamples` tag (338) inspection per TIFF 6.0
+  §ExtraSamples (pages 31–32). The field declares `m` extra components
+  per pixel, stored by convention as the last components ("When this
+  field is used, the SamplesPerPixel field has a value greater than
+  the PhotometricInterpretation field suggests"). The decoder now
+  validates the count arithmetic — `SamplesPerPixel − m` must land on
+  a color-component tally the photometric defines (3 for RGB / YCbCr,
+  4 for CMYK, 1 for grayscale / palette / mask, 3-or-1 for CIELab per
+  §23's "SamplesPerPixel - ExtraSamples" line) — and applies a
+  per-value reader policy: `0` (unspecified data) and `2`
+  (unassociated alpha, "transparency information that logically exists
+  independent of an image") decode with the trailing extras skipped,
+  so an RGB `SamplesPerPixel = 4` page renders its `R G B` triple
+  exactly as the absent-tag skip path always has; `1` (associated
+  alpha, pre-multiplied color) is surfaced as a precise
+  `Error::Unsupported` because dropping the alpha component would
+  render the pre-multiplied color components as a silently-wrong
+  opaque image (mirroring the §Orientation refuse-to-mis-render
+  policy); values `≥ 3` and count mismatches are `Error::InvalidData`.
+  An absent field means "no extra samples" per the spec default, so
+  every existing fixture decodes unchanged. The inspection sits
+  immediately after the `ResolutionUnit` block in `decode_ifd`, before
+  any strip / tile work. Eleven new tests in
+  `tests/decode_extra_samples.rs` cover the absent-tag SamplesPerPixel
+  = 4 regression pin, each defined value (0 / 2 decode, 1 rejected),
+  the two-extras `SamplesPerPixel = 5` spec example, a mixed `[0, 1]`
+  rejection, unknown values `3` / `65535`, and three count-mismatch
+  shapes (RGB with two extras, RGB `SamplesPerPixel = 3` with one
+  declared extra, Gray8 `SamplesPerPixel = 1` with one declared
+  extra). Three value constants (`EXTRA_SAMPLE_UNSPECIFIED`,
+  `EXTRA_SAMPLE_ASSOCIATED_ALPHA`, `EXTRA_SAMPLE_UNASSOCIATED_ALPHA`)
+  join the existing `TAG_EXTRA_SAMPLES` in `src/types.rs`.
+
+### Fixed
+
+- JPEG-in-TIFF (`Compression = 7`) RGB segments: `oxideav-mjpeg` may
+  deliver a full-resolution 3-component frame either as three planar
+  components (the layout the published 0.1.x releases produce) or as
+  a single packed interleaved `R G B` plane with stride =
+  `width × 3`, depending on its build. The packed shape previously
+  fell into the 1-plane grayscale arm of the segment classifier and
+  errored with "1-plane JPEG but photometric=2". A new
+  `JpegPixelFormat::Rgb24Packed` classification (gated on
+  `PhotometricInterpretation = RGB (2)` so a narrow stride-padded
+  gray plane can never be hijacked into it) plus a row-blit
+  compositor (`composite_rgb_packed`) accept the packed delivery;
+  the planar delivery keeps classifying as `Rgb24` through the
+  3-plane arm, so both dependency versions decode identically. Four
+  new in-crate unit tests cover the packed-vs-planar classification,
+  the underweight-plane rejection, the stride-padded offset blit,
+  and the wrong-format compositor rejection; the existing
+  `decode_64x64_rgb_jpeg_imagemagick` black-box test exercises the
+  end-to-end path against whichever mjpeg build is linked.
+
 - Decoder: `ResolutionUnit` tag (296) inspection per TIFF 6.0
   §"Physical Dimensions" (page 18). The spec defines three values for
   the unit of measurement that `XResolution` (tag 282) and

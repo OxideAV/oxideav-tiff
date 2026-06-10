@@ -285,6 +285,87 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         }
     }
 
+    // ExtraSamples (TIFF 6.0 §ExtraSamples tag 338, pages 31-32).
+    // SHORT, N = m. "Specifies that each pixel has m extra components
+    // whose interpretation is defined by one of the values listed
+    // below. When this field is used, the SamplesPerPixel field has a
+    // value greater than the PhotometricInterpretation field
+    // suggests." The spec example fixes the count arithmetic: "For
+    // example, full-color RGB data normally has SamplesPerPixel=3. If
+    // SamplesPerPixel is greater than 3, then the ExtraSamples field
+    // describes the meaning of the extra samples. If SamplesPerPixel
+    // is, say, 5 then ExtraSamples will contain 2 values, one for
+    // each extra sample." Per-value reader policy here:
+    //
+    //   0 (unspecified data) — the extra components carry no defined
+    //     meaning, so the color components render correctly without
+    //     them; the pixel paths skip the trailing extras.
+    //   1 (associated alpha, pre-multiplied color) — the stored color
+    //     components are pre-multiplied by the alpha component, so
+    //     dropping the alpha would present composited-against-black
+    //     colors as a fully-opaque image: a silently-wrong render.
+    //     Surfaced as a precise `Unsupported`, mirroring the
+    //     §Orientation policy of refusing to mis-render.
+    //   2 (unassociated alpha) — "transparency information that
+    //     logically exists independent of an image; it is commonly
+    //     called a soft matte." The color components are stored
+    //     straight (not pre-multiplied), so skipping the matte yields
+    //     the correctly-colored fully-opaque render.
+    //
+    // "The default is no extra samples" — an absent field changes
+    // nothing. Values ≥ 3 are surfaced as `InvalidData` because the
+    // spec lists 0..=2 only.
+    if let Some(es_entry) = find(entries, TAG_EXTRA_SAMPLES) {
+        let es = es_entry.as_u32_vec(bo)?;
+        // "By convention, extra components that are present must be
+        // stored as the 'last components' in each pixel" — so the
+        // leading `SamplesPerPixel − m` components must be exactly
+        // the color components the photometric calls for. §23 CIELab
+        // admits two layouts ("SamplesPerPixel - ExtraSamples: 3 for
+        // L*a*b*, 1 implies L* only, for monochrome data"), hence the
+        // slice of admissible color-component counts.
+        let color_counts: &[u16] = match photometric {
+            PHOTO_WHITE_IS_ZERO | PHOTO_BLACK_IS_ZERO | PHOTO_PALETTE | PHOTO_TRANSPARENCY_MASK => {
+                &[1]
+            }
+            PHOTO_RGB | PHOTO_YCBCR => &[3],
+            PHOTO_CMYK => &[4],
+            PHOTO_CIELAB => &[3, 1],
+            // Unknown photometric: leave the rejection to the
+            // photometric dispatch below, which names the value.
+            _ => &[],
+        };
+        if !color_counts.is_empty() {
+            let m = es.len() as u64;
+            let ok = color_counts
+                .iter()
+                .any(|&c| samples_per_pixel as u64 == c as u64 + m);
+            if !ok {
+                return Err(Error::invalid(format!(
+                    "TIFF: ExtraSamples count {m} does not leave a color-component \
+                     count photometric={photometric} defines \
+                     (SamplesPerPixel={samples_per_pixel})"
+                )));
+            }
+        }
+        for &v in &es {
+            if v == EXTRA_SAMPLE_UNSPECIFIED as u32 || v == EXTRA_SAMPLE_UNASSOCIATED_ALPHA as u32 {
+                // Skippable: the pixel paths drop the trailing extra
+                // components and render the color components.
+            } else if v == EXTRA_SAMPLE_ASSOCIATED_ALPHA as u32 {
+                return Err(Error::Unsupported(format!(
+                    "TIFF: ExtraSamples={v} (associated alpha, pre-multiplied color) \
+                     not supported; dropping the alpha component would mis-render \
+                     the pre-multiplied color components"
+                )));
+            } else {
+                return Err(Error::invalid(format!(
+                    "TIFF: ExtraSamples={v} unknown (spec defines 0..=2)"
+                )));
+            }
+        }
+    }
+
     // ---- Tiles vs. strips ----
     let bps_first = bits_per_sample[0];
     if !bits_per_sample.iter().all(|&b| b == bps_first) {
@@ -538,7 +619,13 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             TiffPixelFormat::Rgb48Le,
         ),
         (PHOTO_RGB, n, 8) if n >= 4 => {
-            // Skip extra samples (e.g. RGBA where we don't expose Rgba32 here).
+            // §ExtraSamples (pages 31-32): "By convention, extra
+            // components that are present must be stored as the
+            // 'last components' in each pixel" — the leading three
+            // components are the R, G, B triple and the trailing
+            // n − 3 extras are skipped. The §ExtraSamples inspection
+            // above has already rejected the associated-alpha case
+            // whose color components could not render verbatim.
             (
                 build_rgb_from_n_chunky_8bit(&pixel_buf, width, height, n as usize),
                 TiffPixelFormat::Rgb24,
@@ -2188,8 +2275,8 @@ fn composite_segment(
     photometric: u16,
 ) -> Result<()> {
     use crate::jpeg::{
-        composite_cmyk_to_rgb, composite_gray, composite_rgb_planar, composite_yuv_to_rgb,
-        JpegPixelFormat,
+        composite_cmyk_to_rgb, composite_gray, composite_rgb_packed, composite_rgb_planar,
+        composite_yuv_to_rgb, JpegPixelFormat,
     };
     match seg.pixel_format {
         JpegPixelFormat::Gray8 => composite_gray(
@@ -2229,6 +2316,14 @@ fn composite_segment(
                 )));
             }
             composite_rgb_planar(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+        }
+        JpegPixelFormat::Rgb24Packed => {
+            if photometric != PHOTO_RGB {
+                return Err(Error::invalid(format!(
+                    "TIFF/JPEG: packed-RGB-output JPEG but TIFF photometric={photometric}"
+                )));
+            }
+            composite_rgb_packed(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
         }
         JpegPixelFormat::Cmyk8 => {
             if photometric != PHOTO_CMYK {

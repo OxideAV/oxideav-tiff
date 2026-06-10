@@ -69,7 +69,11 @@ Supported photometric / sampling combinations:
 * `PhotometricInterpretation = 2` (RGB) with `SamplesPerPixel = 3`:
   3-plane full-resolution JPEG (no chroma subsampling), decoded to
   `Rgb24`. This is the layout ImageMagick's default
-  `convert -compress jpeg` produces from PPM input.
+  `convert -compress jpeg` produces from PPM input. `oxideav-mjpeg`
+  may hand the decoded full-resolution 3-component frame back either
+  as three planar components or as a single packed interleaved
+  `R G B` plane (stride = `width × 3`), depending on its build; the
+  TIFF compositor accepts both shapes and produces the same `Rgb24`.
 * `PhotometricInterpretation = 6` (YCbCr) with `SamplesPerPixel = 3`:
   3-plane planar YCbCr JPEG with `YCbCrSubSampling` reflected in the
   JPEG sampling factors. 4:4:4 / 4:2:2 / 4:2:0 / 4:1:1 are all
@@ -226,6 +230,26 @@ decodes through the same default-inch path and explicit values
 and `≥ 4` are surfaced as `Error::InvalidData` because the spec lists
 `1..=3` only, rather than silently swallowing the malformed writer's
 output.
+
+`ExtraSamples` (tag 338, TIFF 6.0 §ExtraSamples pages 31–32) is
+inspected on every IFD. The field declares `m` extra components per
+pixel ("When this field is used, the SamplesPerPixel field has a value
+greater than the PhotometricInterpretation field suggests"), stored by
+convention as the last components of each pixel. The count must leave
+a color-component tally the photometric defines (3 for RGB / YCbCr, 4
+for CMYK, 1 for the grayscale / palette / mask photometrics, 3-or-1
+for CIELab per §23) — any other arithmetic is `Error::InvalidData`.
+Per-value policy: `0` (unspecified data) and `2` (unassociated alpha —
+the soft matte logically independent of the straight-stored color)
+decode with the trailing extras skipped, so an RGB `SamplesPerPixel =
+4` page renders its `R G B` triple; `1` (associated alpha) is surfaced
+as a precise `Error::Unsupported` because the color components are
+pre-multiplied by the alpha being dropped and rendering them verbatim
+would be silently wrong; values `≥ 3` are `Error::InvalidData` because
+the spec lists `0..=2` only. An absent field means "no extra samples"
+per the spec default, and an RGB page with `SamplesPerPixel ≥ 4` but
+no tag 338 still decodes by skipping the undeclared trailing
+components.
 
 ## Encode
 

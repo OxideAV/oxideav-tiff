@@ -171,6 +171,27 @@ pub const SAMPLE_FORMAT_SINT: u16 = 2;
 pub const SAMPLE_FORMAT_IEEE_FP: u16 = 3;
 pub const SAMPLE_FORMAT_UNDEFINED: u16 = 4;
 
+// --- ExtraSamples (TIFF 6.0 §ExtraSamples, tag 338 pages 31-32) ----------
+//
+// "Specifies that each pixel has m extra components whose interpretation
+// is defined by one of the values listed below. When this field is used,
+// the SamplesPerPixel field has a value greater than the
+// PhotometricInterpretation field suggests." SHORT, N = m (one value per
+// extra sample). The three defined interpretations:
+//
+//   0 = Unspecified data
+//   1 = Associated alpha data (with pre-multiplied color)
+//   2 = Unassociated alpha data
+//
+// "By convention, extra components that are present must be stored as
+// the 'last components' in each pixel," and "the size of such components
+// is defined by the value of the BitsPerSample field." "The default is
+// no extra samples. This field must be present if there are extra
+// samples."
+pub const EXTRA_SAMPLE_UNSPECIFIED: u16 = 0;
+pub const EXTRA_SAMPLE_ASSOCIATED_ALPHA: u16 = 1;
+pub const EXTRA_SAMPLE_UNASSOCIATED_ALPHA: u16 = 2;
+
 // --- Planar config (Section 7) ------------------------------------------
 pub const PLANAR_CHUNKY: u16 = 1;
 pub const PLANAR_SEPARATE: u16 = 2;

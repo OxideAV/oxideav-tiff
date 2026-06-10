@@ -72,6 +72,15 @@ pub enum JpegPixelFormat {
     /// when `PhotometricInterpretation = RGB (2)` and `Sf` is 1h1v
     /// for every component.
     Rgb24,
+    /// 3-component RGB delivered as a single packed plane of
+    /// interleaved `R G B` bytes (3 bytes / pixel, stride ≥
+    /// `width × 3`). `oxideav-mjpeg` may hand a full-resolution
+    /// 3-component frame back either as three planar components
+    /// ([`JpegPixelFormat::Rgb24`]) or in this packed layout
+    /// depending on its build; both classify to the same TIFF
+    /// render target (`PhotometricInterpretation = RGB (2)`), the
+    /// compositor just blits rows instead of interleaving planes.
+    Rgb24Packed,
     /// 4-component CMYK delivered as a single packed plane of
     /// `C M Y K` bytes (4 bytes / pixel). Used when
     /// `PhotometricInterpretation = CMYK (5)` and `SamplesPerPixel = 4`.
@@ -211,6 +220,26 @@ fn classify(vf: &VideoFrame, seg_w: u32, seg_h: u32, photometric: u16) -> Result
                 }
                 return Ok(JpegPixelFormat::Cmyk8);
             }
+            // Packed interleaved RGB: 3 components in one plane with
+            // stride == width * 3. `oxideav-mjpeg` may deliver a
+            // full-resolution 3-component frame this way (the planar
+            // 3-plane layout remains accepted via the 3-plane arm
+            // below). Gated on the photometric — only
+            // `PhotometricInterpretation = RGB (2)` makes the packed
+            // bytes a render-ready `R G B` stream — so a narrow
+            // stride-padded gray plane can never be hijacked into
+            // this branch.
+            if photometric == PHOTO_RGB {
+                if p.stride < w.saturating_mul(3) || p.data.len() < p.stride * h {
+                    return Err(Error::invalid(format!(
+                        "TIFF/JPEG: 1-plane JPEG with photometric=2/RGB but plane is not \
+                         packed-3 (stride={} data={} expected w={seg_w} h={seg_h})",
+                        p.stride,
+                        p.data.len()
+                    )));
+                }
+                return Ok(JpegPixelFormat::Rgb24Packed);
+            }
             if photometric != PHOTO_BLACK_IS_ZERO && photometric != PHOTO_WHITE_IS_ZERO {
                 return Err(Error::invalid(format!(
                     "TIFF/JPEG: 1-plane JPEG but photometric={photometric} (expected 0 or 1)"
@@ -332,6 +361,9 @@ fn plane_dims(pf: JpegPixelFormat, seg_w: u32, seg_h: u32, i: usize) -> (u32, u3
     match pf {
         JpegPixelFormat::Gray8 => (seg_w, seg_h),
         JpegPixelFormat::Yuv444P | JpegPixelFormat::Rgb24 => (seg_w, seg_h),
+        // Packed RGB is a single plane; component index > 0 is never
+        // queried (the compositor blits the packed rows directly).
+        JpegPixelFormat::Rgb24Packed => (seg_w, seg_h),
         JpegPixelFormat::Yuv422P => (seg_w.div_ceil(2), seg_h),
         JpegPixelFormat::Yuv420P => (seg_w.div_ceil(2), seg_h.div_ceil(2)),
         JpegPixelFormat::Yuv411P => (seg_w.div_ceil(4), seg_h),
@@ -367,6 +399,9 @@ pub fn composite_yuv_to_rgb(
     let (sh, sv) = match seg.pixel_format {
         JpegPixelFormat::Gray8 => return Err(Error::invalid("composite_yuv_to_rgb on Gray8")),
         JpegPixelFormat::Rgb24 => return Err(Error::invalid("composite_yuv_to_rgb on Rgb24")),
+        JpegPixelFormat::Rgb24Packed => {
+            return Err(Error::invalid("composite_yuv_to_rgb on Rgb24Packed"))
+        }
         JpegPixelFormat::Cmyk8 => return Err(Error::invalid("composite_yuv_to_rgb on Cmyk8")),
         JpegPixelFormat::Yuv444P => (1u32, 1u32),
         JpegPixelFormat::Yuv422P => (2, 1),
@@ -457,6 +492,34 @@ pub fn composite_rgb_planar(
             dst[off + 1] = g.data[y * g.stride + x];
             dst[off + 2] = b.data[y * b.stride + x];
         }
+    }
+    Ok(())
+}
+
+/// Composite an `Rgb24Packed` JPEG segment (one plane of interleaved
+/// `R G B` bytes, stride ≥ `width × 3`) into an Rgb24 destination by
+/// blitting the visible prefix of each packed row.
+pub fn composite_rgb_packed(
+    seg: &JpegSegment,
+    visible_w: u32,
+    visible_h: u32,
+    dst: &mut [u8],
+    dst_row_stride: usize,
+    dst_x: u32,
+    dst_y: u32,
+) -> Result<()> {
+    if seg.pixel_format != JpegPixelFormat::Rgb24Packed {
+        return Err(Error::invalid(
+            "composite_rgb_packed called with non-packed-RGB segment",
+        ));
+    }
+    let p = &seg.planes[0];
+    let row_bytes = visible_w as usize * 3;
+    for y in 0..visible_h as usize {
+        let dy = dst_y as usize + y;
+        let src_row = &p.data[y * p.stride..y * p.stride + row_bytes];
+        let dst_off = dy * dst_row_stride + dst_x as usize * 3;
+        dst[dst_off..dst_off + row_bytes].copy_from_slice(src_row);
     }
     Ok(())
 }
@@ -656,6 +719,112 @@ mod tests {
         assert_eq!(&dst[3..6], &[0, 255, 255], "cyan pixel");
         assert_eq!(&dst[6..9], &[255, 255, 0], "yellow pixel");
         assert_eq!(&dst[9..12], &[0, 0, 0], "pure-K black pixel");
+    }
+
+    /// A full-resolution 3-component frame delivered as one packed
+    /// interleaved plane (stride == width * 3) must classify as
+    /// `Rgb24Packed` when the TIFF photometric is RGB (2) — and the
+    /// classic 3-planar delivery must keep classifying as `Rgb24`,
+    /// since both `oxideav-mjpeg` output shapes are in circulation.
+    #[test]
+    fn classify_accepts_packed_and_planar_rgb() {
+        use oxideav_core::frame::{VideoFrame, VideoPlane};
+        let w = 4u32;
+        let h = 2u32;
+        let packed = VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane {
+                stride: w as usize * 3,
+                data: vec![0u8; w as usize * 3 * h as usize],
+            }],
+        };
+        assert_eq!(
+            classify(&packed, w, h, crate::types::PHOTO_RGB).unwrap(),
+            JpegPixelFormat::Rgb24Packed
+        );
+        let planar = VideoFrame {
+            pts: None,
+            planes: (0..3)
+                .map(|_| VideoPlane {
+                    stride: w as usize,
+                    data: vec![0u8; w as usize * h as usize],
+                })
+                .collect(),
+        };
+        assert_eq!(
+            classify(&planar, w, h, crate::types::PHOTO_RGB).unwrap(),
+            JpegPixelFormat::Rgb24
+        );
+    }
+
+    /// A 1-plane frame whose stride cannot hold packed `R G B` rows
+    /// must NOT silently classify under photometric=RGB.
+    #[test]
+    fn classify_rejects_underweight_plane_for_rgb_photometric() {
+        use oxideav_core::frame::{VideoFrame, VideoPlane};
+        let vf = VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane {
+                stride: 4, // gray-shaped: one byte per pixel
+                data: vec![0u8; 8],
+            }],
+        };
+        assert!(classify(&vf, 4, 2, crate::types::PHOTO_RGB).is_err());
+    }
+
+    /// `composite_rgb_packed` blits the visible prefix of each packed
+    /// row, honouring a source stride wider than `width * 3` and a
+    /// non-zero destination offset.
+    #[test]
+    fn composite_rgb_packed_blits_rows() {
+        let w = 2u32;
+        let h = 2u32;
+        let stride = w as usize * 3 + 2; // padded source rows
+        let mut data = vec![0xEEu8; stride * h as usize];
+        // Row 0: (1,2,3) (4,5,6); row 1: (7,8,9) (10,11,12).
+        data[0..6].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
+        data[stride..stride + 6].copy_from_slice(&[7, 8, 9, 10, 11, 12]);
+        let seg = JpegSegment {
+            width: w,
+            height: h,
+            planes: vec![Plane {
+                stride,
+                width: w,
+                height: h,
+                data,
+            }],
+            pixel_format: JpegPixelFormat::Rgb24Packed,
+        };
+        // Destination is 3x2 RGB; paste at dst_x = 1 so the offset
+        // arithmetic is exercised.
+        let dst_stride = 3usize * 3;
+        let mut dst = vec![0u8; dst_stride * 2];
+        composite_rgb_packed(&seg, w, h, &mut dst, dst_stride, 1, 0).unwrap();
+        assert_eq!(&dst[3..9], &[1, 2, 3, 4, 5, 6], "row 0 pasted at x=1");
+        assert_eq!(
+            &dst[dst_stride + 3..dst_stride + 9],
+            &[7, 8, 9, 10, 11, 12],
+            "row 1 pasted at x=1"
+        );
+        assert_eq!(&dst[0..3], &[0, 0, 0], "pixel left of paste untouched");
+    }
+
+    /// Packed-RGB composite on a non-packed segment must error.
+    #[test]
+    fn composite_rgb_packed_rejects_non_packed_segment() {
+        let seg = JpegSegment {
+            width: 1,
+            height: 1,
+            planes: vec![Plane {
+                stride: 1,
+                width: 1,
+                height: 1,
+                data: vec![0u8],
+            }],
+            pixel_format: JpegPixelFormat::Gray8,
+        };
+        let mut dst = vec![0u8; 3];
+        assert!(composite_rgb_packed(&seg, 1, 1, &mut dst, 3, 0, 0).is_err());
     }
 
     /// CMYK composite to a non-Cmyk segment must error.
