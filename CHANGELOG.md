@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Zstandard `Compression = 50000` decode **and** encode — the
+  de-facto registry extension transcribed in
+  `docs/image/tiff/tiff-zstd-compression-50000.md`. Each strip / tile
+  is one self-contained RFC 8478 Zstandard frame over the
+  post-predictor sample bytes (the `Compression = 8` Deflate template
+  with the codec swapped), so the scheme composes with every
+  photometric / bit-depth the byte-aligned compressors already cover,
+  plus `Predictor = 2`, `PlanarConfiguration = 2`, §15 tiling,
+  BigTIFF, and the multi-page chain on both sides. New
+  `TiffCompression::Zstd` encoder variant; decode is bounded by the
+  IFD-declared segment size (zip-bomb cap, same contract as Deflate)
+  and `Predictor = 3` is rejected per the §14 reader rule. Validated
+  by 6 new `compress`-module unit tests, 17 integration tests in
+  `tests/zstd_roundtrip.rs` (self-roundtrips, hand-built classic-II
+  fixtures whose strips are hand-assembled RFC 8478 `Raw_Block`
+  frames, and black-box `tiffcp` cross-checks in both directions —
+  our output transcoded to `-c none` by the independent binary and
+  independently-produced `-c zstd` / `-c zstd:2` files decoded by
+  us, all compared pixel-exact). `Compression = 50001` (WebP)
+  remains unimplemented.
+
+### Changed
+
+- Both general-purpose byte-stream codecs now go through `compcol`
+  (the workspace-standard compression collection, with only its
+  `zlib` + `zstd` features enabled): the Compression = 8 Deflate
+  path migrated off `miniz_oxide` (dependency dropped), keeping the
+  same zlib wire format, the same default compression level (6), and
+  the same bounded-output decode contract. Breaking on the public
+  `compress` module surface: `pack_deflate` now returns
+  `Result<Vec<u8>>` (and the new `pack_zstd` matches); the
+  `encode_tiff` / `decode_tiff` APIs are unchanged.
+
 - Decoder: `ExtraSamples` tag (338) inspection per TIFF 6.0
   §ExtraSamples (pages 31–32). The field declares `m` extra components
   per pixel, stored by convention as the last components ("When this

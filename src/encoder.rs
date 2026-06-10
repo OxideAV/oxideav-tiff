@@ -7,8 +7,10 @@
 //! * Photometric: WhiteIsZero (1-bit bilevel), BlackIsZero (greyscale
 //!   8/16-bit), RGB (8-bit), Palette (8-bit indexed)
 //! * Compression: 1 None, 2 CCITT Modified Huffman, 3 CCITT T.4 1-D
-//!   (with optional T4Options bit 2 byte-aligned EOLs), 5 LZW,
-//!   8 Deflate, 32773 PackBits
+//!   and 2-D (with optional T4Options bit 2 byte-aligned EOLs),
+//!   4 CCITT T.6, 5 LZW, 8 Deflate, 32773 PackBits, 50000 Zstandard
+//!   (de-facto registry extension; trace doc
+//!   `docs/image/tiff/tiff-zstd-compression-50000.md`)
 //! * Strip layout — a single strip for chunky pages, or one strip per
 //!   component plane for `PlanarConfiguration = 2` pages (see
 //!   [`EncodePage::planar`])
@@ -20,8 +22,7 @@
 //!   the Adobe Pagemaker 6.0 BigTIFF design), selectable via
 //!   [`EncodePage::bigtiff`].
 //!
-//! Tile write, T.4 2-D / T.6 (Compression=4) encoding, and JPEG-in-TIFF
-//! encode are intentionally out of scope for this round.
+//! JPEG-in-TIFF encode is intentionally out of scope for this round.
 //! CIELab output (3-sample `(L*, a*, b*)` chunky and 1-sample `L*`-only,
 //! `PhotometricInterpretation = 8` per TIFF 6.0 §23) is available via
 //! [`EncodePixelFormat::CieLab8`] and [`EncodePixelFormat::CieLabL8`].
@@ -37,7 +38,7 @@
 //! [`EncodePage::planar`].
 
 use crate::ccitt::{encode_ccitt, CcittVariant, FillOrder};
-use crate::compress::{pack_deflate, pack_lzw, pack_packbits};
+use crate::compress::{pack_deflate, pack_lzw, pack_packbits, pack_zstd};
 use crate::error::{Result, TiffError as Error};
 use crate::types::*;
 
@@ -66,9 +67,11 @@ pub struct EncodePage<'a> {
     /// meaningful for the lossless byte-aligned photometrics whose
     /// decode path supports it — `Gray8` (8-bit), `Gray16Le` (16-bit),
     /// `Rgb24` (8-bit × 3), and `Palette8` (8-bit indices). §14 ties
-    /// the predictor to LZW/Deflate; combining it with the bilevel
-    /// CCITT schemes (`Compression = 2 / 3`) or with `Bilevel` input is
-    /// rejected with a precise error.
+    /// the predictor to the byte-stream lossless coders (LZW / Deflate,
+    /// and the Compression=50000 Zstandard extension per its trace doc
+    /// §4); combining it with the bilevel CCITT schemes
+    /// (`Compression = 2 / 3`) or with `Bilevel` input is rejected
+    /// with a precise error.
     pub predictor: bool,
     /// Write the image in `PlanarConfiguration = 2` (separate component
     /// planes) layout per TIFF 6.0 §"PlanarConfiguration" (page 38).
@@ -102,8 +105,9 @@ pub struct EncodePage<'a> {
     /// region and ignores the padding. Tiles are laid out left-to-right
     /// then top-to-bottom (§15 `TileOffsets`). Supported on the
     /// byte-aligned chunky formats (`Gray8` / `Gray16Le` / `Rgb24` /
-    /// `Palette8`) under None / PackBits / LZW / Deflate, with or without
-    /// the §14 predictor (applied per-tile, matching the decoder). Tiling
+    /// `Palette8`) under None / PackBits / LZW / Deflate / Zstd, with or
+    /// without the §14 predictor (applied per-tile, matching the
+    /// decoder). Tiling
     /// is rejected on `Bilevel` (sub-byte tile slicing is not implemented
     /// on either side) and on CCITT compression. It composes with
     /// `planar = true` on `Rgb24`: one row-major tile grid per component
@@ -162,8 +166,8 @@ pub enum EncodePixelFormat<'a> {
     /// region; the 0-bits define the exterior of the region"). The
     /// spec recommends PackBits but does not forbid the other
     /// compressions; this encoder accepts None / PackBits / LZW /
-    /// Deflate / CCITT-MH / CCITT-T.4-1D, the same compressor set
-    /// [`Self::Bilevel`] accepts.
+    /// Deflate / Zstd / CCITT-MH / CCITT-T.4-1D, the same compressor
+    /// set [`Self::Bilevel`] accepts.
     TransparencyMask { pixels: &'a [u8] },
     /// 8-bit greyscale (BlackIsZero, 1 sample per pixel).
     /// `pixels.len() == width * height`.
@@ -192,8 +196,8 @@ pub enum EncodePixelFormat<'a> {
     /// the strip / tile / plane payload verbatim — the caller owns the
     /// colourimetric encoding, exactly as the decoder takes them
     /// verbatim back off disk. Compressors accepted: None / PackBits /
-    /// LZW / Deflate (the byte-aligned, photometric-agnostic set the
-    /// other multi-bit photometric paths use); CCITT is bilevel-only
+    /// LZW / Deflate / Zstd (the byte-aligned, photometric-agnostic set
+    /// the other multi-bit photometric paths use); CCITT is bilevel-only
     /// per §10 / §11 and rejected here. `Predictor = 2` (TIFF 6.0 §14
     /// horizontal differencing, per-component on chunky multi-sample
     /// data) composes; `PlanarConfiguration = 2` (separate L\* / a\* /
@@ -209,7 +213,7 @@ pub enum EncodePixelFormat<'a> {
     /// `pixels.len() == width * height`. Each byte is L\* on the
     /// 0..255-maps-to-0..100 scale. As with [`Self::CieLab8`], the bytes
     /// are written through verbatim. Compressors accepted: None /
-    /// PackBits / LZW / Deflate. `Predictor = 2` composes (single-sample
+    /// PackBits / LZW / Deflate / Zstd. `Predictor = 2` composes (single-sample
     /// chunky path with offset = 1); `PlanarConfiguration = 2` is
     /// rejected per §"PlanarConfiguration" "irrelevant" for
     /// `SamplesPerPixel = 1`; tiled layout composes.
@@ -236,7 +240,8 @@ pub enum EncodePixelFormat<'a> {
     /// but emitting them explicitly makes the written file
     /// self-describing to readers that key on those fields. Compressors
     /// accepted: the byte-aligned, photometric-agnostic set the other
-    /// multi-bit photometric paths use (None, PackBits, LZW, Deflate).
+    /// multi-bit photometric paths use (None, PackBits, LZW, Deflate,
+    /// Zstd).
     /// CCITT is bilevel-only per §10 and §11 and rejected here.
     /// `Predictor = 2` (TIFF 6.0 §14 horizontal differencing,
     /// per-component on chunky multi-sample data with offset
@@ -289,8 +294,8 @@ pub enum EncodePixelFormat<'a> {
     /// rounds add chroma-subsampled (`YCbCrSubSampling = [2, 1]`,
     /// `[2, 2]`, etc.) and `PlanarConfiguration = 2` writers; the
     /// 1:1 chunky surface here is the minimal §21-conformant slice.
-    /// Compressors accepted: None / PackBits / LZW / Deflate (the
-    /// byte-aligned photometric-agnostic set the other multi-bit
+    /// Compressors accepted: None / PackBits / LZW / Deflate / Zstd
+    /// (the byte-aligned photometric-agnostic set the other multi-bit
     /// photometric paths use). CCITT is bilevel-only per §10 / §11
     /// and rejected here. `Predictor = 2`,
     /// `PlanarConfiguration = 2`, and tiled layout are deferred —
@@ -309,6 +314,18 @@ pub enum TiffCompression {
     PackBits,
     Lzw,
     Deflate,
+    /// Compression=50000 — Zstandard (RFC 8478), the de-facto
+    /// registry extension documented in the OxideAV trace doc
+    /// `docs/image/tiff/tiff-zstd-compression-50000.md`. Follows the
+    /// Compression=8 Deflate template exactly: each strip / tile
+    /// becomes one self-contained Zstandard frame over the
+    /// post-predictor sample bytes, so it composes with every
+    /// byte-aligned pixel format, `Predictor = 2`, planar writing,
+    /// tiling, and BigTIFF just like [`TiffCompression::Deflate`].
+    /// The encoder compression level is an out-of-band runtime
+    /// parameter (never stored in the file); the writer uses the
+    /// compression backend's default.
+    Zstd,
     /// Compression=2 — CCITT Modified Huffman (TIFF 6.0 §10). Bilevel
     /// only. Encoded as a sequence of white/black run-length codes
     /// from Tables 1/T.4 and 2/T.4. No EOL codes; rows align to byte
@@ -346,6 +363,7 @@ impl TiffCompression {
             TiffCompression::PackBits => COMPRESSION_PACKBITS,
             TiffCompression::Lzw => COMPRESSION_LZW,
             TiffCompression::Deflate => COMPRESSION_DEFLATE_ADOBE,
+            TiffCompression::Zstd => COMPRESSION_ZSTD,
             TiffCompression::CcittRle => COMPRESSION_CCITT_HUFFMAN,
             // Compression=3 covers both T.4 1-D and T.4 2-D; the
             // T4Options tag (292) distinguishes them on the wire.
@@ -358,13 +376,14 @@ impl TiffCompression {
 
     /// Compress `raw` per this scheme. For bilevel CCITT schemes the
     /// caller supplies the geometry; non-CCITT schemes ignore those
-    /// arguments. Errors only on CCITT (the others are infallible).
+    /// arguments.
     fn pack(self, raw: &[u8], width: u32, rows: u32) -> Result<Vec<u8>> {
         match self {
             TiffCompression::None => Ok(raw.to_vec()),
             TiffCompression::PackBits => Ok(pack_packbits(raw)),
             TiffCompression::Lzw => Ok(pack_lzw(raw)),
-            TiffCompression::Deflate => Ok(pack_deflate(raw)),
+            TiffCompression::Deflate => pack_deflate(raw),
+            TiffCompression::Zstd => pack_zstd(raw),
             TiffCompression::CcittRle => encode_ccitt(
                 raw,
                 width,

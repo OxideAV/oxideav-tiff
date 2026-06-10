@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/OxideAV/oxideav-tiff"
 homepage = "https://github.com/OxideAV/oxideav-tiff"
 authors = ["Mark Karpeles"]
-description = "Pure-Rust TIFF 6.0 image decoder + encoder + container for oxideav (None/CCITT-MH/CCITT-T4-1D/CCITT-T4-2D/CCITT-T6-G4/PackBits/LZW/Deflate/JPEG-in-TIFF-7; 1/4/8/16-bit; bilevel/gray/palette/RGB/CMYK/YCbCr; BigTIFF; tiles; multi-page)"
+description = "Pure-Rust TIFF 6.0 image decoder + encoder + container for oxideav (None/CCITT-MH/CCITT-T4-1D/CCITT-T4-2D/CCITT-T6-G4/PackBits/LZW/Deflate/ZSTD-50000/JPEG-in-TIFF-7; 1/4/8/16-bit; bilevel/gray/palette/RGB/CMYK/YCbCr; BigTIFF; tiles; multi-page)"
 readme = "README.md"
 keywords = ["multimedia", "image", "tiff", "codec", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::images"]
@@ -28,7 +28,16 @@ oxideav-core = { version = "0.1", optional = true }
 # `registry`, Compression=7 yields a precise "feature gated" error
 # rather than dragging both crates into a default-features=false build.
 oxideav-mjpeg = { version = "0.1", optional = true }
-miniz_oxide = "0.9"
+# `compcol` (Karpelès Lab's compression collection, the workspace-wide
+# choice for byte-stream codecs) supplies both general-purpose
+# compressors the TIFF wire format needs: the RFC 1950 zlib stream for
+# Compression=8 (Adobe Deflate) and the RFC 8478 Zstandard frame for
+# the Compression=50000 extension. `default-features = false` keeps
+# the dependency to exactly those two algorithms.
+compcol = { version = "0.6", default-features = false, features = [
+    "zlib",
+    "zstd",
+] }
 
 [features]
 default = ["registry"]

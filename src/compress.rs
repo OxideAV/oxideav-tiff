@@ -1,9 +1,14 @@
-//! Strip decompression for the four compression schemes we support:
-//! Compression=1 (None), Compression=32773 (PackBits), Compression=5
-//! (LZW), Compression=8 (Adobe Deflate / zlib).
+//! Strip decompression for the byte-stream compression schemes we
+//! support: Compression=1 (None), Compression=32773 (PackBits),
+//! Compression=5 (LZW), Compression=8 (Adobe Deflate / zlib), and
+//! Compression=50000 (Zstandard, the de-facto registry extension —
+//! see `docs/image/tiff/tiff-zstd-compression-50000.md`).
 //!
 //! All routines take the raw on-disk strip bytes and the expected
 //! decompressed length (in bytes) and return the decompressed bytes.
+//! Deflate and Zstandard defer to the `compcol` crate (the
+//! workspace-wide compression collection); PackBits and LZW are
+//! implemented here from the TIFF 6.0 spec text.
 
 use crate::error::{Result, TiffError as Error};
 
@@ -20,14 +25,14 @@ use crate::error::{Result, TiffError as Error};
 /// per-iteration input read).
 const MAX_INITIAL_RESERVE: usize = 64 * 1024;
 
-/// Upper bound on the *expansion ratio* of a single Deflate strip.
-/// `unpack_deflate` defers to `miniz_oxide`, which has no built-in
-/// bound on output size; without an explicit limit a 100-byte
-/// zlib stream can claim to expand to several gigabytes (a classic
-/// "zip bomb"). The cap is `expected_len` (from the IFD) clamped to
-/// `MAX_DEFLATE_OUTPUT`; both bounds are needed because
+/// Upper bound on the decompressed size of a single Deflate or
+/// Zstandard strip. Neither wire format bounds its own output;
+/// without an explicit limit a 100-byte stream can claim to expand
+/// to several gigabytes (a classic "zip bomb"). The cap passed to
+/// `compcol`'s capped decompressor is `expected_len` (from the IFD)
+/// clamped to `MAX_CODEC_OUTPUT`; both bounds are needed because
 /// `expected_len` itself can be attacker-chosen on a malformed file.
-const MAX_DEFLATE_OUTPUT: usize = 64 * 1024 * 1024;
+const MAX_CODEC_OUTPUT: usize = 64 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // PackBits — TIFF 6.0 Section 9
@@ -307,18 +312,34 @@ pub fn unpack_lzw(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
 
 pub fn unpack_deflate(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
     // Cap output to the smaller of the IFD-claimed `expected_len`
-    // and `MAX_DEFLATE_OUTPUT`. Without an explicit limit, a
+    // and `MAX_CODEC_OUTPUT`. Without an explicit limit, a
     // malformed stream can claim to expand a 100-byte payload into
-    // gigabytes; `miniz_oxide`'s `decompress_to_vec_zlib_with_limit`
-    // bails with `TINFLStatus::HasMoreOutput` once the cap is hit
-    // and we surface that as a normal decode error rather than an
-    // OOM abort. The cap is loose enough not to interfere with any
-    // legitimate single-strip TIFF (most encoders chunk at well
-    // under 64 MiB per strip), but tight enough to bound the
-    // worst-case per-call allocation.
-    let limit = expected_len.min(MAX_DEFLATE_OUTPUT);
-    miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(input, limit)
-        .map_err(|e| Error::invalid(format!("TIFF/Deflate: zlib inflate failed: {:?}", e.status)))
+    // gigabytes; `compcol`'s capped helper bails with
+    // `OutputLimitExceeded` once the cap is hit and we surface that
+    // as a normal decode error rather than an OOM abort. The cap is
+    // loose enough not to interfere with any legitimate single-strip
+    // TIFF (most encoders chunk at well under 64 MiB per strip), but
+    // tight enough to bound the worst-case per-call allocation.
+    let limit = expected_len.min(MAX_CODEC_OUTPUT) as u64;
+    compcol::vec::decompress_to_vec_capped::<compcol::zlib::Zlib>(input, limit)
+        .map_err(|e| Error::invalid(format!("TIFF/Deflate: zlib inflate failed: {e:?}")))
+}
+
+// ---------------------------------------------------------------------------
+// Zstandard — Compression=50000 (de-facto registry extension)
+// ---------------------------------------------------------------------------
+
+/// Decode one Compression=50000 strip / tile payload: a single
+/// self-contained Zstandard frame (RFC 8478, magic `0x28B52FFD`
+/// little-endian) over the post-predictor sample bytes. Per the trace
+/// doc `docs/image/tiff/tiff-zstd-compression-50000.md` §3, the codec
+/// is applied independently per strip / tile — no file-global stream,
+/// no cross-strip dictionary — so a plain one-shot frame decode with
+/// the same zip-bomb output cap as Deflate is the whole job.
+pub fn unpack_zstd(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
+    let limit = expected_len.min(MAX_CODEC_OUTPUT) as u64;
+    compcol::vec::decompress_to_vec_capped::<compcol::zstd::Zstd>(input, limit)
+        .map_err(|e| Error::invalid(format!("TIFF/ZSTD: Zstandard frame decode failed: {e:?}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -546,10 +567,21 @@ pub fn pack_lzw(input: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Deflate encode (zlib stream) using `miniz_oxide` at default
-/// compression level. Matches Compression=8 (Adobe Deflate).
-pub fn pack_deflate(input: &[u8]) -> Vec<u8> {
-    miniz_oxide::deflate::compress_to_vec_zlib(input, 6)
+/// Deflate encode (zlib stream) via `compcol` at its default
+/// compression level (6). Matches Compression=8 (Adobe Deflate).
+pub fn pack_deflate(input: &[u8]) -> Result<Vec<u8>> {
+    compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(input)
+        .map_err(|e| Error::invalid(format!("TIFF/Deflate: zlib deflate failed: {e:?}")))
+}
+
+/// Zstandard encode (one RFC 8478 frame) via `compcol` at its default
+/// compression level. Matches Compression=50000. The level is an
+/// encoder-side runtime parameter only — it is never stored in the
+/// TIFF file and the decoder is level-agnostic (trace doc §2) — so no
+/// knob is exposed here.
+pub fn pack_zstd(input: &[u8]) -> Result<Vec<u8>> {
+    compcol::vec::compress_to_vec::<compcol::zstd::Zstd>(input)
+        .map_err(|e| Error::invalid(format!("TIFF/ZSTD: Zstandard frame encode failed: {e:?}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -650,18 +682,91 @@ mod tests {
 
     #[test]
     fn deflate_output_is_bounded() {
-        // miniz_oxide's `decompress_to_vec_zlib` has no built-in
-        // bound on output size; `unpack_deflate` must cap at
-        // `MAX_DEFLATE_OUTPUT` to prevent zip-bomb OOMs. Encode a
-        // 64-byte zlib stream and confirm decode succeeds within
-        // the cap — we don't currently have a synthetic zip bomb in
-        // tree, so this is the "happy path doesn't regress"
-        // half of the contract; the panic-freedom half is covered
-        // by the fuzz target.
+        // The raw zlib wire format has no built-in bound on output
+        // size; `unpack_deflate` must cap at `MAX_CODEC_OUTPUT` to
+        // prevent zip-bomb OOMs. Encode a small zlib stream and
+        // confirm decode succeeds within the cap — the
+        // bound-violation half of the contract is exercised
+        // explicitly below (`deflate_cap_exceeded_errors`) and by
+        // the fuzz target.
         let src = vec![0u8; 1024];
-        let encoded = pack_deflate(&src);
+        let encoded = pack_deflate(&src).unwrap();
         let back = unpack_deflate(&encoded, src.len()).unwrap();
         assert_eq!(back, src);
+    }
+
+    #[test]
+    fn deflate_cap_exceeded_errors() {
+        // A stream that inflates past the IFD-claimed expected_len
+        // must surface a decode error, not silently truncate or
+        // OOM. 4096 zero bytes deflate to a few dozen bytes; claim
+        // the strip should only have been 16.
+        let src = vec![0u8; 4096];
+        let encoded = pack_deflate(&src).unwrap();
+        assert!(unpack_deflate(&encoded, 16).is_err());
+    }
+
+    #[test]
+    fn zstd_roundtrip_zeros() {
+        // Long single-byte run — the frame's RLE_Block sweet spot.
+        let src = vec![0u8; 4096];
+        let encoded = pack_zstd(&src).unwrap();
+        // One self-contained frame per strip: RFC 8478 magic first.
+        assert_eq!(&encoded[..4], &[0x28, 0xB5, 0x2F, 0xFD]);
+        let back = unpack_zstd(&encoded, src.len()).unwrap();
+        assert_eq!(back, src);
+    }
+
+    #[test]
+    fn zstd_roundtrip_random_8k() {
+        // Pseudo-random bytes (xorshift) — mostly incompressible,
+        // exercises the raw/compressed block fallback choices.
+        let mut s: u32 = 0x2545_F491;
+        let src: Vec<u8> = (0..8192)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                s as u8
+            })
+            .collect();
+        let encoded = pack_zstd(&src).unwrap();
+        let back = unpack_zstd(&encoded, src.len()).unwrap();
+        assert_eq!(back, src);
+    }
+
+    #[test]
+    fn zstd_roundtrip_textlike() {
+        // Repetitive structured payload — LZ77 matches + Huffman
+        // literals, the typical post-predictor image-row shape.
+        let motif = b"row of sample bytes 01234567 ";
+        let mut src = Vec::with_capacity(motif.len() * 512);
+        for _ in 0..512 {
+            src.extend_from_slice(motif);
+        }
+        let encoded = pack_zstd(&src).unwrap();
+        let back = unpack_zstd(&encoded, src.len()).unwrap();
+        assert_eq!(back, src);
+    }
+
+    #[test]
+    fn zstd_cap_exceeded_errors() {
+        // Same zip-bomb contract as Deflate: a frame expanding past
+        // the IFD-claimed expected_len is a decode error.
+        let src = vec![0u8; 4096];
+        let encoded = pack_zstd(&src).unwrap();
+        assert!(unpack_zstd(&encoded, 16).is_err());
+    }
+
+    #[test]
+    fn zstd_garbage_input_errors() {
+        // Not a Zstandard frame at all (wrong magic) — must error,
+        // not panic.
+        assert!(unpack_zstd(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00], 64).is_err());
+        // Truncated: valid magic, nothing after it.
+        assert!(unpack_zstd(&[0x28, 0xB5, 0x2F, 0xFD], 64).is_err());
+        // Empty payload.
+        assert!(unpack_zstd(&[], 64).is_err());
     }
 
     #[test]

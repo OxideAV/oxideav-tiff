@@ -131,6 +131,15 @@ pub const COMPRESSION_JPEG_OLD: u16 = 6;
 pub const COMPRESSION_JPEG_NEW: u16 = 7;
 pub const COMPRESSION_DEFLATE_ADOBE: u16 = 8;
 pub const COMPRESSION_PACKBITS: u16 = 32773;
+/// Zstandard (RFC 8478). De-facto registry extension value — there is
+/// no Adobe technical note for it; see the OxideAV trace doc
+/// `docs/image/tiff/tiff-zstd-compression-50000.md`. Structurally it
+/// follows the Compression=8 Deflate template: each strip / tile is
+/// one self-contained Zstandard frame (magic `0x28 0xB5 0x2F 0xFD`)
+/// over the post-predictor sample bytes, independent of photometric,
+/// planar configuration, and bit depth. The encoder compression level
+/// is an out-of-band runtime parameter, never stored in the file.
+pub const COMPRESSION_ZSTD: u16 = 50000;
 
 // --- Photometric interpretations (Section 3..6) -------------------------
 pub const PHOTO_WHITE_IS_ZERO: u16 = 0;

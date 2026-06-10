@@ -3,8 +3,10 @@
 //! Implements the *Aldus TIFF Revision 6.0 (June 1992)* baseline plus
 //! the universally-deployed Part 2 extensions (LZW with optional
 //! horizontal-differencing predictor; Adobe Deflate; YCbCr / CMYK
-//! photometrics; tiles), the multi-IFD chain (multi-page) and the
-//! Adobe Pagemaker 6.0 *BigTIFF* design (8-byte offsets, magic 43).
+//! photometrics; tiles), the multi-IFD chain (multi-page), the
+//! Adobe Pagemaker 6.0 *BigTIFF* design (8-byte offsets, magic 43),
+//! and the de-facto registry extension Compression = 50000
+//! (Zstandard).
 //! Spec-only clean-room: no external library source was consulted at
 //! any point.
 //!
@@ -17,8 +19,10 @@
 //!   L*-only, TIFF 6.0 §23, decoded to display Rgb24 / Gray8 via
 //!   Lab → XYZ@D65 → linear NTSC RGB → sRGB)
 //! * Bit depths: 1, 4, 8, 16 (per-strip and per-tile)
-//! * Compression: 1 None / 2 CCITT Modified Huffman / 3 CCITT T.4 1-D /
-//!   32773 PackBits / 5 LZW / 8 Deflate (zlib) /
+//! * Compression: 1 None / 2 CCITT Modified Huffman / 3 CCITT T.4
+//!   (1-D and 2-D) / 4 CCITT T.6 / 32773 PackBits / 5 LZW /
+//!   8 Deflate (zlib) / 50000 Zstandard (de-facto registry
+//!   extension; one RFC 8478 frame per strip or tile) /
 //!   7 JPEG-in-TIFF (TIFF Tech Note 2; routes each strip/tile through
 //!   `oxideav-mjpeg`)
 //! * Predictor: 1 (none) and 2 (horizontal differencing,
@@ -39,10 +43,10 @@
 //!   "CMYK Images") / YCbCr (8-bit chunky `(Y, Cb, Cr)` at
 //!   `YCbCrSubSampling = [1, 1]` chunky 4:4:4,
 //!   PhotometricInterpretation = 6 per TIFF 6.0 §21 "YCbCr Images")
-//! * Compression: None / PackBits / LZW / Deflate /
-//!   CCITT Modified Huffman (Compression=2) /
-//!   CCITT T.4 1-D (Compression=3, with optional T4Options bit 2
-//!   byte-aligned EOLs)
+//! * Compression: None / PackBits / LZW / Deflate / Zstandard
+//!   (Compression=50000) / CCITT Modified Huffman (Compression=2) /
+//!   CCITT T.4 1-D and 2-D (Compression=3, with optional T4Options
+//!   bit 2 byte-aligned EOLs) / CCITT T.6 (Compression=4)
 //! * Layout: single strip, `PlanarConfiguration = 2` (separate planes,
 //!   chunky-source), or tiled (TIFF 6.0 §15, chunky) — see
 //!   [`EncodePage::planar`] / [`EncodePage::tiling`]

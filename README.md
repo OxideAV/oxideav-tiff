@@ -6,30 +6,31 @@ Pure-Rust TIFF 6.0 image decoder + encoder + container for the
 Implements the *Aldus TIFF Revision 6.0 (June 1992)* baseline plus the
 universally-deployed Part 2 extensions (LZW + Deflate, tiles, YCbCr /
 CMYK photometrics, CCITT Modified Huffman + T.4 1-D), the multi-IFD
-chain (multi-page), and the Adobe Pagemaker 6.0 *BigTIFF* design
-(8-byte offsets, magic 43). Spec-only clean-room: no external library
-source was consulted.
+chain (multi-page), the Adobe Pagemaker 6.0 *BigTIFF* design
+(8-byte offsets, magic 43), and the de-facto registry extension
+`Compression = 50000` (Zstandard). Spec-only clean-room: no external
+library source was consulted.
 
 ## Decode
 
 | Photometric    | Bit depth      | Compression                        | Output       |
 | -------------- | -------------- | ---------------------------------- | ------------ |
-| WhiteIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate | `Gray8` |
-| WhiteIsZero    | 4 / 8          | None / PackBits / LZW / Deflate    | `Gray8`      |
-| WhiteIsZero    | 16             | None / PackBits / LZW / Deflate    | `Gray16Le`   |
-| BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate | `Gray8` |
-| BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate    | `Gray8` / `Gray16Le` |
-| **Transparency Mask** | 1       | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate | `Gray8` (interior = 0xFF, exterior = 0x00) |
-| Palette        | 4 / 8          | None / PackBits / LZW / Deflate    | `Rgb24`      |
-| RGB (3 chan)   | 8              | None / PackBits / LZW / Deflate    | `Rgb24`      |
-| RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate    | `Rgb48Le`    |
-| CMYK (4 chan)  | 8              | None / PackBits / LZW / Deflate    | `Rgb24`      |
-| YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **JPEG-in-TIFF** (Compression=7) | `Rgb24`      |
+| WhiteIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
+| WhiteIsZero    | 4 / 8          | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
+| WhiteIsZero    | 16             | None / PackBits / LZW / Deflate / **ZSTD** | `Gray16Le` |
+| BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
+| BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` / `Gray16Le` |
+| **Transparency Mask** | 1       | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` (interior = 0xFF, exterior = 0x00) |
+| Palette        | 4 / 8          | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` |
+| RGB (3 chan)   | 8              | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` |
+| RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb48Le` |
+| CMYK (4 chan)  | 8              | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` |
+| YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **ZSTD** / **JPEG-in-TIFF** (Compression=7) | `Rgb24` |
 | RGB (3 chan)   | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
 | BlackIsZero / WhiteIsZero | 8   | **JPEG-in-TIFF** (Compression=7)   | `Gray8`      |
 | CMYK (4 chan)  | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
-| **CIELab (3 chan)** | 8         | None / PackBits / LZW / Deflate    | `Rgb24` (Lab→XYZ@D65→linear NTSC→sRGB) |
-| **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate  | `Gray8`      |
+| **CIELab (3 chan)** | 8         | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` (Lab→XYZ@D65→linear NTSC→sRGB) |
+| **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
 
 `Predictor = 1` (no prediction) and `Predictor = 2` (horizontal
 differencing, per-component for `SamplesPerPixel > 1`) are both
@@ -124,7 +125,7 @@ The L\*-only path runs the same lightness-curve inverse as the
 3-sample render so a chromatically-neutral (a\* = b\* = 0) CIELab pixel
 in either layout produces the same gray level.
 
-Compressors accepted: None / PackBits / LZW / Deflate (the
+Compressors accepted: None / PackBits / LZW / Deflate / ZSTD (the
 byte-aligned, photometric-agnostic set the rest of the multi-bit
 photometric paths use). CCITT (Compression = 2/3/4) is bilevel-only
 per spec and rejected here; the JPEG-in-TIFF dispatch (Compression =
@@ -141,7 +142,7 @@ on-disk bit interpretation is fixed by §23 (L\* unsigned 0..255 →
 in -128..127) — and sets `PhotometricInterpretation = 8`,
 `SamplesPerPixel = 3` (or `1`), `BitsPerSample = [8,8,8]` (or `[8]`).
 The same compressor set the decode path accepts (None / PackBits /
-LZW / Deflate) is accepted on the encode side; CCITT (Compression =
+LZW / Deflate / ZSTD) is accepted on the encode side; CCITT (Compression =
 2/3/4) is rejected because it is bilevel-only per §10 / §11.
 `Predictor = 2` composes with both variants (per-component
 differencing with offset = `SamplesPerPixel`, identical to the
@@ -154,6 +155,53 @@ Tiled layout (§15) composes with both variants under chunky and, for
 `TileOffsets`). BigTIFF composes unchanged — the 3-entry
 `BitsPerSample` SHORT array (6 bytes) stays inline in the widened
 8-byte value/offset slot.
+
+### Zstandard (Compression = 50000)
+
+`Compression = 50000` is the de-facto registry extension for
+Zstandard (RFC 8478) — there is no Adobe technical note registering
+it; the numeric value, the `Predictor` (tag 317) interaction, and the
+per-segment frame discipline are transcribed in the OxideAV trace doc
+[`docs/image/tiff/tiff-zstd-compression-50000.md`](docs/image/tiff/tiff-zstd-compression-50000.md).
+Structurally the scheme is the `Compression = 8` Deflate template
+with the codec swapped: each strip or tile is **one self-contained
+Zstandard frame** (magic `0x28 0xB5 0x2F 0xFD`) over the
+post-predictor sample bytes — no file-global stream, no cross-strip
+dictionary — and `StripByteCounts` / `TileByteCounts` give each
+frame's compressed length. Because the frame wraps whatever byte
+stream the segment would otherwise contain, the scheme is independent
+of `PhotometricInterpretation`, `BitsPerSample`,
+`PlanarConfiguration`, and the strip-vs-tile organisation; the
+decoder reuses the exact predictor-reversal and photometric assembly
+the Deflate path runs. `Predictor = 2` (§14 horizontal differencing)
+is reversed *after* the frame decode per the trace doc §5 ordering;
+`Predictor = 3` (the floating-point predictor) is rejected per the
+§14 reader rule ("the reader must give up" on an unrecognised
+scheme) rather than mis-decoded. Frame decode is bounded by the
+IFD-declared segment size so a malformed frame claiming a multi-GiB
+expansion errors instead of OOM-ing.
+
+On the encode side, `TiffCompression::Zstd` composes with every
+byte-aligned pixel format plus `Predictor = 2`,
+`PlanarConfiguration = 2`, §15 tiling, BigTIFF, and the multi-page
+chain — the same axes as Deflate. The compression level is an
+out-of-band encoder runtime parameter (range 1–22 in the de-facto
+registry; never stored in the file, decoders are level-agnostic),
+so the writer simply uses its compression backend's default. Both
+directions go through [`compcol`](https://crates.io/crates/compcol)'s
+Zstandard codec (this round also migrated the Deflate path to
+`compcol`'s zlib, dropping the previous deflate dependency).
+Validation is three-layered (`tests/zstd_roundtrip.rs`): 17
+binary-independent self-roundtrips (Gray8 / Gray16Le / Rgb24 /
+Palette8 / Bilevel × predictor / planar / tiled-with-partial-edges /
+BigTIFF / multi-page), hand-built classic-II fixtures whose strips
+are hand-assembled RFC 8478 `Raw_Block` frames (wire bytes our
+encoder never emits), and black-box cross-checks against `tiffcp`
+(our `Compression = 50000` output transcoded to `-c none` by the
+independent binary, and independently-produced `-c zstd` /
+`-c zstd:2` files decoded by us — both compared pixel-exact).
+`Compression = 50001` (WebP) from the same registry page remains
+unimplemented.
 
 ### Transparency Mask (PhotometricInterpretation = 4)
 
@@ -172,7 +220,7 @@ result with the main image directly. On the encode side
 (tag 254) — the companion field the spec uses to let multi-page
 readers spot a mask IFD without consulting the photometric tag. Mask
 pages accept the same compressors a `Bilevel` page does
-(None / PackBits / LZW / Deflate / CCITT-MH / CCITT-T.4-1D); the spec
+(None / PackBits / LZW / Deflate / ZSTD / CCITT-MH / CCITT-T.4-1D); the spec
 recommends PackBits. Tiled, planar, and Predictor=2 layouts are
 rejected for 1-bit input on both encode and decode (sub-byte tile
 slicing and §14 component-differencing don't apply to packed bits).
@@ -255,15 +303,15 @@ components.
 
 | Photometric    | Bit depth | Compression                                                 | API call                |
 | -------------- | --------- | ----------------------------------------------------------- | ----------------------- |
-| WhiteIsZero    | 1         | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)**       | `EncodePixelFormat::Bilevel`   |
-| **Transparency Mask** | 1  | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate         | `EncodePixelFormat::TransparencyMask` (sets PhotometricInterpretation = 4 and NewSubfileType bit 2) |
-| BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Gray8` / `::Gray16Le` |
-| RGB            | 8         | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Rgb24`     |
-| Palette        | 8         | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Palette8`  |
-| **CIELab (3 chan)** | 8    | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::CieLab8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 3, BitsPerSample = [8,8,8]) |
-| **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate                          | `EncodePixelFormat::CieLabL8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 1) |
-| **CMYK (4 chan)** | 8     | None / PackBits / LZW / Deflate                             | `EncodePixelFormat::Cmyk32` (writes PhotometricInterpretation = 5, SamplesPerPixel = 4, BitsPerSample = [8,8,8,8], plus optional `InkSet = 1` / `NumberOfInks = 4`) |
-| **YCbCr (3 chan, 4:4:4)** | 8 | None / PackBits / LZW / Deflate                          | `EncodePixelFormat::YCbCr24` (writes PhotometricInterpretation = 6, SamplesPerPixel = 3, BitsPerSample = [8,8,8], `YCbCrSubSampling = [1, 1]`, `YCbCrPositioning = 1`, `ReferenceBlackWhite = [0,255,128,255,128,255]` no-headroom full-range) |
+| WhiteIsZero    | 1         | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `EncodePixelFormat::Bilevel` |
+| **Transparency Mask** | 1  | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate / **ZSTD** | `EncodePixelFormat::TransparencyMask` (sets PhotometricInterpretation = 4 and NewSubfileType bit 2) |
+| BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Gray8` / `::Gray16Le` |
+| RGB            | 8         | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Rgb24`     |
+| Palette        | 8         | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Palette8`  |
+| **CIELab (3 chan)** | 8    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::CieLab8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 3, BitsPerSample = [8,8,8]) |
+| **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**             | `EncodePixelFormat::CieLabL8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 1) |
+| **CMYK (4 chan)** | 8     | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Cmyk32` (writes PhotometricInterpretation = 5, SamplesPerPixel = 4, BitsPerSample = [8,8,8,8], plus optional `InkSet = 1` / `NumberOfInks = 4`) |
+| **YCbCr (3 chan, 4:4:4)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**               | `EncodePixelFormat::YCbCr24` (writes PhotometricInterpretation = 6, SamplesPerPixel = 3, BitsPerSample = [8,8,8], `YCbCrSubSampling = [1, 1]`, `YCbCrPositioning = 1`, `ReferenceBlackWhite = [0,255,128,255,128,255]` no-headroom full-range) |
 
 `TiffCompression::CcittRle` selects Modified Huffman
 (`Compression = 2`, TIFF 6.0 §10), `TiffCompression::CcittT4OneD`
@@ -335,7 +383,7 @@ geometry by replicating the last visible column / row (§15 "Padding"), so
 every tile is the same size before compression; the decoder displays only
 the `ImageWidth × ImageLength` region and ignores the padding. Works for
 the byte-aligned chunky formats (`Gray8` / `Gray16Le` / `Rgb24` /
-`Palette8`) under None / PackBits / LZW / Deflate, with or without
+`Palette8`) under None / PackBits / LZW / Deflate / ZSTD, with or without
 `Predictor = 2` (applied per-tile). Tiling is rejected on `Bilevel`
 input and the CCITT compressors. `tiffcp -c
 none` transcodes our tiled output back to an uncompressed TIFF that
@@ -362,7 +410,7 @@ suite encodes the identical pixels both tiled and strip-based, decodes
 both, and asserts the planes are byte-identical, so tile geometry,
 ordering, per-tile predictor reversal, and §15 edge padding are checked
 against the strip decode of the same image across Gray8 / Gray16Le /
-Rgb24 / Palette8 (None / PackBits / LZW / Deflate, with and without the
+Rgb24 / Palette8 (None / PackBits / LZW / Deflate / ZSTD, with and without the
 predictor) and the full range of edge-tile geometries (exact-fit,
 partial edges, non-square tiles, oversized single tile, 1-pixel
 overhang). Sub-byte (1-/4-bit) tiled images are not yet supported.
@@ -479,13 +527,18 @@ errors out — classic and BigTIFF IFD layouts are wire-incompatible).
   byte-aligned compressors; encode composes with `Predictor = 2`,
   `PlanarConfiguration = 2` on `CieLab8`, tiled layout, and BigTIFF
   per the §23 / §14 / §15 spec rules).
+- Zstandard `Compression = 50000` **decodes + encodes** as of this
+  round (see the dedicated section above); the sibling de-facto
+  registry value `Compression = 50001` (WebP — one VP8/VP8L
+  bitstream per strip / tile) remains unimplemented and returns the
+  generic unsupported-compression error.
 - DNG / GeoTIFF / EXIF blob extraction
 - Encoder-side planar (`PlanarConfiguration = 2`) writing is now
-  supported for `Rgb24` under None / PackBits / LZW / Deflate (with or
+  supported for `Rgb24` under None / PackBits / LZW / Deflate / ZSTD (with or
   without `Predictor = 2`), both strip-based and tiled (one tile grid
   per component plane, §15); decode covers the same plus CCITT. Tiled
   write (chunky, §15) covers `Gray8` / `Gray16Le` / `Rgb24` /
-  `Palette8` under None / PackBits / LZW / Deflate with the optional
+  `Palette8` under None / PackBits / LZW / Deflate / ZSTD with the optional
   `Predictor = 2`. Encoder-side YCbCr is `YCbCrSubSampling = [1, 1]`
   chunky 4:4:4 only as of this round; chroma-subsampled writes
   (`[2, 1]` / `[2, 2]` / `[4, 1]` / `[4, 2]` / `[1, 2]`) and YCbCr
@@ -505,8 +558,9 @@ oxideav_tiff::register(&mut codecs, &mut containers);
 
 A `cargo-fuzz` decoder target lives at `fuzz/fuzz_targets/decode.rs`.
 It drives arbitrary bytes through `decode_tiff`, `decode_tiff_all`,
-`parse_header`, `parse_ifd`, and the three public compression
-unpackers (`unpack_packbits` / `unpack_lzw` / `unpack_deflate`). The
+`parse_header`, `parse_ifd`, and the four public compression
+unpackers (`unpack_packbits` / `unpack_lzw` / `unpack_deflate` /
+`unpack_zstd`). The
 contract under test is decoder-only panic-freedom — every public
 surface must return a `Result` for any input rather than abort,
 debug-overflow, OOM, or OOB-index.

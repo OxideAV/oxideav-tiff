@@ -44,9 +44,9 @@
 //!   chain; a crafted file that points back to itself must error
 //!   from the visited-set check, not OOM on the next-IFD walk.
 //! * **Compression unpacker direct entry** — `unpack_packbits` /
-//!   `unpack_lzw` / `unpack_deflate` are reachable as public API for
-//!   standalone consumers; each must short-decompress on truncated
-//!   input rather than panic.
+//!   `unpack_lzw` / `unpack_deflate` / `unpack_zstd` are reachable
+//!   as public API for standalone consumers; each must
+//!   short-decompress on truncated input rather than panic.
 //!
 //! No external library worth dlopen-ing as a cross-decode oracle:
 //! workspace policy bars libtiff / image-tiff vendoring or reference
@@ -56,7 +56,7 @@
 //! crate-local roundtrip tests.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_tiff::compress::{unpack_deflate, unpack_lzw, unpack_packbits};
+use oxideav_tiff::compress::{unpack_deflate, unpack_lzw, unpack_packbits, unpack_zstd};
 use oxideav_tiff::ifd::{parse_header, parse_ifd};
 use oxideav_tiff::{decode_tiff, decode_tiff_all};
 
@@ -111,5 +111,6 @@ fuzz_target!(|data: &[u8]| {
         let _ = unpack_packbits(rest, expected);
         let _ = unpack_lzw(rest, expected);
         let _ = unpack_deflate(rest, expected);
+        let _ = unpack_zstd(rest, expected);
     }
 });

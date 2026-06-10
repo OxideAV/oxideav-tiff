@@ -3,12 +3,6 @@
 version = 4
 
 [[package]]
-name = "adler2"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
-
-[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -37,6 +31,12 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "compcol"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54b8ffee98f7c1d52a9efb2295c6c35a44aaab9f551793e11cb5f3b57557ea50"
 
 [[package]]
 name = "find-msvc-tools"
@@ -95,15 +95,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "miniz_oxide"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
-dependencies = [
- "adler2",
-]
-
-[[package]]
 name = "oxideav-core"
 version = "0.1.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -125,9 +116,9 @@ dependencies = [
 
 [[package]]
 name = "oxideav-tiff"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
- "miniz_oxide",
+ "compcol",
  "oxideav-core",
  "oxideav-mjpeg",
 ]
