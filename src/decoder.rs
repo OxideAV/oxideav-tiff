@@ -1350,11 +1350,14 @@ fn decompress_block(
         COMPRESSION_CCITT_T4 => {
             let p = ccitt
                 .ok_or_else(|| Error::invalid("TIFF: CCITT-T4 compression requires CcittParams"))?;
-            if p.t4_options & T4OPT_UNCOMPRESSED != 0 {
-                return Err(Error::invalid(
-                    "TIFF: T4 uncompressed-mode extension (T4Options bit 1) not supported",
-                ));
-            }
+            // T4Options bit 1 ("uncompressed mode allowed") is a writer
+            // capability flag, not a per-stream requirement: the
+            // uncompressed-mode segments are self-delimiting (entrance
+            // code `0000001111`, exit code `0000001T`…) and the 2-D
+            // READ decoder handles them inline whether or not the bit
+            // is set, so we no longer reject the flag. The decode of an
+            // actual uncompressed segment lives in
+            // `ccitt::decode_uncompressed_segment` (Table 5/T.4).
             let eol_byte_aligned = p.t4_options & T4OPT_EOL_BYTE_ALIGNED != 0;
             let variant = if p.t4_options & T4OPT_2D_CODING != 0 {
                 CcittVariant::T4TwoD { eol_byte_aligned }
@@ -1367,14 +1370,20 @@ fn decompress_block(
             let p = ccitt
                 .ok_or_else(|| Error::invalid("TIFF: CCITT-T6 compression requires CcittParams"))?;
             // T6Options (tag 293): only bit 1 ("uncompressed mode
-            // allowed") is defined per TIFF 6.0 §11. Bit 0 is
-            // reserved. The uncompressed extension is out of scope
-            // for this implementation (the docs flag it as optional
-            // and we reject it consistently with the T.4 path).
-            if p.t6_options & T6OPT_UNCOMPRESSED != 0 {
-                return Err(Error::invalid(
-                    "TIFF: T6 uncompressed-mode extension (T6Options bit 1) not supported",
-                ));
+            // allowed") is defined per TIFF 6.0 §11; bit 0 is reserved
+            // and all higher bits are undefined. Bit 1 is a
+            // writer-capability hint, not a per-stream requirement —
+            // uncompressed-mode segments are self-delimiting and the
+            // 2-D READ decoder (`ccitt::decode_uncompressed_segment`,
+            // Table 4/T.6 §2.3.1) handles them inline regardless of the
+            // bit, so we accept the flag. We still reject any *other*
+            // bit being set rather than silently ignore a tag the spec
+            // doesn't define.
+            if p.t6_options & !T6OPT_UNCOMPRESSED != 0 {
+                return Err(Error::invalid(format!(
+                    "TIFF: T6Options has undefined bits set (0x{:x}); only bit 1 is defined",
+                    p.t6_options
+                )));
             }
             decode_ccitt(raw, p.width, p.rows, CcittVariant::T6, p.fill)
         }

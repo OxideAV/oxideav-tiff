@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- CCITT 2-D **uncompressed-mode decode** (Table 5/T.4 = Table 4/T.6
+  §2.3.1), transcribed clean-room from the staged ITU-T PDFs into
+  `docs/image/tiff/ccitt-t4-t6-fax-codes.md` §4. When a T.4-2D / T.6
+  (Group 4) coded row reaches the `0000001xxx` (`xxx = 111`) entrance
+  code, the READ decoder now switches to literal-pixel transmission —
+  unary image-pattern codes (`z` whites + 1 black for `z ≤ 4`, the
+  `000001` 5-white make-up) and the `0000001T`…`00000000001T` exit
+  codes whose trailing tag bit gives the colour of the next coded run
+  — then resumes Pass / Horizontal / Vertical coding from the
+  post-exit position. The dispatch no longer rejects `T4Options`
+  bit 1 / `T6Options` bit 1 ("uncompressed mode allowed") since those
+  are writer-capability hints and the segments are self-delimiting;
+  the T.6 dispatch additionally rejects any *undefined* `T6Options`
+  bit. Validated by 8 new `ccitt`-module tests: 3 spec-exact
+  hand-built fixtures (image-pattern byte, long-white make-up,
+  exit-code trailing-white field) and 5 encode→decode self-roundtrips
+  driven by a test-only `encode_uncompressed_segment` helper (the
+  production READ encoder never emits uncompressed mode). Bounds-
+  checked so a malformed segment overrunning the row width or an
+  over-long unary prefix errors cleanly instead of panicking.
+
 - Zstandard `Compression = 50000` decode **and** encode — the
   de-facto registry extension transcribed in
   `docs/image/tiff/tiff-zstd-compression-50000.md`. Each strip / tile

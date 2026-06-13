@@ -339,12 +339,19 @@ fn decode_two_d_row(
                 a0_is_white = !a0_is_white;
             }
             TwoDMode::Uncompressed => {
-                // T.4 Table 5 / T.6 §2.2.4 uncompressed mode is
-                // optional and the docs flag it as out of scope for
-                // this implementation. Reject explicitly.
-                return Err(Error::invalid(
-                    "TIFF/CCITT: 2-D uncompressed mode (extension `0000001111`) not supported",
-                ));
+                // T.4 Table 5/T.4 / T.6 Table 4/T.6 (§2.3.1)
+                // uncompressed mode. The extension code `0000001111`
+                // we just read switches to literal pixel transmission;
+                // `decode_uncompressed_segment` consumes the image-
+                // pattern code words, writes the literal pixels into
+                // `out` from `a0`, and reads the exit code (whose
+                // trailing tag bit gives the colour of the next coded
+                // run). It returns the post-exit `(a0, a0_is_white)`
+                // so the surrounding READ loop continues seamlessly.
+                let (new_a0, new_white) =
+                    decode_uncompressed_segment(bits, out, a0, a0_is_white, width)?;
+                a0 = new_a0;
+                a0_is_white = new_white;
             }
             TwoDMode::Extension1D => {
                 // T.4 only (not T.6). The 1-D extension `000000001xxx`
@@ -364,6 +371,106 @@ fn decode_two_d_row(
         )));
     }
     Ok(())
+}
+
+/// Decode one *uncompressed-mode* segment (Table 5/T.4 = Table 4/T.6)
+/// starting at coding-line position `a0` whose run colour is
+/// `a0_is_white`. The entrance code `0000001111` has already been
+/// consumed by `next_two_d_mode`; this routine reads the literal
+/// image-pattern code words, writes the resulting pixels into `out`,
+/// reads the exit code, and returns the `(a0, a0_is_white)` state for
+/// the surrounding 2-D READ loop to resume from.
+///
+/// Wire format (docs `ccitt-t4-t6-fax-codes.md` §4, transcribed from
+/// the staged T.4 / T.6 PDFs):
+///
+/// * Image-pattern codes are unary: `z` zero bits then a `1`.
+///   - `z` in `0..=4` → emit `z` white pixels then 1 black pixel
+///     (patterns `1`, `01`, `001`, `0001`, `00001`).
+///   - `z == 5` → the make-up pattern `000001` = exactly 5 white
+///     pixels and no black; the segment continues with the next
+///     pattern code (this is how a white run longer than 4 is
+///     transmitted).
+/// * Exit codes are `0000001T` … `00000000001T`: `6 + m` zero bits
+///   (`m` in `0..=4`) then a `1`, then a tag bit `T`. They emit `m`
+///   trailing white pixels and leave uncompressed mode; `T = 1` means
+///   the next coded run is black, `T = 0` means white. (So the colour
+///   `out` resumes coding with is `a0_is_white = (T == 0)`.)
+///
+/// The unary zero count therefore disambiguates pattern (`z ≤ 5`) from
+/// exit (`z ≥ 6`) on a single left-to-right bit walk with no
+/// lookahead, exactly as the spec's prefix-free table guarantees.
+fn decode_uncompressed_segment(
+    bits: &mut BitReader<'_>,
+    out: &mut [u8],
+    mut a0: usize,
+    a0_is_white: bool,
+    width: usize,
+) -> Result<(usize, bool)> {
+    // The very first picture element coded in uncompressed mode keeps
+    // the colour `a0_is_white` only for the leading white run; each
+    // pattern emits its own white pixels then (optionally) a black
+    // pixel, so we drive `out` directly from the pattern colours rather
+    // than the surrounding-loop colour.
+    let _ = a0_is_white;
+    loop {
+        // Count leading zero bits.
+        let mut zeros: usize = 0;
+        loop {
+            let bit = bits.read_bit().ok_or_else(|| {
+                Error::invalid("TIFF/CCITT: stream exhausted in uncompressed-mode pattern")
+            })?;
+            if bit == 1 {
+                break;
+            }
+            zeros += 1;
+            // Guard against a runaway all-zero stream: the longest
+            // legal prefix before the terminating `1` is 10 zeros
+            // (exit code `00000000001T`). Anything longer is malformed.
+            if zeros > 10 {
+                return Err(Error::invalid(
+                    "TIFF/CCITT: uncompressed-mode code exceeds 11 bits (malformed)",
+                ));
+            }
+        }
+
+        if zeros <= 4 {
+            // Pattern `0^zeros 1` → `zeros` white + 1 black.
+            let white_end = a0 + zeros;
+            if white_end + 1 > width {
+                return Err(Error::invalid(format!(
+                    "TIFF/CCITT: uncompressed pattern overruns width {width} at a0={a0}"
+                )));
+            }
+            // White pixels are already 0 in `out`; set the black pixel.
+            fill_run(out, white_end, white_end + 1, false);
+            a0 = white_end + 1;
+        } else if zeros == 5 {
+            // Make-up `000001` → 5 white pixels, no black, continue.
+            let new_a0 = a0 + 5;
+            if new_a0 > width {
+                return Err(Error::invalid(format!(
+                    "TIFF/CCITT: uncompressed make-up overruns width {width} at a0={a0}"
+                )));
+            }
+            a0 = new_a0;
+        } else {
+            // Exit code: `6 + m` zeros (m = zeros - 6, 0..=4), then 1,
+            // then tag bit T. Emit `m` trailing white pixels.
+            let m = zeros - 6;
+            let new_a0 = a0 + m;
+            if new_a0 > width {
+                return Err(Error::invalid(format!(
+                    "TIFF/CCITT: uncompressed exit trailing whites overrun width {width} at a0={a0}"
+                )));
+            }
+            let tag = bits.read_bit().ok_or_else(|| {
+                Error::invalid("TIFF/CCITT: stream exhausted reading uncompressed-mode exit tag")
+            })?;
+            // T = 1 → next run black → a0_is_white = false.
+            return Ok((new_a0, tag == 0));
+        }
+    }
 }
 
 /// 2-D mode codes, decoded form. The `Vertical` offset is in pixels,
@@ -899,6 +1006,99 @@ fn encode_two_d_row(bw: &mut BitWriter, reference: &[u8], row: &[u8], width: usi
             }
         }
     }
+}
+
+/// Encode one *uncompressed-mode* segment (Table 5/T.4 = Table 4/T.6,
+/// docs §4) covering the coding-line span `[a0, end)` of `row`. Emits
+/// the 2-D entrance code `0000001111`, then the literal image-pattern
+/// code words for the pixels in the span, then the exit code whose
+/// trailing tag bit `next_run_black` gives the colour of the run that
+/// resumes coded (Pass/H/V) mode at `end`.
+///
+/// This is the exact dual of [`decode_uncompressed_segment`]. The
+/// production READ encoder ([`encode_two_d_row`]) never selects
+/// uncompressed mode (it is an optional bit-rate-control extension,
+/// not a compression win for facsimile content), so this helper exists
+/// to drive the spec-exact self-roundtrip tests that prove the decode
+/// path against bytes our own writer would otherwise never emit.
+///
+/// Pattern emission walks `[a0, end)` run by run. A white run of `w`
+/// pixels followed by a black pixel is `floor(w/5)` make-up codes
+/// `000001` (5 whites each) then the pattern `0^(w%5) 1` (the residual
+/// whites plus the black terminator). A black run of length `b` is
+/// `b` copies of pattern `1` (each = one black pixel; a leading-zero
+/// count of 0). The final trailing white run before `end` (which has
+/// no black terminator) is folded into the exit code's `m` value
+/// (0..=4 trailing whites) plus any whole-5 make-ups ahead of it.
+#[cfg(test)]
+fn encode_uncompressed_segment(
+    bw: &mut BitWriter,
+    row: &[u8],
+    a0: usize,
+    end: usize,
+    next_run_black: bool,
+) {
+    // Entrance code: the 2-D extension `0000001` + `xxx = 111`.
+    bw.write(0b0000001111, 10);
+
+    let mut x = a0;
+    // Emit complete (white-run + black-pixel) image patterns until the
+    // last pixel of the span is consumed; the trailing white run (if
+    // any) goes into the exit code.
+    while x < end {
+        let pixel_black = get_bit(row, x) == 1;
+        if pixel_black {
+            // Pattern `1` = one black pixel.
+            bw.write(0b1, 1);
+            x += 1;
+        } else {
+            // Measure the white run [x, x+w).
+            let mut w = 0usize;
+            while x + w < end && get_bit(row, x + w) == 0 {
+                w += 1;
+            }
+            let run_end = x + w;
+            if run_end < end {
+                // White run terminated by a black pixel: emit the
+                // whites as make-ups + a residual pattern that carries
+                // the terminating black.
+                let makeups = w / 5;
+                let residual = w % 5;
+                for _ in 0..makeups {
+                    bw.write(0b000001, 6); // `00000` = 5 whites
+                }
+                // Pattern `0^residual 1` = `residual` whites + 1 black.
+                bw.write(1, (residual + 1) as u32);
+                x = run_end + 1; // consumed the black pixel too
+            } else {
+                // Trailing white run with no black terminator: the
+                // exit code carries up to 4 of these; the rest are
+                // whole-5 make-ups emitted first.
+                let mut trailing = w;
+                while trailing > 4 {
+                    bw.write(0b000001, 6); // 5 whites
+                    trailing -= 5;
+                }
+                emit_uncompressed_exit(bw, trailing, next_run_black);
+                return;
+            }
+        }
+    }
+    // The span ended exactly on a black pixel (no trailing whites):
+    // emit the exit code with m = 0.
+    emit_uncompressed_exit(bw, 0, next_run_black);
+}
+
+/// Emit an uncompressed-mode exit code carrying `m` trailing white
+/// pixels (`m` in `0..=4`) and the tag bit. Exit codes are
+/// `0000001T` … `00000000001T`: `6 + m` zeros, a `1`, then the tag.
+#[cfg(test)]
+fn emit_uncompressed_exit(bw: &mut BitWriter, m: usize, next_run_black: bool) {
+    debug_assert!(m <= 4, "exit-code trailing-white count must be 0..=4");
+    // (6 + m) zero bits then a 1: that is the value `1` in (6 + m + 1)
+    // bits. Then the 1-bit tag (black = 1, white = 0).
+    bw.write(1, (6 + m + 1) as u32);
+    bw.write(next_run_black as u32, 1);
 }
 
 /// Decompose one row of MSB-first packed bilevel bytes into a
@@ -2095,16 +2295,176 @@ mod tests {
     }
 
     #[test]
-    fn t6_reject_uncompressed_extension() {
-        // The decoder rejects uncompressed mode explicitly (docs flag
-        // it as out of scope).
+    fn t6_uncompressed_mode_spec_exact_pattern_byte() {
+        // Hand-built spec-exact T.6 row that opens straight into
+        // uncompressed mode and codes the literal 8-pixel pattern
+        // `0100_0010` = white, black, 4×white, black, white. Wire
+        // (docs §4 Table 4/T.6):
+        //   entrance  0000001111   (10 bits)
+        //   pattern   01           → 1 white + 1 black  (pixels 0,1)
+        //   pattern   00001        → 4 white + 1 black  (pixels 2..6, black at 6)
+        //   exit      0000001 1    → m=0 trailing white, tag T=0 (white run next)
+        // After the exit a0 = 7 with one white pixel still to code, so
+        // the following V(0) finishes the row against the imaginary
+        // all-white reference.
         let mut bw = BitWriter::new();
-        bw.write(0b0000001111, 10); // Uncompressed-extension
+        bw.write(0b0000001111, 10); // entrance
+        bw.write(0b01, 2); // 1 white + 1 black → pixels 0,1
+        bw.write(0b00001, 5); // 4 white + 1 black → pixels 2..6 (black @6)
+        bw.write(0b0000001, 7); // exit, m=0
+        bw.write(0b0, 1); // tag T=0 → next run white
+        bw.write(0b1, 1); // V(0) codes the final white pixel (a0=7→8)
         let bytes = bw.finish();
-        let r = decode_ccitt(&bytes, 8, 1, CcittVariant::T6, FillOrder::MsbFirst);
-        assert!(r.is_err());
-        let msg = format!("{}", r.err().unwrap());
-        assert!(msg.contains("uncompressed"), "got: {msg}");
+        let got = decode_ccitt(&bytes, 8, 1, CcittVariant::T6, FillOrder::MsbFirst).unwrap();
+        // pixels: 0=w,1=b,2..5=w,6=b,7=w → 0b0100_0010 = 0x42.
+        assert_eq!(got, vec![0x42u8]);
+    }
+
+    #[test]
+    fn t6_uncompressed_make_up_long_white_run() {
+        // A white run longer than 4 needs the `000001` (5-white)
+        // make-up pattern. Code a 16-px row whose first 13 pixels are
+        // white and the last 3 black, entirely in uncompressed mode:
+        //   entrance 0000001111
+        //   make-up  000001       → 5 white  (pixels 0..5)
+        //   make-up  000001       → 5 white  (pixels 5..10)
+        //   pattern  0001          → 3 white + 1 black (pixels 10..13, black@13)
+        //   pattern  1             → 1 black (pixel 14)
+        //   pattern  1             → 1 black (pixel 15)
+        //   exit     0000001 1     → m=0, tag T=0
+        let mut bw = BitWriter::new();
+        bw.write(0b0000001111, 10);
+        bw.write(0b000001, 6); // 5 white
+        bw.write(0b000001, 6); // 5 white
+        bw.write(0b0001, 4); // 3 white + 1 black (black @13)
+        bw.write(0b1, 1); // black @14
+        bw.write(0b1, 1); // black @15
+        bw.write(0b0000001, 7); // exit m=0
+        bw.write(0b0, 1); // tag
+        let bytes = bw.finish();
+        let got = decode_ccitt(&bytes, 16, 1, CcittVariant::T6, FillOrder::MsbFirst).unwrap();
+        // 13 white then 3 black → 0b00000000 0000_0111 = [0x00, 0x07].
+        assert_eq!(got, vec![0x00u8, 0x07u8]);
+    }
+
+    #[test]
+    fn t6_uncompressed_exit_trailing_white_bits() {
+        // Exercise the exit code's `m` trailing-white field. Code an
+        // 8-px row `1000_0000` = 1 black then 7 white, all in
+        // uncompressed mode:
+        //   entrance 0000001111
+        //   pattern  1            → 1 black (pixel 0)
+        //   make-up  000001       → 5 white (pixels 1..6)
+        //   exit     000000001 1  → m=2 trailing white (pixels 6,7), tag T=0
+        let mut bw = BitWriter::new();
+        bw.write(0b0000001111, 10);
+        bw.write(0b1, 1); // black @0
+        bw.write(0b000001, 6); // 5 white (1..6)
+        bw.write(0b000000001, 9); // exit, m=2 (6+2 zeros then 1)
+        bw.write(0b0, 1); // tag
+        let bytes = bw.finish();
+        let got = decode_ccitt(&bytes, 8, 1, CcittVariant::T6, FillOrder::MsbFirst).unwrap();
+        // 1 black then 7 white → 0b1000_0000 = 0x80.
+        assert_eq!(got, vec![0x80u8]);
+    }
+
+    /// Encode an entire single bilevel row in uncompressed mode (T.6
+    /// framing: no EOL, one 2-D row) and assert it decodes back to the
+    /// same pixels. Proves `decode_uncompressed_segment` is the exact
+    /// inverse of the spec's pattern/exit emission across a span of
+    /// representative patterns.
+    fn uncompressed_row_roundtrip(pixels: &[u8]) {
+        let width = pixels.len();
+        let packed = pack_row_msb(pixels);
+        // `encode_uncompressed_segment` writes into the production
+        // `super::BitWriter` (the test module shadows it with a local
+        // copy for hand-built fixtures).
+        let mut bw = super::BitWriter::new();
+        // Whole row in one uncompressed segment, a0 = 0 .. width.
+        // `next_run_black = false` is degenerate here (the row ends at
+        // width so no run follows), so the tag bit is a don't-care.
+        encode_uncompressed_segment(&mut bw, &packed, 0, width, false);
+        let bytes = bw.finish();
+        let got = decode_ccitt(
+            &bytes,
+            width as u32,
+            1,
+            CcittVariant::T6,
+            FillOrder::MsbFirst,
+        )
+        .unwrap();
+        let unpacked = unpack_row_msb(&got, width);
+        assert_eq!(unpacked, pixels, "uncompressed roundtrip mismatch");
+    }
+
+    #[test]
+    fn uncompressed_roundtrip_solid_white() {
+        uncompressed_row_roundtrip(&[0u8; 24]);
+    }
+
+    #[test]
+    fn uncompressed_roundtrip_solid_black() {
+        uncompressed_row_roundtrip(&[1u8; 24]);
+    }
+
+    #[test]
+    fn uncompressed_roundtrip_alternating() {
+        let row: Vec<u8> = (0..16).map(|i| (i % 2) as u8).collect();
+        uncompressed_row_roundtrip(&row);
+    }
+
+    #[test]
+    fn uncompressed_roundtrip_runs_of_all_residual_lengths() {
+        // White runs of every residual length mod 5 (0..=4) plus a
+        // long make-up run, each followed by a black pixel, and a
+        // trailing white run — exercises every encode branch and the
+        // exit-code `m` field.
+        // Layout (pixel = 1 black / 0 white):
+        //   3 white, black, 0 white, black, 1 white, black,
+        //   2 white, black, 4 white, black, 7 white, black,
+        //   5 trailing white.
+        let mut row: Vec<u8> = Vec::new();
+        for &(w, has_black) in &[
+            (3usize, true),
+            (0, true),
+            (1, true),
+            (2, true),
+            (4, true),
+            (7, true),
+            (5, false),
+        ] {
+            row.extend(std::iter::repeat_n(0u8, w));
+            if has_black {
+                row.push(1);
+            }
+        }
+        uncompressed_row_roundtrip(&row);
+    }
+
+    #[test]
+    fn uncompressed_segment_resumes_two_d_coding() {
+        // Mixed row: the first half is normal 2-D coding, the second
+        // half switches into uncompressed mode and back is unnecessary
+        // (the segment runs to the row end). Build a 2-row T.6 stream
+        // where row 0 is all white (V(0)) and row 1 opens with a V(0)
+        // for the first 4 white pixels, then an uncompressed segment
+        // for the remaining 4 pixels `0b1010` against the (now
+        // all-white) reference, exercising the entrance from a non-zero
+        // a0 with a non-white preceding context handled by the loop.
+        let mut bw = BitWriter::new();
+        bw.write(0b1, 1); // row 0: V(0) — all 8 white
+                          // row 1:
+        bw.write(0b0000001111, 10); // entrance at a0=0
+        bw.write(0b00001, 5); // 4 white + 1 black → pixels 0..4, black@4
+        bw.write(0b01, 2); // 1 white + 1 black → pixel 5 white, 6 black
+        bw.write(0b0000001, 7); // exit m=0
+        bw.write(0b0, 1); // tag → white
+        bw.write(0b1, 1); // V(0) finishes the last white pixel (a0=7→8)
+        let bytes = bw.finish();
+        let got = decode_ccitt(&bytes, 8, 2, CcittVariant::T6, FillOrder::MsbFirst).unwrap();
+        // row 0 = 0x00; row 1 pixels: 0..3 white,4 black,5 white,6 black,7 white
+        //   = 0b0000_1010 = 0x0A.
+        assert_eq!(got, vec![0x00u8, 0x0Au8]);
     }
 
     #[test]

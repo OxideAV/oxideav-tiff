@@ -498,23 +498,42 @@ errors out — classic and BigTIFF IFD layouts are wire-incompatible).
   "imaginary all-white first reference line" + no-EOL framing rule;
   T.4 2-D layers the EOL+tag-bit row separator on top of it. The
   optional uncompressed-mode extension (`0000001111` followed by
-  Table 5/T.4 patterns) is explicitly rejected on both sides —
-  `tiffcp` never emits it for normal facsimile content. Decode is
+  Table 5/T.4 = Table 4/T.6 image-pattern + exit codes) **decodes**
+  as of this round: when a 2-D row hits the `0000001xxx` (`xxx = 111`)
+  entrance code, the READ loop switches to literal-pixel transmission
+  — unary image-pattern codes (`z` whites + 1 black for `z ≤ 4`, the
+  `000001` 5-white make-up, and the `0000001T`…`00000000001T` exit
+  codes whose tag bit `T` gives the colour of the next coded run) —
+  then resumes Pass/Horizontal/Vertical coding from the post-exit
+  position. The dispatch no longer rejects `T4Options` bit 1 /
+  `T6Options` bit 1 ("uncompressed mode allowed"), since those bits
+  are writer-capability hints rather than per-stream requirements and
+  the uncompressed segments are self-delimiting; the T.6 dispatch
+  additionally rejects any *undefined* `T6Options` bit. Decode is
   validated through 7 end-to-end `run_roundtrip` fixtures (solid
   white, two rectangles, diagonal, wide run) × G4 / T.4-2D against
-  `tiffcp -c g4` / `-c g3:2d` oracle outputs, plus 13 in-crate unit
+  `tiffcp -c g4` / `-c g3:2d` oracle outputs, plus in-crate unit
   tests covering the mode-code dictionary entries (V(0), VR/VL(1..3),
-  Pass, Horizontal, Uncompressed-extension) and the
-  `first_change_after` reference-line walker. Encode is validated
-  through 11 in-crate ccitt-module self-roundtrips (every mode-code
-  branch + the byte-aligned EOL pad + the LSB-first fill order), 13
-  binary-independent integration self-roundtrips in
+  Pass, Horizontal, Uncompressed-extension), the `first_change_after`
+  reference-line walker, and the uncompressed-mode segment decoder —
+  3 spec-exact hand-built T.6 fixtures (the image-pattern byte, the
+  `000001` long-white make-up, and the exit-code `m` trailing-white
+  field), 5 encode→decode self-roundtrips exercising every emit
+  branch (solid white / black, alternating, all residual-length runs,
+  and a segment that resumes 2-D coding after exit). Encode is
+  validated through 11 in-crate ccitt-module self-roundtrips (every
+  mode-code branch + the byte-aligned EOL pad + the LSB-first fill
+  order), 13 binary-independent integration self-roundtrips in
   `tests/encode_ccitt_2d_roundtrip.rs` (solid white / black, two
   rectangles, diagonal, wide pattern × T.4 2-D + T.6, plus T4Options
   bit 2 byte-aligned EOL and Gray8 negative-path rejection), and
   black-box cross-checks against `tiffcp -c none` and `tiffinfo`
   (independent transcode + verbose-report inspection confirms
-  `T4Options = 1` for T.4 2-D and `Group 4` for T.6).
+  `T4Options = 1` for T.4 2-D and `Group 4` for T.6). The production
+  READ encoder does not *emit* uncompressed mode (it is a bit-rate
+  control extension, never a compression win for facsimile content);
+  a test-only `encode_uncompressed_segment` helper drives the
+  spec-exact self-roundtrips that prove the decode path.
 - JPEG-in-TIFF Compression = 6 (old-style, deprecated by TIFF Tech
   Note 2; decoder returns precise `Error::Unsupported`).
   Compression = 7 (new-style) **decodes** as of this round across
