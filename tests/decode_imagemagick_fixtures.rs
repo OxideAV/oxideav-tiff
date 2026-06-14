@@ -65,12 +65,20 @@ fn convert_to_tiff(input_bytes: &[u8], src_ext: &str, convert_args: &[&str]) -> 
 }
 
 fn rand_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    // A monotonic process-global counter guarantees uniqueness even
+    // when two parallel test threads sample the same wall-clock
+    // nanosecond — `SystemTime::now()` alone is not collision-proof
+    // under `cargo test`'s thread pool, which let two fixtures share a
+    // temp directory (and one read the other's `out.tiff`).
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{n}")
+    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{n}-{c}")
 }
 
 /// Build a tiny PPM (RGB) source for `convert` to ingest.

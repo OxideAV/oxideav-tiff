@@ -305,6 +305,61 @@ pub enum EncodePixelFormat<'a> {
     /// precise error rather than emitting something the decoder
     /// might mis-tile.
     YCbCr24 { pixels: &'a [u8] },
+    /// 8-bit chroma-subsampled `(Y, Cb, Cr)` per TIFF 6.0 §21 "YCbCr
+    /// Images" (pages 90–94), `PhotometricInterpretation = 6`,
+    /// `SamplesPerPixel = 3`, `BitsPerSample = [8, 8, 8]`,
+    /// `PlanarConfiguration = 1` (chunky). `pixels` is the
+    /// **full-resolution** row-major interleaved `(Y, Cb, Cr)` raster
+    /// (`pixels.len() == width * height * 3`); the encoder performs the
+    /// chroma decimation and the §21 "Ordering of Component Samples"
+    /// data-unit packing.
+    ///
+    /// `subsampling` is `(ChromaSubsampleHoriz, ChromaSubsampleVert)`
+    /// from the §21 `YCbCrSubSampling` field (tag 530). §21 page 90
+    /// restricts each factor to `1`, `2`, or `4` and requires
+    /// `YCbCrSubsampleVert <= YCbCrSubsampleHoriz`, so the supported
+    /// set is `(1,1)`, `(2,1)`, `(2,2)`, `(4,1)`, `(4,2)` — the same
+    /// configurations the decoder's full-resolution chroma-splat path
+    /// reverses. `(1,1)` is accepted here too (it is the trivial
+    /// no-subsampling case) and behaves identically to
+    /// [`EncodePixelFormat::YCbCr24`].
+    ///
+    /// §21 page 90: "ImageWidth and ImageLength are constrained to be
+    /// integer multiples of YCbCrSubsampleHoriz and
+    /// YCbCrSubsampleVert respectively." The encoder rejects a
+    /// `width`/`height` that is not a multiple of the corresponding
+    /// factor with a precise error.
+    ///
+    /// Data-unit layout (§21 page 93): a data unit is
+    /// `ChromaSubsampleVert` rows of `ChromaSubsampleHoriz` Y samples
+    /// (row-major), then one Cb sample, then one Cr sample. For
+    /// `(sh, sv) = (4, 2)` the worked example on page 94 is
+    /// `Y00, Y01, Y02, Y03, Y10, Y11, Y12, Y13, Cb00, Cr00, Y04, …`.
+    /// The encoder visits data units left-to-right then top-to-bottom
+    /// and emits exactly this byte order, which is what the decoder's
+    /// `build_rgb24_from_ycbcr` block walker consumes.
+    ///
+    /// Chroma decimation: each `sh × sv` block's Cb / Cr is the rounded
+    /// arithmetic mean of the block's full-resolution Cb / Cr samples
+    /// (a box filter — the symmetric even-tap filter §21 page 92 calls
+    /// out for `YCbCrPositioning = 1` centered subsampling). The Y
+    /// samples are transported full-resolution and unchanged, so the
+    /// luminance round-trips bit-exact; chroma round-trips exactly only
+    /// when it is already constant across each block (decode splats one
+    /// Cb / Cr back over the whole block).
+    ///
+    /// The same §21 / §20 fields the 1:1 path emits are written, with
+    /// tag 530 carrying the actual `[sh, sv]`. `YCbCrPositioning = 1`
+    /// (centered) is emitted to match the box-filter decimation.
+    /// Compressors accepted: None / PackBits / LZW / Deflate / Zstd.
+    /// CCITT is bilevel-only and rejected. `Predictor = 2`,
+    /// `PlanarConfiguration = 2`, and tiled layout are rejected with a
+    /// precise error (the data-unit packing is single-strip chunky
+    /// only in this round).
+    YCbCrSubsampled24 {
+        pixels: &'a [u8],
+        subsampling: (u16, u16),
+    },
 }
 
 /// Compression scheme for an [`EncodePage`].
@@ -852,22 +907,25 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     // chroma-subsampled data-unit packer plus the planar / tiled
     // §21 layouts; until then, reject the combinations precisely so
     // the writer never emits something the decoder might mis-tile.
-    if matches!(p.kind, EncodePixelFormat::YCbCr24 { .. }) {
+    if matches!(
+        p.kind,
+        EncodePixelFormat::YCbCr24 { .. } | EncodePixelFormat::YCbCrSubsampled24 { .. }
+    ) {
         if p.planar {
             return Err(Error::invalid(
-                "TIFF encode: PlanarConfiguration=2 with YCbCr24 is not supported in this round \
+                "TIFF encode: PlanarConfiguration=2 with YCbCr is not supported in this round \
                  (the §21 data-unit ordering changes shape under non-1:1 subsampling)",
             ));
         }
         if p.tiling.is_some() {
             return Err(Error::invalid(
-                "TIFF encode: tiled layout with YCbCr24 is not supported in this round \
-                 (planned alongside the chroma-subsampled YCbCr write path)",
+                "TIFF encode: tiled layout with YCbCr is not supported in this round \
+                 (the §21 data-unit packing is single-strip chunky only here)",
             ));
         }
         if p.predictor {
             return Err(Error::invalid(
-                "TIFF encode: Predictor=2 with YCbCr24 is not supported in this round \
+                "TIFF encode: Predictor=2 with YCbCr is not supported in this round \
                  (the §21 chroma-difference samples and the §14 cumulative-add reversal \
                  interact through the §22 / §20 reference coding range)",
             ));
@@ -1145,6 +1203,51 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                     )));
                 }
                 (3u16, vec![8u16, 8, 8], PHOTO_YCBCR, pixels.to_vec(), None)
+            }
+            EncodePixelFormat::YCbCrSubsampled24 {
+                pixels,
+                subsampling,
+            } => {
+                let (sh, sv) = *subsampling;
+                // §21 page 90: each subsampling factor is 1, 2, or 4 and
+                // YCbCrSubsampleVert <= YCbCrSubsampleHoriz. The decoder
+                // reverses exactly this legal set.
+                if !matches!((sh, sv), (1, 1) | (2, 1) | (2, 2) | (4, 1) | (4, 2)) {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/YCbCrSubsampled24: YCbCrSubSampling=({sh},{sv}) is not a \
+                         TIFF 6.0 §21 legal pair — each factor must be 1/2/4 and \
+                         YCbCrSubsampleVert <= YCbCrSubsampleHoriz; supported pairs are \
+                         (1,1), (2,1), (2,2), (4,1), (4,2)"
+                    )));
+                }
+                // §21 page 90: "ImageWidth and ImageLength are
+                // constrained to be integer multiples of
+                // YCbCrSubsampleHoriz and YCbCrSubsampleVert
+                // respectively."
+                if p.width % (sh as u32) != 0 || p.height % (sv as u32) != 0 {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/YCbCrSubsampled24: ImageWidth ({}) must be a multiple of \
+                         ChromaSubsampleHoriz ({sh}) and ImageLength ({}) a multiple of \
+                         ChromaSubsampleVert ({sv}) — TIFF 6.0 §21 page 90",
+                        p.width, p.height
+                    )));
+                }
+                let want = (p.width as usize) * (p.height as usize) * 3;
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/YCbCrSubsampled24: pixel buffer is {} bytes, expected {want} \
+                         (full-resolution width * height * 3)",
+                        pixels.len()
+                    )));
+                }
+                let packed = pack_ycbcr_data_units(
+                    pixels,
+                    p.width as usize,
+                    p.height as usize,
+                    sh as usize,
+                    sv as usize,
+                );
+                (3u16, vec![8u16, 8, 8], PHOTO_YCBCR, packed, None)
             }
         };
 
@@ -1534,12 +1637,17 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     // restate the spec default. The three tags sit between 334
     // (NumberOfInks) and the §20-only TransferRange (342) / 700 (XMP)
     // / 33432 (Copyright) tags the encoder might later add.
-    if matches!(p.kind, EncodePixelFormat::YCbCr24 { .. }) {
-        // 530 YCbCrSubSampling — `[1, 1]` (chunky 4:4:4). Two SHORTs
+    let ycbcr_subsampling: Option<(u16, u16)> = match &p.kind {
+        EncodePixelFormat::YCbCr24 { .. } => Some((1, 1)),
+        EncodePixelFormat::YCbCrSubsampled24 { subsampling, .. } => Some(*subsampling),
+        _ => None,
+    };
+    if let Some((sh, sv)) = ycbcr_subsampling {
+        // 530 YCbCrSubSampling — `[sh, sv]` (§21 page 90). Two SHORTs
         // pack into 4 bytes and so fit inline on classic TIFF.
         let mut ss = [0u8; 4];
-        ss[..2].copy_from_slice(&1u16.to_le_bytes());
-        ss[2..4].copy_from_slice(&1u16.to_le_bytes());
+        ss[..2].copy_from_slice(&sh.to_le_bytes());
+        ss[2..4].copy_from_slice(&sv.to_le_bytes());
         entries.push(PageIfdEntry {
             tag: TAG_YCBCR_SUBSAMPLING,
             field_type: TYPE_SHORT,
@@ -1594,6 +1702,59 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         ifd: PageIfd { entries },
         externals,
     })
+}
+
+/// Decimate the chroma of a full-resolution interleaved `(Y, Cb, Cr)`
+/// raster and pack it into the TIFF 6.0 §21 `PlanarConfiguration = 1`
+/// data-unit byte order for the given `(sh, sv)` subsampling factors.
+///
+/// `src` is `width * height * 3` bytes of full-resolution interleaved
+/// `(Y, Cb, Cr)`. `width` is an integer multiple of `sh` and `height`
+/// of `sv` (the caller validates the §21 page 90 constraint before
+/// calling). The returned buffer is
+/// `(width / sh) * (height / sv) * (sh * sv + 2)` bytes — one data unit
+/// per `sh × sv` luminance block.
+///
+/// Each data unit (§21 page 93) is laid out as `sv` rows of `sh`
+/// full-resolution Y samples (row-major), then one Cb, then one Cr.
+/// For the §21 page 94 worked `(4, 2)` example this emits
+/// `Y00 Y01 Y02 Y03 Y10 Y11 Y12 Y13 Cb00 Cr00` for the first block.
+///
+/// The Cb / Cr written for a block is the rounded arithmetic mean of
+/// the block's `sh × sv` full-resolution Cb / Cr samples — the
+/// symmetric even-tap box filter §21 page 92 associates with the
+/// centered (`YCbCrPositioning = 1`) sample positioning the encoder
+/// declares. Luminance is transported unchanged.
+fn pack_ycbcr_data_units(src: &[u8], width: usize, height: usize, sh: usize, sv: usize) -> Vec<u8> {
+    let block_w = width / sh;
+    let block_h = height / sv;
+    let unit_len = sh * sv + 2;
+    let mut out = vec![0u8; block_w * block_h * unit_len];
+    for by in 0..block_h {
+        for bx in 0..block_w {
+            let unit_off = (by * block_w + bx) * unit_len;
+            // sv rows of sh Y samples, row-major (§21 page 93).
+            let mut cb_sum: u32 = 0;
+            let mut cr_sum: u32 = 0;
+            for sy in 0..sv {
+                for sx in 0..sh {
+                    let px = bx * sh + sx;
+                    let py = by * sv + sy;
+                    let s = (py * width + px) * 3;
+                    out[unit_off + sy * sh + sx] = src[s];
+                    cb_sum += src[s + 1] as u32;
+                    cr_sum += src[s + 2] as u32;
+                }
+            }
+            // Rounded mean of the block's chroma — box filter.
+            let n = (sh * sv) as u32;
+            let cb = ((cb_sum + n / 2) / n) as u8;
+            let cr = ((cr_sum + n / 2) / n) as u8;
+            out[unit_off + sh * sv] = cb;
+            out[unit_off + sh * sv + 1] = cr;
+        }
+    }
+    out
 }
 
 /// Split a chunky raster into a row-major grid of `tile_w x tile_h`

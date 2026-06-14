@@ -740,12 +740,74 @@ fn decode_strips(
         ));
     }
 
+    // Chroma-subsampled YCbCr (TIFF 6.0 §21, PlanarConfiguration = 1)
+    // stores data units rather than full-resolution per-pixel triples,
+    // so its on-disk byte budget per luma row is smaller than
+    // `width * SamplesPerPixel * bps`. Detect that layout up front and
+    // size the strips by the §21 data-unit geometry; everything else
+    // keeps the standard full-resolution row accounting. The
+    // JPEG-compressed YCbCr path never reaches here (each strip is a
+    // self-contained JPEG datastream decoded separately), and §14
+    // predictor / §"PlanarConfiguration"=2 are out of scope for the
+    // subsampled byte-aligned path.
+    let photometric = find(entries, TAG_PHOTOMETRIC_INTERPRETATION)
+        .map(|e| e.as_u32(bo))
+        .transpose()?
+        .unwrap_or(0);
+    let ycbcr_subsampling: Option<(usize, usize)> = if photometric == PHOTO_YCBCR as u32
+        && samples_per_pixel == 3
+        && bps_first == 8
+        && !matches!(compression, COMPRESSION_JPEG_OLD | COMPRESSION_JPEG_NEW)
+    {
+        let (sh, sv) = match find(entries, TAG_YCBCR_SUBSAMPLING) {
+            Some(e) => {
+                let v = e.as_u32_vec(bo)?;
+                if v.len() < 2 {
+                    return Err(Error::invalid("TIFF: YCbCrSubSampling too short"));
+                }
+                (v[0] as usize, v[1] as usize)
+            }
+            // §21 page 90 default is [2, 2].
+            None => (2, 2),
+        };
+        if sh == 0 || sv == 0 {
+            return Err(Error::invalid("TIFF: YCbCrSubSampling must be > 0"));
+        }
+        if (sh, sv) != (1, 1) {
+            Some((sh, sv))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // For sub-byte bit depths, rows are padded to byte boundaries
     // per TIFF 6.0 spec.
     let bits_per_row = (width as u64) * (samples_per_pixel as u64) * (bps_first as u64);
     let row_bytes = bits_per_row.div_ceil(8) as usize;
 
-    let mut pixel_buf: Vec<u8> = Vec::with_capacity(row_bytes * height as usize);
+    // For subsampled YCbCr the per-strip byte budget is computed from
+    // data units (§21 page 93): each strip holds `rows / sv` data-unit
+    // rows of `width / sh` units, every unit `sh*sv + 2` bytes. The
+    // strip's RowsPerStrip is constrained by §21 page 90 to be an
+    // integer multiple of `sv`.
+    let ycbcr_strip_bytes = |rows: u32| -> usize {
+        if let Some((sh, sv)) = ycbcr_subsampling {
+            let block_w = (width as usize).div_ceil(sh);
+            let block_rows = (rows as usize).div_ceil(sv);
+            block_w * block_rows * (sh * sv + 2)
+        } else {
+            row_bytes * rows as usize
+        }
+    };
+
+    let buf_cap = if ycbcr_subsampling.is_some() {
+        ycbcr_strip_bytes(height)
+    } else {
+        row_bytes * height as usize
+    };
+    let mut pixel_buf: Vec<u8> = Vec::with_capacity(buf_cap);
     let mut rows_done: u32 = 0;
     for (i, (&offset, &byte_count)) in strip_offsets
         .iter()
@@ -761,7 +823,7 @@ fn decode_strips(
         }
         let raw = &input[start..end];
         let rows_this_strip = rows_per_strip.min(height - rows_done);
-        let expected = row_bytes * rows_this_strip as usize;
+        let expected = ycbcr_strip_bytes(rows_this_strip);
         let ccitt = if matches!(
             compression,
             COMPRESSION_CCITT_HUFFMAN | COMPRESSION_CCITT_T4 | COMPRESSION_CCITT_T6
@@ -796,6 +858,18 @@ fn decode_strips(
             reverse_bits_in_place(&mut strip);
         }
         if predictor == PREDICTOR_HORIZONTAL {
+            // §14 horizontal differencing operates on full-resolution
+            // sample rows; it is undefined over the §21 subsampled
+            // data-unit layout (where one packed row interleaves a
+            // 2-D Y block with single Cb/Cr samples). Reject rather
+            // than mis-apply it across the data-unit boundaries.
+            if ycbcr_subsampling.is_some() {
+                return Err(Error::invalid(
+                    "TIFF: Predictor=2 with chroma-subsampled YCbCr (TIFF 6.0 §21 data units) \
+                     is unsupported — §14 differencing has no defined meaning over the \
+                     packed data-unit layout",
+                ));
+            }
             apply_horizontal_predictor(
                 &mut strip,
                 width as usize,

@@ -25,7 +25,7 @@ library source was consulted.
 | RGB (3 chan)   | 8              | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` |
 | RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb48Le` |
 | CMYK (4 chan)  | 8              | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` |
-| YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **ZSTD** / **JPEG-in-TIFF** (Compression=7) | `Rgb24` |
+| YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **ZSTD** (incl. **§21 chroma subsampling** `[2,1]`/`[2,2]`/`[4,1]`/`[4,2]`) / **JPEG-in-TIFF** (Compression=7) | `Rgb24` |
 | RGB (3 chan)   | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
 | BlackIsZero / WhiteIsZero | 8   | **JPEG-in-TIFF** (Compression=7)   | `Gray8`      |
 | CMYK (4 chan)  | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
@@ -583,12 +583,29 @@ errors out — classic and BigTIFF IFD layouts are wire-incompatible).
   per component plane, §15); decode covers the same plus CCITT. Tiled
   write (chunky, §15) covers `Gray8` / `Gray16Le` / `Rgb24` /
   `Palette8` under None / PackBits / LZW / Deflate / ZSTD with the optional
-  `Predictor = 2`. Encoder-side YCbCr is `YCbCrSubSampling = [1, 1]`
-  chunky 4:4:4 only as of this round; chroma-subsampled writes
-  (`[2, 1]` / `[2, 2]` / `[4, 1]` / `[4, 2]` / `[1, 2]`) and YCbCr
-  planar / tiled / predictor combinations are deferred — the §21
-  "Ordering of Component Samples" data-unit shape changes under
-  non-1:1 subsampling and needs the dedicated packer.
+  `Predictor = 2`. Encoder-side YCbCr covers both the chunky
+  `YCbCrSubSampling = [1, 1]` 4:4:4 layout
+  ([`EncodePixelFormat::YCbCr24`]) **and** the chroma-subsampled
+  chunky writes ([`EncodePixelFormat::YCbCrSubsampled24`]) for the
+  TIFF 6.0 §21 page 90 legal factor pairs `[2, 1]` / `[2, 2]` /
+  `[4, 1]` / `[4, 2]` (the spec requires
+  `YCbCrSubsampleVert <= YCbCrSubsampleHoriz`, so `[1, 2]` is rejected)
+  as of this round, under None / PackBits / LZW / Deflate / ZSTD. The
+  subsampled writer takes a full-resolution interleaved `(Y, Cb, Cr)`
+  raster, box-averages the chroma per `sh × sv` block (the symmetric
+  even-tap filter §21 page 92 associates with the centered
+  `YCbCrPositioning = 1` it declares), and packs the §21 page 93
+  "Ordering of Component Samples" data unit (`sv` rows of `sh` Y
+  samples, then one Cb, then one Cr — the §21 page 94 `[4, 2]` worked
+  example `Y00 Y01 Y02 Y03 Y10 Y11 Y12 Y13 Cb00 Cr00 …`). The
+  matching **decode** side was completed this round too: the strip
+  reader now sizes subsampled-YCbCr strips by the data-unit geometry
+  (it previously assumed full-resolution rows and rejected the smaller
+  strip as truncated), so uncompressed / byte-aligned subsampled YCbCr
+  now decodes end-to-end, not only inside a JPEG-in-TIFF segment.
+  ImageWidth / ImageLength must be integer multiples of the factors
+  (§21 page 90); YCbCr planar / tiled / predictor combinations remain
+  deferred (the data-unit packing is single-strip chunky here).
 
 ## Registration
 

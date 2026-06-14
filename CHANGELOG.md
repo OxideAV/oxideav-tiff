@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Chroma-subsampled YCbCr encode + uncompressed-decode** (TIFF 6.0
+  §21 "YCbCr Images"). New `EncodePixelFormat::YCbCrSubsampled24`
+  takes a full-resolution interleaved `(Y, Cb, Cr)` raster plus a
+  `subsampling: (sh, sv)` pair, box-averages the chroma per `sh × sv`
+  block, and packs the §21 page 93 "Ordering of Component Samples"
+  data unit (`sv` rows of `sh` Y samples, then one Cb, then one Cr —
+  the §21 page 94 `[4, 2]` worked example). Legal factor pairs are the
+  §21 page 90 set `[1,1]`, `[2,1]`, `[2,2]`, `[4,1]`, `[4,2]` (the spec
+  requires `YCbCrSubsampleVert <= YCbCrSubsampleHoriz`); `ImageWidth`
+  and `ImageLength` must be integer multiples of the factors. Tag 530
+  now carries the actual factors; `YCbCrPositioning = 1` (centered)
+  matches the box-filter decimation. None / PackBits / LZW / Deflate /
+  ZSTD compose; planar / tiled / predictor are rejected precisely.
+  On the **decode** side, `decode_strips` previously sized every strip
+  by full-resolution rows and so rejected a subsampled-YCbCr strip
+  (which is smaller) as truncated — the uncompressed/byte-aligned
+  subsampled path never actually decoded outside a JPEG-in-TIFF
+  segment. Strip sizing is now driven by the §21 data-unit geometry
+  when the photometric is YCbCr, the subsampling is non-1:1, and the
+  compression is not JPEG, so subsampled YCbCr round-trips end-to-end.
+  Validated by `tests/encode_ycbcr_subsampled_roundtrip.rs`: on-disk
+  data-unit byte-order check against an independent reference packer,
+  bit-exact round-trip for every legal pair × every byte-aligned
+  compressor (block-uniform chroma), equivalence to the 4:4:4
+  splat, BigTIFF, tag-content inspection, a hand-built fixture
+  exercising the decoder strip-size path, and negative-path rejections.
+- Fixed a temp-directory collision in `tests/decode_imagemagick_fixtures.rs`
+  where `rand_suffix()` relied on `SystemTime::now()` nanoseconds alone;
+  under `cargo test`'s parallel thread pool two fixtures could sample
+  the same instant, share a temp dir, and read each other's `out.tiff`.
+  A process-global atomic counter now guarantees uniqueness.
 - **Sub-byte (1-bit and 4-bit) chunky tiled-image decode** (TIFF 6.0
   §15 "Tiled Images"). `decode_tiles` previously rejected any
   `BitsPerSample` that was not a multiple of 8 with an explicit
