@@ -930,22 +930,44 @@ fn decode_tiles(
             // Copy the visible portion of the tile into the output
             // buffer. Tiles at the right/bottom edge may extend past
             // the image; those samples are simply dropped.
-            // Sub-byte bit depths require bit-level slicing, which
-            // means we only support tiled images at byte-aligned
-            // bit depths in this build.
-            if bps_first % 8 != 0 {
+            //
+            // TIFF 6.0 §15 (page 67) requires `TileWidth` to be "a
+            // multiple of 16", and §15 (page 66) states that within a
+            // tile "each row of data in a tile is treated as a separate
+            // 'scanline'", i.e. every tile row is independently padded
+            // to a byte boundary (`tile_row_bytes` above). Together
+            // these make every tile-column boundary in the destination
+            // image row land on a byte boundary even at sub-byte bit
+            // depths: column `tx` starts at bit
+            // `tx · TileWidth · SamplesPerPixel · BitsPerSample`, and
+            // `TileWidth` being a multiple of 16 makes that product a
+            // multiple of 8 for any `BitsPerSample ∈ {1, 4}`. The
+            // visible region of a tile row therefore copies as a whole
+            // number of bytes starting at a byte-aligned destination
+            // offset, exactly as for byte-aligned depths — the only
+            // difference is that the visible width is measured in bits
+            // and rounded up to bytes (the high bits of a partial-tile
+            // trailing byte are padding the downstream expander, which
+            // reads only `width` pixels per row, ignores).
+            let bits_per_dst_origin =
+                (tx as u64) * (tile_w as u64) * (samples_per_pixel as u64) * (bps_first as u64);
+            if bits_per_dst_origin % 8 != 0 {
+                // Cannot occur for `TileWidth` a multiple of 16, but
+                // guard against a non-conformant writer rather than
+                // panic on a misaligned slice.
                 return Err(Error::invalid(
-                    "TIFF: tiled images at sub-byte bit depths not yet supported",
+                    "TIFF: tile column boundary is not byte-aligned (TileWidth must be a \
+                     multiple of 16 per TIFF 6.0 §15)",
                 ));
             }
-            let sample_bytes = (bps_first / 8) as usize;
-            let pixel_bytes = sample_bytes * samples_per_pixel as usize;
+            let dst_origin_x = (bits_per_dst_origin / 8) as usize;
             let visible_w =
                 ((width as i64) - (tx as i64) * (tile_w as i64)).min(tile_w as i64) as usize;
             let visible_h =
                 ((height as i64) - (ty as i64) * (tile_h as i64)).min(tile_h as i64) as usize;
-            let visible_row_bytes = visible_w * pixel_bytes;
-            let dst_origin_x = tx as usize * tile_w as usize * pixel_bytes;
+            let visible_row_bytes =
+                ((visible_w as u64) * (samples_per_pixel as u64) * (bps_first as u64)).div_ceil(8)
+                    as usize;
             let dst_origin_y = ty as usize * tile_h as usize;
             for r in 0..visible_h {
                 let src_off = r * tile_row_bytes;

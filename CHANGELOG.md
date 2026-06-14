@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Sub-byte (1-bit and 4-bit) chunky tiled-image decode** (TIFF 6.0
+  §15 "Tiled Images"). `decode_tiles` previously rejected any
+  `BitsPerSample` that was not a multiple of 8 with an explicit
+  "tiled images at sub-byte bit depths not yet supported" error. Per
+  §15 (page 67) `TileWidth` is "a multiple of 16", and §15 (page 66)
+  treats each tile row as an independent byte-padded "scanline", so for
+  `SamplesPerPixel = 1` at `BitsPerSample ∈ {1, 4}` the product
+  `TileWidth · SamplesPerPixel · BitsPerSample` is always a multiple of
+  8 and every tile-column boundary in the reassembled image row lands on
+  a byte boundary. The tile copy now computes the destination origin and
+  the visible row length in bits (rounded up to bytes) and copies whole
+  bytes at byte-aligned offsets — no cross-byte bit shifting — with a
+  defensive guard that rejects a non-conformant writer whose tile column
+  boundary is not byte-aligned. Covers BlackIsZero / WhiteIsZero 1-bit
+  and 4-bit grayscale and 4-bit palette tiles. Validated by
+  `tests/decode_tiled_subbyte.rs`: 12 binary-independent self-roundtrips
+  comparing the tiled decode against the trusted single-strip decode of
+  the same hand-built classic-II fixtures, across exact-fit,
+  partial-edge, non-square-tile, odd-width (partial trailing byte/nibble),
+  and `ImageWidth < TileWidth` oversized-single-tile geometries. The
+  encoder still writes only byte-aligned (8-/16-bit) chunky tiles;
+  sub-byte tile *writing* is a separate increment.
 - CCITT 2-D **uncompressed-mode decode** (Table 5/T.4 = Table 4/T.6
   §2.3.1), transcribed clean-room from the staged ITU-T PDFs into
   `docs/image/tiff/ccitt-t4-t6-fax-codes.md` §4. When a T.4-2D / T.6

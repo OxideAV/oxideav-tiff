@@ -35,7 +35,13 @@ library source was consulted.
 `Predictor = 1` (no prediction) and `Predictor = 2` (horizontal
 differencing, per-component for `SamplesPerPixel > 1`) are both
 supported. Strip- and tile-based layouts both decode (any number of
-strips or tiles). `PlanarConfiguration = 1` (chunky) and
+strips or tiles), including **sub-byte (1-bit and 4-bit) chunky tiles**
+(BlackIsZero / WhiteIsZero grayscale and 4-bit palette): per TIFF 6.0
+§15, `TileWidth` is a multiple of 16 and each tile row is an
+independent byte-padded scanline, so for `SamplesPerPixel = 1` at
+`BitsPerSample ∈ {1, 4}` every tile-column boundary lands on a byte
+boundary and the tile reassembly copies whole bytes at byte-aligned
+offsets (no cross-byte bit shifting). `PlanarConfiguration = 1` (chunky) and
 `PlanarConfiguration = 2` (separate component planes) are both
 accepted: per TIFF 6.0 §"PlanarConfiguration", the second arrangement
 stores `StripOffsets` / `StripByteCounts` (and `TileOffsets` /
@@ -413,7 +419,26 @@ against the strip decode of the same image across Gray8 / Gray16Le /
 Rgb24 / Palette8 (None / PackBits / LZW / Deflate / ZSTD, with and without the
 predictor) and the full range of edge-tile geometries (exact-fit,
 partial edges, non-square tiles, oversized single tile, 1-pixel
-overhang). Sub-byte (1-/4-bit) tiled images are not yet supported.
+overhang).
+
+Sub-byte (1-bit and 4-bit) chunky tiles also **decode** as of this
+round (TIFF 6.0 §15 — see the Decode note above). Because `TileWidth`
+is a multiple of 16 and §15 treats each tile row as an independent
+byte-padded scanline, the `SamplesPerPixel = 1`, `BitsPerSample ∈
+{1, 4}` case keeps every tile-column boundary byte-aligned, so the
+existing reassembly path copies whole bytes at byte-aligned offsets.
+The new tiled sub-byte decode is validated in
+`tests/decode_tiled_subbyte.rs` against the strip decode of the same
+hand-built classic-II fixtures (1-bit BlackIsZero / WhiteIsZero
+grayscale, 4-bit grayscale, 4-bit palette) across exact-fit,
+partial-edge, non-square-tile, odd-width, and oversized-single-tile
+geometries — a binary-independent oracle: a decoder that mishandled
+tile ordering, tile-row stride, byte-aligned column offsets, or §15
+edge padding would diverge from the trusted strip path. The
+**encoder** still writes only byte-aligned (8-/16-bit) chunky tiles;
+sub-byte tile *writing* (which needs sub-byte tile-row bit packing
+with §15 edge replication) is a separate increment, so `Bilevel`
+input continues to reject `tiling`.
 
 Output is classic II little-endian TIFF, single-IFD via
 [`encode_tiff`] or multi-page via [`encode_tiff_multi`]. Files
