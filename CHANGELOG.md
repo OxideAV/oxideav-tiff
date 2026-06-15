@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.3...v0.0.4) - 2026-06-15
+
+### Other
+
+- SampleFormat=2 (signed integer) 8-/16-bit grayscale decode (TIFF 6.0 §SampleFormat)
+- chroma-subsampled YCbCr encode + uncompressed-decode (TIFF 6.0 §21)
+- decode sub-byte (1-/4-bit) chunky tiled images (TIFF 6.0 §15)
+- CCITT 2-D uncompressed mode (Table 5/T.4 = Table 4/T.6) decode
+- Zstandard Compression=50000 decode + encode per docs/image/tiff/tiff-zstd-compression-50000.md
+- ExtraSamples (tag 338) inspection per TIFF 6.0 §ExtraSamples
+- ResolutionUnit (tag 296) inspection per TIFF 6.0 §Physical Dimensions
+- Orientation (tag 274) inspection per TIFF 6.0 §Orientation
+- drop release-plz.toml — use release-plz defaults across the workspace
+- YCbCr (TIFF 6.0 §21) chunky 4:4:4 via EncodePixelFormat::YCbCr24
+- CMYK (TIFF 6.0 §16) via EncodePixelFormat::Cmyk32
+- CCITT T.4 2-D (Modified READ) + T.6 (MMR / Group 4) encode
+- SampleFormat (tag 339) inspection per TIFF 6.0 §SampleFormat
+- PhotometricInterpretation = 8 (CIE L*a*b*) per TIFF 6.0 §23
+
 ### Added
 
 - **SampleFormat = 2 (two's-complement signed integer) grayscale
