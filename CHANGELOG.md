@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SampleFormat = 2 (two's-complement signed integer) grayscale
+  decode** (TIFF 6.0 §SampleFormat tag 339, page 80). 8-bit and 16-bit
+  single-channel BlackIsZero / WhiteIsZero images whose IFD declares
+  `SampleFormat = 2` now decode (previously rejected with a typed
+  error) — the layout scientific and elevation TIFFs use. §SampleFormat
+  fixes the sample size via BitsPerSample and the SMinSampleValue (340)
+  / SMaxSampleValue (341) "default … full range of the data type", so
+  the signed samples span the full signed range and are rendered onto
+  the codec's unsigned `Gray8` / `Gray16Le` planes through the
+  order-preserving offset-binary map (signed min → display 0, signed
+  max → unsigned ceiling, stored signed 0 → display midpoint): a
+  sign-bit flip (`XOR 0x80` at 8-bit, `XOR 0x8000` at 16-bit) applied
+  before the WhiteIsZero polarity inversion. The map is bijective and
+  monotone so relative brightness is preserved. SampleFormat = 2 on any
+  other photometric / width (RGB, palette, CMYK, YCbCr, CIELab, or a
+  sub-byte / non-assembled width) still terminates gracefully with a
+  precise typed error per the §SampleFormat reader rule, as does value
+  3 (IEEE floating-point). New `tests/decode_sample_format_signed.rs`
+  validates the full-range 8-bit map, the WhiteIsZero polarity
+  composition, 16-bit little- and big-endian on-disk byte order, the
+  signed-zero-to-midpoint invariant, and the RGB / 4-bit rejection
+  paths against hand-built classic-II fixtures (binary-independent: the
+  expected display bytes are computed directly from the offset-binary
+  definition).
+
 - **Chroma-subsampled YCbCr encode + uncompressed-decode** (TIFF 6.0
   §21 "YCbCr Images"). New `EncodePixelFormat::YCbCrSubsampled24`
   takes a full-resolution interleaved `(Y, Cb, Cr)` raster plus a

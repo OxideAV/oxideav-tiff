@@ -154,18 +154,23 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     // SampleFormat (TIFF 6.0 §SampleFormat tag 339, page 80). When
     // present the field has one entry per sample, all of which must
     // share an interpretation for this decoder's uniform-bit-depth
-    // assembly path to apply consistently. The spec mandates: "If the
-    // SampleFormat field is present and the value is not 1, a Baseline
-    // TIFF reader that cannot handle the SampleFormat value must
-    // terminate the import process gracefully." This decoder reads
-    // only unsigned-integer pixel data, so values 2 (two's-complement
-    // signed) and 3 (IEEE floating-point) are rejected with a precise
-    // error; value 4 (undefined) folds back to unsigned per the
-    // §SampleFormat note "A reader would typically treat an image with
-    // 'undefined' data as if the field were not present (i.e. as
-    // unsigned integer data)." An absent field also defaults to
+    // assembly path to apply consistently. The spec lists four values:
+    // 1 (unsigned integer, the default), 2 (two's-complement signed
+    // integer), 3 (IEEE floating point) and 4 (undefined). The reader
+    // rule is: "If the SampleFormat field is present and the value is
+    // not 1, a Baseline TIFF reader that cannot handle the SampleFormat
+    // value must terminate the import process gracefully."
+    //
+    // This decoder routes value 1, value 4 (folded back to unsigned per
+    // the §SampleFormat note "A reader would typically treat an image
+    // with 'undefined' data as if the field were not present (i.e. as
+    // unsigned integer data)") and value 2 (two's-complement signed
+    // integer grayscale — see the grayscale build arms) through the
+    // integer assembly path; value 3 (IEEE floating point) is rejected
+    // because the byte interpretation is a non-integer numeric type the
+    // integer pipeline cannot render. An absent field defaults to
     // unsigned per the §SampleFormat default-1 paragraph.
-    if let Some(sf_entry) = find(entries, TAG_SAMPLE_FORMAT) {
+    let sample_format = if let Some(sf_entry) = find(entries, TAG_SAMPLE_FORMAT) {
         // The §SampleFormat header line "N = SamplesPerPixel" sets the
         // expected count. Some writers under-state the count (one
         // entry meant to apply to every sample); accept either the
@@ -186,18 +191,8 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         }
         let fmt = sf[0] as u16;
         match fmt {
-            SAMPLE_FORMAT_UINT | SAMPLE_FORMAT_UNDEFINED => {
-                // Both interpretations route through the unsigned
-                // integer path; nothing else to do.
-            }
-            SAMPLE_FORMAT_SINT => {
-                return Err(Error::Unsupported(
-                    "TIFF: SampleFormat=2 (signed integer) not supported; \
-                     §SampleFormat requires readers that cannot handle the value to \
-                     terminate gracefully"
-                        .into(),
-                ));
-            }
+            SAMPLE_FORMAT_UINT | SAMPLE_FORMAT_UNDEFINED => SAMPLE_FORMAT_UINT,
+            SAMPLE_FORMAT_SINT => SAMPLE_FORMAT_SINT,
             SAMPLE_FORMAT_IEEE_FP => {
                 return Err(Error::Unsupported(
                     "TIFF: SampleFormat=3 (IEEE floating-point) not supported; \
@@ -212,7 +207,9 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
                 )));
             }
         }
-    }
+    } else {
+        SAMPLE_FORMAT_UINT
+    };
 
     // Orientation (TIFF 6.0 §Orientation tag 274, page 36). SHORT,
     // N = 1, default 1. The spec defines eight values: 1 = the 0th
@@ -555,6 +552,36 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     // (which `build_gray8_from_1bpp` already does via its `invert`
     // argument). No extra inversion is needed here.
 
+    // SampleFormat = 2 (two's-complement signed integer, TIFF 6.0
+    // §SampleFormat page 80) is honoured for the single-channel
+    // grayscale photometrics at the integer widths this decoder
+    // assembles (8- and 16-bit BlackIsZero / WhiteIsZero) — the layout
+    // scientific and elevation TIFFs use. The on-disk samples span the
+    // signed range whose default extent §SampleFormat fixes at "the
+    // full range of the data type" (SMinSampleValue / SMaxSampleValue
+    // tags 340 / 341 default to the type bounds). Rendering signed
+    // samples on the codec's unsigned display planes uses the
+    // order-preserving offset-binary map: the signed minimum lands at
+    // 0 and the signed maximum at the unsigned ceiling (a sign-bit
+    // flip: 8-bit XOR 0x80, 16-bit XOR 0x8000), the bijective,
+    // monotone mapping that keeps relative brightness intact — the
+    // same "some conversion to a display range is required" latitude
+    // §23 grants the CIELab path. For any other photometric / width
+    // the integer-signed bytes have no single defensible display
+    // mapping in this build, so SampleFormat = 2 is refused there per
+    // the §SampleFormat "terminate gracefully" reader rule rather than
+    // silently mis-rendered.
+    if sample_format == SAMPLE_FORMAT_SINT {
+        let grayscale = matches!(photometric, PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO);
+        if !grayscale || samples_per_pixel != 1 || !(bps_first == 8 || bps_first == 16) {
+            return Err(Error::Unsupported(format!(
+                "TIFF: SampleFormat=2 (signed integer) supported only for 8-/16-bit \
+                 grayscale (photometric 0/1, SamplesPerPixel=1); got photometric={photometric} \
+                 samples_per_pixel={samples_per_pixel} bits_per_sample={bps_first}"
+            )));
+        }
+    }
+
     // ---- Convert into a standard TiffPixelFormat ----
     let (image, _pf) = match (photometric, samples_per_pixel, bps_first) {
         (PHOTO_BLACK_IS_ZERO, 1, 1) | (PHOTO_WHITE_IS_ZERO, 1, 1) => {
@@ -598,15 +625,17 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         }
         (PHOTO_BLACK_IS_ZERO, 1, 8) | (PHOTO_WHITE_IS_ZERO, 1, 8) => {
             let inv = photometric == PHOTO_WHITE_IS_ZERO;
+            let signed = sample_format == SAMPLE_FORMAT_SINT;
             (
-                build_gray8(&pixel_buf, width, height, inv),
+                build_gray8(&pixel_buf, width, height, inv, signed),
                 TiffPixelFormat::Gray8,
             )
         }
         (PHOTO_BLACK_IS_ZERO, 1, 16) | (PHOTO_WHITE_IS_ZERO, 1, 16) => {
             let inv = photometric == PHOTO_WHITE_IS_ZERO;
+            let signed = sample_format == SAMPLE_FORMAT_SINT;
             (
-                build_gray16le(&pixel_buf, width, height, bo, inv),
+                build_gray16le(&pixel_buf, width, height, bo, inv, signed),
                 TiffPixelFormat::Gray16Le,
             )
         }
@@ -1595,9 +1624,20 @@ fn apply_horizontal_predictor(
 // Pixel-format conversions
 // ---------------------------------------------------------------------------
 
-fn build_gray8(src: &[u8], w: u32, h: u32, invert: bool) -> TiffImage {
+fn build_gray8(src: &[u8], w: u32, h: u32, invert: bool, signed: bool) -> TiffImage {
     let stride = w as usize;
     let mut data = src[..stride * h as usize].to_vec();
+    // SampleFormat = 2: map two's-complement signed bytes onto the
+    // unsigned display range with the order-preserving offset-binary
+    // transform (signed min -> 0, signed max -> 255). For 8-bit that
+    // is exactly a sign-bit flip (XOR 0x80). This runs before the
+    // WhiteIsZero polarity inversion, which operates on the unsigned
+    // display value.
+    if signed {
+        for b in data.iter_mut() {
+            *b ^= 0x80;
+        }
+    }
     if invert {
         for b in data.iter_mut() {
             *b = 255 - *b;
@@ -1653,12 +1693,25 @@ fn build_gray8_from_1bpp(src: &[u8], w: u32, h: u32, row_bytes: usize, invert: b
     }
 }
 
-fn build_gray16le(src: &[u8], w: u32, h: u32, bo: ByteOrder, invert: bool) -> TiffImage {
+fn build_gray16le(
+    src: &[u8],
+    w: u32,
+    h: u32,
+    bo: ByteOrder,
+    invert: bool,
+    signed: bool,
+) -> TiffImage {
     let stride = w as usize * 2;
     let n = (w * h) as usize;
     let mut data = Vec::with_capacity(stride * h as usize);
     for i in 0..n {
-        let v = bo.read_u16(&src[i * 2..i * 2 + 2]);
+        let mut v = bo.read_u16(&src[i * 2..i * 2 + 2]);
+        // SampleFormat = 2: offset-binary map (signed min -> 0, signed
+        // max -> 0xFFFF) is a 16-bit sign-bit flip (XOR 0x8000),
+        // applied before the WhiteIsZero polarity inversion.
+        if signed {
+            v ^= 0x8000;
+        }
         let v = if invert { 0xFFFF - v } else { v };
         data.extend_from_slice(&v.to_le_bytes());
     }

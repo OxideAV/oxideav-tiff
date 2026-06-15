@@ -18,6 +18,7 @@ library source was consulted.
 | WhiteIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
 | WhiteIsZero    | 4 / 8          | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
 | WhiteIsZero    | 16             | None / PackBits / LZW / Deflate / **ZSTD** | `Gray16Le` |
+| WhiteIsZero / BlackIsZero | 8 / 16 | None / PackBits / LZW / Deflate / **ZSTD** + **SampleFormat=2 (signed int)** | `Gray8` / `Gray16Le` (offset-binary display map) |
 | BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
 | BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` / `Gray16Le` |
 | **Transparency Mask** | 1       | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` (interior = 0xFF, exterior = 0x00) |
@@ -244,13 +245,30 @@ on every IFD. Value `1` (unsigned integer, the spec default) and value
 `4` (undefined — the §SampleFormat note recommends "treat … as if the
 field were not present, i.e. as unsigned integer data") route through
 the unsigned-integer decoder path that the rest of the codec is built
-around. Values `2` (two's-complement signed integer) and `3` (IEEE
-floating-point) are surfaced as precise typed errors, enforcing the
-§SampleFormat reader rule: "If the SampleFormat field is present and
-the value is not 1, a Baseline TIFF reader that cannot handle the
-SampleFormat value must terminate the import process gracefully." An
-absent field defaults to unsigned (so every existing TIFF fixture
-decodes byte-for-byte unchanged); non-uniform per-component values and
+around. Value `2` (two's-complement **signed integer**) now decodes
+for the single-channel grayscale photometrics (BlackIsZero /
+WhiteIsZero) at the integer widths the codec assembles, 8-bit and
+16-bit — the layout scientific and elevation TIFFs use. §SampleFormat
+notes the size "is still done by the BitsPerSample field" and the
+companion SMinSampleValue (340) / SMaxSampleValue (341) "default … is
+the full range of the data type", so the signed samples span the full
+signed range and are rendered onto the codec's unsigned display planes
+through the order-preserving **offset-binary** map (signed minimum →
+display 0, signed maximum → the unsigned ceiling, stored signed 0 →
+the display midpoint): a sign-bit flip — `XOR 0x80` at 8-bit, `XOR
+0x8000` at 16-bit — applied before the WhiteIsZero polarity inversion.
+The mapping is bijective and monotone, so relative brightness is
+preserved exactly. SampleFormat = 2 on any other photometric / width
+(RGB, palette, CMYK, YCbCr, CIELab, or a sub-byte / non-assembled
+width) has no single defensible display mapping in this build and is
+surfaced as a precise typed error. Value `3` (IEEE floating-point) is
+likewise rejected — the byte interpretation is a non-integer numeric
+type the integer pipeline cannot render — enforcing the §SampleFormat
+reader rule: "If the SampleFormat field is present and the value is
+not 1, a Baseline TIFF reader that cannot handle the SampleFormat
+value must terminate the import process gracefully." An absent field
+defaults to unsigned (so every existing TIFF fixture decodes
+byte-for-byte unchanged); non-uniform per-component values and
 out-of-range values (≥ 5) are also rejected.
 
 `Orientation` (tag 274, TIFF 6.0 §Orientation page 36) is inspected on

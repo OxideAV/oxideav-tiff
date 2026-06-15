@@ -144,13 +144,18 @@ fn expect_err_containing(bytes: &[u8], needle: &str) {
 }
 
 #[test]
-fn sample_format_signed_int_terminates_gracefully() {
-    // §SampleFormat reader rule: a value of 2 the decoder cannot
-    // handle "must terminate the import process gracefully" — i.e.
-    // surface a typed error rather than silently re-interpreting the
-    // bytes as unsigned.
+fn sample_format_signed_int_8bit_gray_offset_binary() {
+    // SampleFormat = 2 (two's-complement signed integer) on an 8-bit
+    // BlackIsZero grayscale image decodes through the offset-binary
+    // map: the signed minimum (-128, byte 0x80) lands at display 0,
+    // the signed maximum (+127, byte 0x7F) lands at display 255, and
+    // a stored signed 0 (byte 0x00) lands at the display midpoint
+    // 0x80. The mapping is a sign-bit flip (XOR 0x80). Our fixture
+    // stores 0xAB, which is signed -85: XOR 0x80 -> 0x2B.
     let bytes = build_1x1_gray8(Some(2));
-    expect_err_containing(&bytes, "SampleFormat=2");
+    let d = decode_tiff(&bytes).expect("8-bit signed grayscale must decode");
+    assert_eq!((d.width, d.height), (1, 1));
+    assert_eq!(d.frame.planes[0].data, vec![0x2Bu8]); // 0xAB ^ 0x80
 }
 
 #[test]
