@@ -58,6 +58,28 @@ impl ByteOrder {
     pub fn read_i32(self, b: &[u8]) -> i32 {
         self.read_u32(b) as i32
     }
+    /// Read an IEEE-754 single-precision float (TIFF type FLOAT,
+    /// 4 bytes) in this byte order. Per TIFF 6.0 §SampleFormat the
+    /// in-file representation of a `SampleFormat = 3` sample is IEEE
+    /// 754, so the 32-bit big-/little-endian byte string maps straight
+    /// onto `f32::from_*_bytes`.
+    pub fn read_f32(self, b: &[u8]) -> f32 {
+        let a = [b[0], b[1], b[2], b[3]];
+        match self {
+            ByteOrder::Little => f32::from_le_bytes(a),
+            ByteOrder::Big => f32::from_be_bytes(a),
+        }
+    }
+    /// Read an IEEE-754 double-precision float (TIFF type DOUBLE,
+    /// 8 bytes) in this byte order — the 64-bit `SampleFormat = 3`
+    /// width.
+    pub fn read_f64(self, b: &[u8]) -> f64 {
+        let a = [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]];
+        match self {
+            ByteOrder::Little => f64::from_le_bytes(a),
+            ByteOrder::Big => f64::from_be_bytes(a),
+        }
+    }
 }
 
 /// Variant tag distinguishing classic TIFF from BigTIFF. Drives the
@@ -144,6 +166,71 @@ impl Entry {
                 return Err(Error::invalid(format!("TIFF: value {x} exceeds u32 range")));
             }
             out.push(x as u32);
+        }
+        Ok(out)
+    }
+
+    /// Decode the entry's values as `f64`s. Accepts the IEEE float
+    /// types (FLOAT, DOUBLE) plus the unsigned/signed integer and
+    /// RATIONAL types — TIFF 6.0 §SampleFormat types SMinSampleValue /
+    /// SMaxSampleValue (340 / 341) as "the field type that best matches
+    /// the sample data", which for a `SampleFormat = 3` image is FLOAT
+    /// or DOUBLE but which a writer may legitimately store as an integer
+    /// type for an integer image, so the reader accepts the breadth the
+    /// spec allows.
+    pub fn as_f64_vec(&self, bo: ByteOrder) -> Result<Vec<f64>> {
+        let n = self.count as usize;
+        let need = n.saturating_mul(type_size(self.field_type) as usize);
+        if self.data.len() < need {
+            return Err(Error::invalid("TIFF: float entry truncated"));
+        }
+        let mut out = Vec::with_capacity(n);
+        match self.field_type {
+            TYPE_FLOAT => {
+                for i in 0..n {
+                    out.push(bo.read_f32(&self.data[i * 4..i * 4 + 4]) as f64);
+                }
+            }
+            TYPE_DOUBLE => {
+                for i in 0..n {
+                    out.push(bo.read_f64(&self.data[i * 8..i * 8 + 8]));
+                }
+            }
+            TYPE_RATIONAL => {
+                for i in 0..n {
+                    let num = bo.read_u32(&self.data[i * 8..i * 8 + 4]) as f64;
+                    let den = bo.read_u32(&self.data[i * 8 + 4..i * 8 + 8]) as f64;
+                    out.push(if den == 0.0 { 0.0 } else { num / den });
+                }
+            }
+            TYPE_SRATIONAL => {
+                for i in 0..n {
+                    let num = bo.read_i32(&self.data[i * 8..i * 8 + 4]) as f64;
+                    let den = bo.read_i32(&self.data[i * 8 + 4..i * 8 + 8]) as f64;
+                    out.push(if den == 0.0 { 0.0 } else { num / den });
+                }
+            }
+            TYPE_SBYTE => {
+                for i in 0..n {
+                    out.push(self.data[i] as i8 as f64);
+                }
+            }
+            TYPE_SSHORT => {
+                for i in 0..n {
+                    out.push(bo.read_u16(&self.data[i * 2..i * 2 + 2]) as i16 as f64);
+                }
+            }
+            TYPE_SLONG => {
+                for i in 0..n {
+                    out.push(bo.read_i32(&self.data[i * 4..i * 4 + 4]) as f64);
+                }
+            }
+            // BYTE / SHORT / LONG / LONG8 fall through to the unsigned
+            // integer reader.
+            _ => {
+                let v = self.as_u64_vec(bo)?;
+                out.extend(v.into_iter().map(|x| x as f64));
+            }
         }
         Ok(out)
     }

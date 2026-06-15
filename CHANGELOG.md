@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- SampleFormat=3 (IEEE 754 floating-point) 16-/32-/64-bit grayscale
+  decode (TIFF 6.0 §SampleFormat). Single-channel BlackIsZero /
+  WhiteIsZero float strips/tiles render to a Gray8 display plane via a
+  linear map of the finite sample extent (SMinSampleValue /
+  SMaxSampleValue tags 340/341 when present, else the scanned data
+  min/max); non-finite samples render at the floor; only Predictor=1 is
+  accepted; float on non-grayscale photometrics is a precise typed
+  error.
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.3...v0.0.4) - 2026-06-15
 
 ### Other

@@ -69,6 +69,13 @@ pub const TAG_PREDICTOR: u16 = 317;
 pub const TAG_COLOR_MAP: u16 = 320;
 pub const TAG_EXTRA_SAMPLES: u16 = 338;
 pub const TAG_SAMPLE_FORMAT: u16 = 339;
+// SMinSampleValue / SMaxSampleValue (TIFF 6.0 §SampleFormat page 80):
+// "Type = the field type that best matches the sample data." For a
+// SampleFormat = 3 image these carry the floating-point sample extent
+// the decoder maps onto the display range; their default is "the full
+// range of the data type."
+pub const TAG_S_MIN_SAMPLE_VALUE: u16 = 340;
+pub const TAG_S_MAX_SAMPLE_VALUE: u16 = 341;
 
 // --- CMYK / separated-image tags (Section 16) ---------------------------
 // TIFF 6.0 §16 "CMYK Images" page 70/71:

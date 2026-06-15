@@ -19,6 +19,7 @@ library source was consulted.
 | WhiteIsZero    | 4 / 8          | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
 | WhiteIsZero    | 16             | None / PackBits / LZW / Deflate / **ZSTD** | `Gray16Le` |
 | WhiteIsZero / BlackIsZero | 8 / 16 | None / PackBits / LZW / Deflate / **ZSTD** + **SampleFormat=2 (signed int)** | `Gray8` / `Gray16Le` (offset-binary display map) |
+| WhiteIsZero / BlackIsZero | 16 / 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD** + **SampleFormat=3 (IEEE float)** | `Gray8` (linear extent→display map) |
 | BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
 | BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` / `Gray16Le` |
 | **Transparency Mask** | 1       | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` (interior = 0xFF, exterior = 0x00) |
@@ -259,14 +260,38 @@ The mapping is bijective and monotone, so relative brightness is
 preserved exactly. SampleFormat = 2 on any other photometric / width
 (RGB, palette, CMYK, YCbCr, CIELab, or a sub-byte / non-assembled
 width) has no single defensible display mapping in this build and is
-surfaced as a precise typed error. Value `3` (IEEE floating-point) is
-likewise rejected — the byte interpretation is a non-integer numeric
-type the integer pipeline cannot render — enforcing the §SampleFormat
-reader rule: "If the SampleFormat field is present and the value is
-not 1, a Baseline TIFF reader that cannot handle the SampleFormat
-value must terminate the import process gracefully." An absent field
-defaults to unsigned (so every existing TIFF fixture decodes
-byte-for-byte unchanged); non-uniform per-component values and
+surfaced as a precise typed error. Value `3` (IEEE floating-point) now
+decodes for the single-channel grayscale photometrics (BlackIsZero /
+WhiteIsZero) at the three IEEE 754 widths a float TIFF stores — 16-bit
+(binary16 half), 32-bit (binary32 single), 64-bit (binary64 double),
+the layout scientific / elevation / HDR-source TIFFs use. §SampleFormat
+fixes the sample size in BitsPerSample (not in this field), so the width
+is read there exactly as for the integer paths, and the binary16 half is
+widened to single precision losslessly. A float sample carries no
+intrinsic display range, so — paralleling the §23 CIELab "some
+conversion to RGB will be required" latitude and the signed-integer
+offset-binary map — the decoder maps the finite sample extent linearly
+onto the 8-bit Gray8 display plane: a sample at the extent minimum
+renders 0, one at the maximum renders 255. The extent is the
+SMinSampleValue / SMaxSampleValue pair (tags 340 / 341) when both are
+present (§SampleFormat: this "makes it possible for readers to assume
+that data samples are bound to the range [SMinSampleValue,
+SMaxSampleValue] without scanning the image data"), else the actual
+finite min/max scanned from the decoded samples (the spec's stated
+fallback when the bound tags are absent). Non-finite samples (NaN /
+±Inf) are excluded from the extent and render at the display floor, and
+a degenerate extent (all samples equal) renders a flat plane. Only
+`Predictor = 1` is meaningful — §14 horizontal differencing is defined
+over integer samples and the floating-point predictor (`Predictor = 3`)
+is rejected at the predictor gate — so a float strip declaring a
+predictor is surfaced as a precise typed error. SampleFormat = 3 on any
+other photometric (RGB, palette, CMYK, YCbCr, CIELab) likewise has no
+single defensible display mapping in this build and is rejected per the
+§SampleFormat reader rule: "If the SampleFormat field is present and the
+value is not 1, a Baseline TIFF reader that cannot handle the
+SampleFormat value must terminate the import process gracefully." An
+absent field defaults to unsigned (so every existing TIFF fixture
+decodes byte-for-byte unchanged); non-uniform per-component values and
 out-of-range values (≥ 5) are also rejected.
 
 `Orientation` (tag 274, TIFF 6.0 §Orientation page 36) is inspected on
@@ -547,8 +572,11 @@ remaining gaps are:
 - **DNG / GeoTIFF / EXIF blob extraction.**
 - **Subsampled-YCbCr planar / tiled / predictor combinations** — the
   data-unit packing is single-strip chunky; these axes remain deferred.
-- **Float (`SampleFormat = 3`) and non-canonical `Orientation`
-  (2..=8)** — surfaced as precise typed errors rather than mis-rendered.
+- **Non-canonical `Orientation` (2..=8)** — surfaced as a precise typed
+  error rather than mis-rendered. Float (`SampleFormat = 3`) grayscale
+  now decodes (see the SampleFormat section above); float RGB / palette /
+  CMYK / YCbCr / CIELab and the §14 float predictor (`Predictor = 3`)
+  remain precise typed errors.
 
 ## Registration
 
