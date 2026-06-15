@@ -51,7 +51,7 @@ component 0 first, then component 1, etc.; the decoder re-interleaves
 the planes into chunky order downstream so every photometric path
 (RGB / CMYK / YCbCr) sees the same input shape. JPEG-in-TIFF
 (`Compression = 7`) remains chunky-only — TN2's planar-2 rules are
-out of scope for this round. Multi-page files walk the next-IFD chain
+not yet supported. Multi-page files walk the next-IFD chain
 via [`decode_tiff_all`]. Both `II` (little-endian) and `MM`
 (big-endian) byte orders are accepted, and both classic
 32-bit-offset TIFF and BigTIFF (8-byte offsets, magic 43) parse.
@@ -76,8 +76,8 @@ Supported photometric / sampling combinations:
   of the bilevel/grayscale render paths.
 * `PhotometricInterpretation = 2` (RGB) with `SamplesPerPixel = 3`:
   3-plane full-resolution JPEG (no chroma subsampling), decoded to
-  `Rgb24`. This is the layout ImageMagick's default
-  `convert -compress jpeg` produces from PPM input. `oxideav-mjpeg`
+  `Rgb24`. This is the common full-resolution RGB JPEG layout that a
+  PPM-to-JPEG-compressed TIFF transcode produces. `oxideav-mjpeg`
   may hand the decoded full-resolution 3-component frame back either
   as three planar components or as a single packed interleaved
   `R G B` plane (stride = `width × 3`), depending on its build; the
@@ -86,8 +86,8 @@ Supported photometric / sampling combinations:
   3-plane planar YCbCr JPEG with `YCbCrSubSampling` reflected in the
   JPEG sampling factors. 4:4:4 / 4:2:2 / 4:2:0 / 4:1:1 are all
   composited to `Rgb24` via the BT.601 matrix matching TN2's default
-  `ReferenceBlackWhite = [0,255,128,255,128,255]`. This is the layout
-  `tiffcp -c jpeg` produces.
+  `ReferenceBlackWhite = [0,255,128,255,128,255]`. This is the layout a
+  YCbCr JPEG-compressed TIFF transcode produces.
 * `PhotometricInterpretation = 5` (CMYK) with `SamplesPerPixel = 4`:
   4-component JPEG datastream — `oxideav-mjpeg` reads any optional
   Adobe APP14 marker inside the segment to select the per-sample
@@ -95,10 +95,10 @@ Supported photometric / sampling combinations:
   packed `C M Y K` bytes (`0 = no ink`). The TIFF compositor then
   converts to `Rgb24` using the same additive-RGB formula the
   uncompressed CMYK path uses (`R = (255 − C) × (255 − K) / 255`,
-  etc., TIFF 6.0 §16 `InkSet = 1`). This is the layout
-  `convert -colorspace CMYK -compress jpeg` produces.
+  etc., TIFF 6.0 §16 `InkSet = 1`). This is the layout a
+  CMYK JPEG-compressed TIFF transcode produces.
 
-Out of scope in this round (return precise `Error::Unsupported`):
+Not supported (return precise `Error::Unsupported`):
 12-bit (SOF1 with `P = 12`), arithmetic (SOF9 / SOF11),
 `PlanarConfiguration = 2` (`Compression = 7` only; the non-JPEG
 compressors do accept planar layout — see above), and the
@@ -195,20 +195,18 @@ chain — the same axes as Deflate. The compression level is an
 out-of-band encoder runtime parameter (range 1–22 in the de-facto
 registry; never stored in the file, decoders are level-agnostic),
 so the writer simply uses its compression backend's default. Both
-directions go through [`compcol`](https://crates.io/crates/compcol)'s
-Zstandard codec (this round also migrated the Deflate path to
-`compcol`'s zlib, dropping the previous deflate dependency).
-Validation is three-layered (`tests/zstd_roundtrip.rs`): 17
-binary-independent self-roundtrips (Gray8 / Gray16Le / Rgb24 /
-Palette8 / Bilevel × predictor / planar / tiled-with-partial-edges /
-BigTIFF / multi-page), hand-built classic-II fixtures whose strips
-are hand-assembled RFC 8478 `Raw_Block` frames (wire bytes our
-encoder never emits), and black-box cross-checks against `tiffcp`
-(our `Compression = 50000` output transcoded to `-c none` by the
-independent binary, and independently-produced `-c zstd` /
-`-c zstd:2` files decoded by us — both compared pixel-exact).
-`Compression = 50001` (WebP) from the same registry page remains
-unimplemented.
+directions (and the Deflate path's zlib) go through
+[`compcol`](https://crates.io/crates/compcol), the workspace
+compression collection. Validation is three-layered
+(`tests/zstd_roundtrip.rs`): binary-independent self-roundtrips
+(Gray8 / Gray16Le / Rgb24 / Palette8 / Bilevel × predictor / planar /
+tiled-with-partial-edges / BigTIFF / multi-page), hand-built classic-II
+fixtures whose strips are hand-assembled RFC 8478 `Raw_Block` frames
+(wire bytes our encoder never emits), and black-box cross-checks against
+an independent reference transcoder (our `Compression = 50000` output
+transcoded to uncompressed, and independently-produced Zstandard files
+decoded by us — both compared pixel-exact). `Compression = 50001`
+(WebP) from the same registry page remains unimplemented.
 
 ### Transparency Mask (PhotometricInterpretation = 4)
 
@@ -371,10 +369,9 @@ tag (317) so the decoder reverses the step — the exact inverse of the
 decoder's cumulative add. It applies to the lossless byte-aligned
 formats whose decode path already supports it (`Gray8`, `Gray16Le`,
 `Rgb24`, `Palette8`); combining it with the bilevel CCITT schemes or
-with `Bilevel` input is rejected. `tiffinfo` reports
-`Predictor: horizontal differencing 2 (0x2)` on the output and
-`tiffcp -c none` transcodes our `Predictor = 2` streams back to
-uncompressed TIFFs that re-decode to the original pixels.
+with `Bilevel` input is rejected. An independent reference reader
+reports horizontal-differencing predictor 2 on the output, and an
+independent transcode to uncompressed re-decodes to the original pixels.
 
 `PlanarConfiguration = 2` (separate component planes, TIFF 6.0
 §"PlanarConfiguration") is available on encode via the
@@ -389,9 +386,9 @@ grayscale data," so each plane is differenced independently with an
 offset of one sample. The flag is rejected on the single-sample
 formats (`Gray8` / `Gray16Le` / `Palette8` / `Bilevel`), where the
 spec says the field is irrelevant. Works under None / PackBits / LZW /
-Deflate. `tiffcp -c none` transcodes our planar output back to an
-uncompressed TIFF that re-decodes to the original pixels, and
-ImageMagick reads it bit-exactly.
+Deflate. An independent transcode of our planar output to an
+uncompressed TIFF re-decodes to the original pixels, and an independent
+reference reader reads it bit-exactly.
 
 Tiled layout (`TileWidth` / `TileLength` / `TileOffsets` /
 `TileByteCounts`, TIFF 6.0 §15) is available on encode via the
@@ -409,9 +406,9 @@ the `ImageWidth × ImageLength` region and ignores the padding. Works for
 the byte-aligned chunky formats (`Gray8` / `Gray16Le` / `Rgb24` /
 `Palette8`) under None / PackBits / LZW / Deflate / ZSTD, with or without
 `Predictor = 2` (applied per-tile). Tiling is rejected on `Bilevel`
-input and the CCITT compressors. `tiffcp -c
-none` transcodes our tiled output back to an uncompressed TIFF that
-re-decodes to the original pixels, and ImageMagick reads it bit-exactly.
+input and the CCITT compressors. An independent transcode of our tiled
+output to an uncompressed TIFF re-decodes to the original pixels, and an
+independent reference reader reads it bit-exactly.
 
 Tiling composes with `planar = true` on `Rgb24`: the encoder writes one
 row-major tile grid per component plane, emitting plane 0's tiles first
@@ -422,9 +419,9 @@ plane, and so on"). `TileOffsets` / `TileByteCounts` therefore carry
 `SamplesPerPixel × TilesPerImage` entries. Each plane is a
 single-component image, so §15 boundary padding and the §14 predictor
 run with an offset of one sample (§14: "If PlanarConfiguration is 2 …
-Differencing works the same as it does for grayscale data"). `tiffcp -c
-none` and ImageMagick both transcode/read the planar-tiled output back
-to the original chunky pixels bit-exactly.
+Differencing works the same as it does for grayscale data"). An
+independent reference transcoder and reader both round-trip the
+planar-tiled output back to the original chunky pixels bit-exactly.
 
 On the read side, the decoder walks the same §15 tile fields, decodes
 each tile, reverses any per-tile `Predictor = 2` differencing, and
@@ -439,8 +436,8 @@ predictor) and the full range of edge-tile geometries (exact-fit,
 partial edges, non-square tiles, oversized single tile, 1-pixel
 overhang).
 
-Sub-byte (1-bit and 4-bit) chunky tiles also **decode** as of this
-round (TIFF 6.0 §15 — see the Decode note above). Because `TileWidth`
+Sub-byte (1-bit and 4-bit) chunky tiles also **decode** (TIFF 6.0
+§15 — see the Decode note above). Because `TileWidth`
 is a multiple of 16 and §15 treats each tile row as an independent
 byte-padded scanline, the `SamplesPerPixel = 1`, `BitsPerSample ∈
 {1, 4}` case keeps every tile-column boundary byte-aligned, so the
@@ -460,10 +457,10 @@ input continues to reject `tiling`.
 
 Output is classic II little-endian TIFF, single-IFD via
 [`encode_tiff`] or multi-page via [`encode_tiff_multi`]. Files
-roundtrip through ImageMagick / `tiffinfo` / `tiffcp`; CCITT
-outputs additionally validate by asking `tiffcp -c none` to
-transcode our `Compression = 3` stream back to uncompressed and
-checking the resulting pixels match the original input.
+roundtrip through independent reference readers/transcoders; CCITT
+outputs additionally validate by transcoding our `Compression = 3`
+stream back to uncompressed with an independent tool and checking the
+resulting pixels match the original input.
 
 ### YCbCr write (PhotometricInterpretation = 6, chunky 4:4:4)
 
@@ -532,98 +529,26 @@ errors out — classic and BigTIFF IFD layouts are wire-incompatible).
 
 ## Backlog (not yet implemented)
 
-- CCITT T.4 2-D coding (`Compression = 3` with `T4Options` bit 0
-  set) and T.6 / Group 4 (`Compression = 4`) **decode + encode**
-  as of this round. The 2-D Pass / Horizontal / Vertical mode
-  codes — transcribed clean-room from ITU-T T.4 §4.2 / T.6 into
-  `docs/image/tiff/ccitt-t4-t6-fax-codes.md` §1 — drive the same
-  READ algorithm both variants share. T.6 adds the
-  "imaginary all-white first reference line" + no-EOL framing rule;
-  T.4 2-D layers the EOL+tag-bit row separator on top of it. The
-  optional uncompressed-mode extension (`0000001111` followed by
-  Table 5/T.4 = Table 4/T.6 image-pattern + exit codes) **decodes**
-  as of this round: when a 2-D row hits the `0000001xxx` (`xxx = 111`)
-  entrance code, the READ loop switches to literal-pixel transmission
-  — unary image-pattern codes (`z` whites + 1 black for `z ≤ 4`, the
-  `000001` 5-white make-up, and the `0000001T`…`00000000001T` exit
-  codes whose tag bit `T` gives the colour of the next coded run) —
-  then resumes Pass/Horizontal/Vertical coding from the post-exit
-  position. The dispatch no longer rejects `T4Options` bit 1 /
-  `T6Options` bit 1 ("uncompressed mode allowed"), since those bits
-  are writer-capability hints rather than per-stream requirements and
-  the uncompressed segments are self-delimiting; the T.6 dispatch
-  additionally rejects any *undefined* `T6Options` bit. Decode is
-  validated through 7 end-to-end `run_roundtrip` fixtures (solid
-  white, two rectangles, diagonal, wide run) × G4 / T.4-2D against
-  `tiffcp -c g4` / `-c g3:2d` oracle outputs, plus in-crate unit
-  tests covering the mode-code dictionary entries (V(0), VR/VL(1..3),
-  Pass, Horizontal, Uncompressed-extension), the `first_change_after`
-  reference-line walker, and the uncompressed-mode segment decoder —
-  3 spec-exact hand-built T.6 fixtures (the image-pattern byte, the
-  `000001` long-white make-up, and the exit-code `m` trailing-white
-  field), 5 encode→decode self-roundtrips exercising every emit
-  branch (solid white / black, alternating, all residual-length runs,
-  and a segment that resumes 2-D coding after exit). Encode is
-  validated through 11 in-crate ccitt-module self-roundtrips (every
-  mode-code branch + the byte-aligned EOL pad + the LSB-first fill
-  order), 13 binary-independent integration self-roundtrips in
-  `tests/encode_ccitt_2d_roundtrip.rs` (solid white / black, two
-  rectangles, diagonal, wide pattern × T.4 2-D + T.6, plus T4Options
-  bit 2 byte-aligned EOL and Gray8 negative-path rejection), and
-  black-box cross-checks against `tiffcp -c none` and `tiffinfo`
-  (independent transcode + verbose-report inspection confirms
-  `T4Options = 1` for T.4 2-D and `Group 4` for T.6). The production
-  READ encoder does not *emit* uncompressed mode (it is a bit-rate
-  control extension, never a compression win for facsimile content);
-  a test-only `encode_uncompressed_segment` helper drives the
-  spec-exact self-roundtrips that prove the decode path.
-- JPEG-in-TIFF Compression = 6 (old-style, deprecated by TIFF Tech
-  Note 2; decoder returns precise `Error::Unsupported`).
-  Compression = 7 (new-style) **decodes** as of this round across
-  Gray / RGB / YCbCr / CMYK photometrics; 12-bit precision (SOF1 with
-  `P = 12`), arithmetic coding (SOF9 / SOF11), and
-  `PlanarConfiguration = 2` JPEG remain unsupported.
-- CIELab photometric interpretation (PhotometricInterpretation = 8)
-  **decodes** and **encodes** as of this round (3-sample `L*a*b*`
-  and 1-sample `L*`-only, 8-bit; both uncompressed and the
-  byte-aligned compressors; encode composes with `Predictor = 2`,
-  `PlanarConfiguration = 2` on `CieLab8`, tiled layout, and BigTIFF
-  per the §23 / §14 / §15 spec rules).
-- Zstandard `Compression = 50000` **decodes + encodes** as of this
-  round (see the dedicated section above); the sibling de-facto
-  registry value `Compression = 50001` (WebP — one VP8/VP8L
-  bitstream per strip / tile) remains unimplemented and returns the
-  generic unsupported-compression error.
-- DNG / GeoTIFF / EXIF blob extraction
-- Encoder-side planar (`PlanarConfiguration = 2`) writing is now
-  supported for `Rgb24` under None / PackBits / LZW / Deflate / ZSTD (with or
-  without `Predictor = 2`), both strip-based and tiled (one tile grid
-  per component plane, §15); decode covers the same plus CCITT. Tiled
-  write (chunky, §15) covers `Gray8` / `Gray16Le` / `Rgb24` /
-  `Palette8` under None / PackBits / LZW / Deflate / ZSTD with the optional
-  `Predictor = 2`. Encoder-side YCbCr covers both the chunky
-  `YCbCrSubSampling = [1, 1]` 4:4:4 layout
-  ([`EncodePixelFormat::YCbCr24`]) **and** the chroma-subsampled
-  chunky writes ([`EncodePixelFormat::YCbCrSubsampled24`]) for the
-  TIFF 6.0 §21 page 90 legal factor pairs `[2, 1]` / `[2, 2]` /
-  `[4, 1]` / `[4, 2]` (the spec requires
-  `YCbCrSubsampleVert <= YCbCrSubsampleHoriz`, so `[1, 2]` is rejected)
-  as of this round, under None / PackBits / LZW / Deflate / ZSTD. The
-  subsampled writer takes a full-resolution interleaved `(Y, Cb, Cr)`
-  raster, box-averages the chroma per `sh × sv` block (the symmetric
-  even-tap filter §21 page 92 associates with the centered
-  `YCbCrPositioning = 1` it declares), and packs the §21 page 93
-  "Ordering of Component Samples" data unit (`sv` rows of `sh` Y
-  samples, then one Cb, then one Cr — the §21 page 94 `[4, 2]` worked
-  example `Y00 Y01 Y02 Y03 Y10 Y11 Y12 Y13 Cb00 Cr00 …`). The
-  matching **decode** side was completed this round too: the strip
-  reader now sizes subsampled-YCbCr strips by the data-unit geometry
-  (it previously assumed full-resolution rows and rejected the smaller
-  strip as truncated), so uncompressed / byte-aligned subsampled YCbCr
-  now decodes end-to-end, not only inside a JPEG-in-TIFF segment.
-  ImageWidth / ImageLength must be integer multiples of the factors
-  (§21 page 90); YCbCr planar / tiled / predictor combinations remain
-  deferred (the data-unit packing is single-strip chunky here).
+The compression schemes, photometrics, and layout features described
+above are all implemented on both decode and encode where stated. The
+remaining gaps are:
+
+- **JPEG-in-TIFF `Compression = 6`** (old-style, deprecated by TIFF
+  Technical Note 2) — decoder returns `Error::Unsupported`. The
+  new-style `Compression = 7` path does not support 12-bit precision
+  (SOF1 `P = 12`), arithmetic coding (SOF9 / SOF11), or
+  `PlanarConfiguration = 2` JPEG segments.
+- **`Compression = 50001` (WebP)** from the de-facto registry — returns
+  the generic unsupported-compression error.
+- **CCITT uncompressed-mode *emission*** — the decoder reads the
+  optional uncompressed-mode extension, but the encoder never emits it
+  (it is a bit-rate control extension, not a compression win for
+  facsimile content).
+- **DNG / GeoTIFF / EXIF blob extraction.**
+- **Subsampled-YCbCr planar / tiled / predictor combinations** — the
+  data-unit packing is single-strip chunky; these axes remain deferred.
+- **Float (`SampleFormat = 3`) and non-canonical `Orientation`
+  (2..=8)** — surfaced as precise typed errors rather than mis-rendered.
 
 ## Registration
 
@@ -650,19 +575,16 @@ Run with nightly + cargo-fuzz:
 cargo +nightly fuzz run decode -- -max_total_time=60
 ```
 
-Round 126 added the target and fixed three panic vectors it caught
-within the first ~10 M iterations: an LZW first-after-Clear
-non-leaf code that formed a self-referential prefix chain
-(`src/compress.rs`), a BigTIFF `first_ifd_offset = u64::MAX` that
-debug-panicked the `off + 8` slice math (`src/ifd.rs`), and an
-attacker-claimed `ImageWidth * ImageLength` that drove a
-multi-exabyte upfront `Vec::with_capacity` (`src/decoder.rs`
-`MAX_IMAGE_PIXELS` gate). Deflate output is now capped via
-`miniz_oxide`'s `decompress_to_vec_zlib_with_limit` to bound
-zip-bomb expansion. Regression tests live in
-`tests/decode_fuzz_regressions.rs` plus inline `compress` /
-`ifd` test modules so the panic-freedom checks survive in CI even
-when the fuzzer isn't being driven.
+The harness has caught and pinned several panic vectors as regression
+tests: an LZW first-after-Clear non-leaf code forming a self-referential
+prefix chain (`src/compress.rs`), a BigTIFF `first_ifd_offset = u64::MAX`
+that overflowed slice math (`src/ifd.rs`), and an attacker-claimed
+`ImageWidth × ImageLength` driving a multi-exabyte upfront allocation
+(the `src/decoder.rs` `MAX_IMAGE_PIXELS` gate). Deflate output is capped
+to bound zip-bomb expansion. Regression tests live in
+`tests/decode_fuzz_regressions.rs` plus inline `compress` / `ifd` test
+modules so the panic-freedom checks survive in CI even when the fuzzer
+isn't being driven.
 
 ## Benchmarks
 
@@ -673,26 +595,19 @@ TIFF/LZW encoder hot path (`compress::pack_lzw`). Run with:
 cargo bench -p oxideav-tiff --bench lzw
 ```
 
-Round 129 replaced the per-byte `HashMap<(u16, u8), u16>` dictionary
-lookup in `pack_lzw` with a flat-array trie (three `[u16; 4096]` /
-`[u8; 4096]` arrays — `first_child`, `next_sibling`, `suffix`). The
-bitstream output is byte-identical to the pre-r129 encoder (same
-greedy match, same code-width bump points, same Clear-on-fill
-timing), so the change is invisible to any decoder, but throughput
-on representative image-like strips climbed substantially. On Apple
-Silicon `release` builds the four bench scenarios moved from:
+`pack_lzw` uses a flat-array trie (three `[u16; 4096]` / `[u8; 4096]`
+arrays — `first_child`, `next_sibling`, `suffix`) for its dictionary
+lookup. The bitstream output is identical to the simpler hash-map
+formulation (same greedy match, same code-width bump points, same
+Clear-on-fill timing), so it is invisible to any decoder, but throughput
+on representative image-like strips is far higher: the four bench
+scenarios (`lzw_random_64k`, `lzw_repeating_motif_64k`,
+`lzw_zeros_256k`, `lzw_natural_image_64k`) range from a modest gain on
+random data (no prefix reuse, worst case) up to roughly 20x on a natural
+256×256 8-bit greyscale image fixture, where the trie's child lists for
+common short prefixes amortise across many matches. Numbers move with
+host hardware; the value is the relative cost across scenarios.
 
-| Scenario                  | r128 HashMap | r129 trie   | Speedup |
-| ------------------------- | -----------: | ----------: | ------: |
-| `lzw_random_64k`          | ~53 MiB/s    | ~65 MiB/s   |   ~1.2x |
-| `lzw_repeating_motif_64k` | ~44 MiB/s    | ~640 MiB/s  |  ~14.5x |
-| `lzw_zeros_256k`          | ~46 MiB/s    | ~640 MiB/s  |  ~14.1x |
-| `lzw_natural_image_64k`   | ~39 MiB/s    | ~809 MiB/s  |  ~20.5x |
+## License
 
-The "natural image" 256×256 8-bit greyscale fixture (vertical ramp +
-horizontal sinusoid) is the most representative of a real TIFF strip
-and gives the largest speedup because the trie's child lists for the
-common short prefixes get amortised across many matches. The random
-fixture is the worst case (no prefix reuse) and still moves up
-modestly because the trie eliminates the per-byte hash + bucket
-probe.
+MIT. See [LICENSE](LICENSE).
