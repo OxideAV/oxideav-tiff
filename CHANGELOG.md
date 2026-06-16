@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- SampleFormat=3 (IEEE 754 floating-point) 16-/32-/64-bit **RGB** decode
+  (TIFF 6.0 §SampleFormat). 3-channel (PhotometricInterpretation=2,
+  SamplesPerPixel=3) float strips/tiles render to an Rgb24 display plane
+  via a linear map of the finite sample extent (SMinSampleValue /
+  SMaxSampleValue tags 340/341 when present, else the scanned data
+  min/max). The extent is shared across all three colour channels so the
+  pixel's relative R/G/B balance (its chromaticity) is preserved; a
+  per-channel extent would re-balance the colour. Non-finite samples
+  render at the floor; only Predictor=1 is accepted; float RGB at a
+  sample count other than 3, and float on the remaining photometrics,
+  stay precise typed errors.
 - Non-canonical `Orientation` (tag 274, values 2..=8) decode (TIFF 6.0
   §Orientation, page 36). The fully-assembled image is re-oriented into
   display order so a consumer always sees the visually-correct geometry:

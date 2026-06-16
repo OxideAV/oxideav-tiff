@@ -581,13 +581,13 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     }
 
     // SampleFormat = 3 (IEEE floating-point, TIFF 6.0 §SampleFormat
-    // page 80) decodes for the single-channel grayscale photometrics at
-    // the three IEEE 754 widths a float TIFF stores: 16-bit (half),
-    // 32-bit (single), 64-bit (double). §SampleFormat fixes the size in
-    // BitsPerSample, not in this field, so the width is read from
-    // BitsPerSample exactly as for the integer paths. A float sample
-    // carries no intrinsic display range, so — paralleling the §23
-    // CIELab "some conversion to a display range will be required"
+    // page 80) decodes for the single-channel grayscale photometrics and
+    // for 3-channel RGB at the three IEEE 754 widths a float TIFF stores:
+    // 16-bit (half), 32-bit (single), 64-bit (double). §SampleFormat
+    // fixes the size in BitsPerSample, not in this field, so the width is
+    // read from BitsPerSample exactly as for the integer paths. A float
+    // sample carries no intrinsic display range, so — paralleling the
+    // §23 CIELab "some conversion to a display range will be required"
     // latitude and the signed-integer offset-binary map — the decoder
     // maps the finite sample extent linearly onto the 8-bit display
     // plane: the extent is the §SampleFormat SMinSampleValue /
@@ -596,22 +596,28 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     // bound to the range [SMinSampleValue, SMaxSampleValue] without
     // scanning the image data"), else the actual finite min/max scanned
     // from the decoded samples (the spec's stated fallback when the
-    // bound tags are absent). Non-finite samples (NaN / ±Inf) are
-    // excluded from the extent and rendered at the display floor. Only
-    // Predictor = 1 is meaningful here — the §14 horizontal-differencing
-    // predictor is defined over integer samples, and the floating-point
-    // predictor (Predictor = 3) is already rejected at the predictor
-    // gate above. The float byte stream has no other defensible display
-    // mapping for the non-grayscale photometrics, so SampleFormat = 3 is
-    // refused there per the §SampleFormat "terminate gracefully" reader
-    // rule rather than mis-rendered.
+    // bound tags are absent). For RGB the extent is a single shared
+    // bound across all three colour channels so the relative R / G / B
+    // magnitudes — the pixel's chromaticity — are preserved exactly; a
+    // per-channel extent would re-balance the colour. Non-finite samples
+    // (NaN / ±Inf) are excluded from the extent and rendered at the
+    // display floor. Only Predictor = 1 is meaningful here — the §14
+    // horizontal-differencing predictor is defined over integer samples,
+    // and the floating-point predictor (Predictor = 3) is already
+    // rejected at the predictor gate above. The float byte stream has no
+    // other defensible display mapping for the remaining photometrics, so
+    // SampleFormat = 3 is refused there per the §SampleFormat "terminate
+    // gracefully" reader rule rather than mis-rendered.
     if sample_format == SAMPLE_FORMAT_IEEE_FP {
         let grayscale = matches!(photometric, PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO);
+        let rgb = photometric == PHOTO_RGB && samples_per_pixel == 3;
         let width_ok = matches!(bps_first, 16 | 32 | 64);
-        if !grayscale || samples_per_pixel != 1 || !width_ok {
+        let shape_ok = (grayscale && samples_per_pixel == 1) || rgb;
+        if !shape_ok || !width_ok {
             return Err(Error::Unsupported(format!(
                 "TIFF: SampleFormat=3 (IEEE floating-point) supported only for \
-                 16-/32-/64-bit grayscale (photometric 0/1, SamplesPerPixel=1); got \
+                 16-/32-/64-bit grayscale (photometric 0/1, SamplesPerPixel=1) or \
+                 RGB (photometric 2, SamplesPerPixel=3); got \
                  photometric={photometric} samples_per_pixel={samples_per_pixel} \
                  bits_per_sample={bps_first}"
             )));
@@ -715,6 +721,21 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             (
                 build_gray16le(&pixel_buf, width, height, bo, inv, signed),
                 TiffPixelFormat::Gray16Le,
+            )
+        }
+        // SampleFormat = 3 (IEEE floating-point) RGB: 16-bit half,
+        // 32-bit single, 64-bit double, three interleaved colour
+        // channels per pixel. These guarded arms take precedence over
+        // the integer 16-bit RGB arm below, so the integer path only
+        // runs when the field is not float. Output is an Rgb24 display
+        // plane scaled from a single shared float extent across the
+        // three channels (see the SampleFormat = 3 note above and
+        // `build_rgb24_from_float`).
+        (PHOTO_RGB, 3, bpsw @ (16 | 32 | 64)) if sample_format == SAMPLE_FORMAT_IEEE_FP => {
+            let (dmin, dmax) = float_display_extent(entries, bo);
+            (
+                build_rgb24_from_float(&pixel_buf, width, height, bo, bpsw, dmin, dmax)?,
+                TiffPixelFormat::Rgb24,
             )
         }
         (PHOTO_RGB, 3, 8) => (
@@ -2014,6 +2035,83 @@ fn build_gray8_from_float(
         width: w,
         height: h,
         pixel_format: TiffPixelFormat::Gray8,
+        planes: vec![TiffPlane { stride, data }],
+    })
+}
+
+/// Render `SampleFormat = 3` IEEE-float RGB to an Rgb24 display plane.
+/// Three interleaved colour channels per pixel (`R G B R G B …`) are read
+/// as floats and mapped through a *single shared* extent [`dmin`, `dmax`]:
+/// a sample at `dmin` renders 0, one at `dmax` renders 255, in between
+/// scaled and rounded. The extent comes from SMin/SMaxSampleValue when
+/// both are present, else is scanned from the finite samples of all three
+/// channels together — so the relative R / G / B magnitudes (the pixel's
+/// chromaticity) survive the conversion; a per-channel extent would
+/// re-balance the colour. Non-finite samples (NaN / ±Inf) render at the
+/// display floor (0). A degenerate extent (all samples equal) renders a
+/// flat 0 plane. `bps` selects the IEEE width (16 / 32 / 64).
+#[allow(clippy::too_many_arguments)]
+fn build_rgb24_from_float(
+    src: &[u8],
+    w: u32,
+    h: u32,
+    bo: ByteOrder,
+    bps: u16,
+    dmin: Option<f64>,
+    dmax: Option<f64>,
+) -> Result<TiffImage> {
+    let pixels = (w as usize) * (h as usize);
+    let n = pixels * 3;
+    let bytes_per = (bps / 8) as usize;
+    if src.len() < n * bytes_per {
+        return Err(Error::invalid(
+            "TIFF: float RGB strip data shorter than image",
+        ));
+    }
+    let samples = read_float_samples(src, n, bo, bps);
+
+    // Resolve the shared display extent: prefer the SMin/SMax tag pair,
+    // else scan the finite samples across all three channels for their
+    // actual min/max (the spec's stated fallback when the bound tags are
+    // absent).
+    let (mut lo, mut hi) = (dmin, dmax);
+    if lo.is_none() || hi.is_none() {
+        let mut smin = f64::INFINITY;
+        let mut smax = f64::NEG_INFINITY;
+        for &s in &samples {
+            if s.is_finite() {
+                if s < smin {
+                    smin = s;
+                }
+                if s > smax {
+                    smax = s;
+                }
+            }
+        }
+        if smin.is_finite() && smax.is_finite() {
+            lo.get_or_insert(smin);
+            hi.get_or_insert(smax);
+        }
+    }
+    let lo = lo.unwrap_or(0.0);
+    let hi = hi.unwrap_or(0.0);
+    let span = hi - lo;
+
+    let stride = w as usize * 3;
+    let mut data = Vec::with_capacity(stride * h as usize);
+    for &s in &samples {
+        let v = if !s.is_finite() || span <= 0.0 {
+            0u8
+        } else {
+            let t = ((s - lo) / span).clamp(0.0, 1.0);
+            (t * 255.0 + 0.5) as u8
+        };
+        data.push(v);
+    }
+    Ok(TiffImage {
+        width: w,
+        height: h,
+        pixel_format: TiffPixelFormat::Rgb24,
         planes: vec![TiffPlane { stride, data }],
     })
 }
