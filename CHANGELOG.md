@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Non-canonical `Orientation` (tag 274, values 2..=8) decode (TIFF 6.0
+  §Orientation, page 36). The fully-assembled image is re-oriented into
+  display order so a consumer always sees the visually-correct geometry:
+  values 2..=4 are mirror / 180° permutations that preserve the stored
+  shape, values 5..=8 are transpose-family permutations that swap width
+  and height. The remap is photometric- / bit-depth- / compression-
+  agnostic (operates on fixed-size pixel cells). Values 0 and ≥ 9 remain
+  precise invalid-data errors.
 - SampleFormat=3 (IEEE 754 floating-point) 16-/32-/64-bit grayscale
   decode (TIFF 6.0 §SampleFormat). Single-channel BlackIsZero /
   WhiteIsZero float strips/tiles render to a Gray8 display plane via a

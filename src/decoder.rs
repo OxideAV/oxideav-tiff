@@ -207,45 +207,41 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     };
 
     // Orientation (TIFF 6.0 §Orientation tag 274, page 36). SHORT,
-    // N = 1, default 1. The spec defines eight values: 1 = the 0th
-    // row is the visual top and the 0th column is the visual
-    // left-hand side (the canonical "as-stored == as-displayed"
-    // layout); 2..=8 cover the remaining horizontal flip / vertical
-    // flip / 90° / 180° / 270° / transpose / antitranspose
-    // permutations a writer may declare. The spec page 36 closing
-    // note reads: "Default is 1. Support for orientations other than
-    // 1 is not a Baseline TIFF requirement." This decoder is one
-    // such Baseline-only reader — it surfaces pixels in storage
-    // order and does not rotate or mirror them, so the canonical
-    // value 1 is the only orientation it can honour without
-    // silently mis-rendering. Values 2..=8 are surfaced as precise
-    // typed errors rather than silently decoded as 1 (which would
-    // produce a correctly-coloured but geometrically-wrong image);
-    // value 0 and values ≥ 9 are surfaced as invalid-data errors
-    // because the spec lists 1..=8 only. An absent field defaults
-    // to 1 per the §Orientation "Default is 1" line.
-    if let Some(orient_entry) = find(entries, TAG_ORIENTATION) {
+    // N = 1, default 1. The spec defines eight values describing how
+    // the stored 0th row / 0th column map onto the displayed image:
+    //
+    //   1 = 0th row → visual top,    0th column → visual left
+    //   2 = 0th row → visual top,    0th column → visual right
+    //   3 = 0th row → visual bottom, 0th column → visual right
+    //   4 = 0th row → visual bottom, 0th column → visual left
+    //   5 = 0th row → visual left,   0th column → visual top
+    //   6 = 0th row → visual right,  0th column → visual top
+    //   7 = 0th row → visual right,  0th column → visual bottom
+    //   8 = 0th row → visual left,   0th column → visual bottom
+    //
+    // Value 1 is the canonical "as-stored == as-displayed" layout
+    // (nothing to do; the decoder writes pixels in storage order,
+    // which is also display order). Values 2..=4 are in-place mirror /
+    // 180° permutations that keep the (width, height) shape; values
+    // 5..=8 are transpose-family permutations that swap width and
+    // height. We capture the value here and apply the corresponding
+    // geometric remap to the fully-assembled image at the end of the
+    // decode (see `apply_orientation`), so every photometric / bit
+    // depth / compression path picks it up uniformly. Value 0 and
+    // values ≥ 9 are surfaced as invalid-data errors because the spec
+    // lists 1..=8 only. An absent field defaults to 1 per the
+    // §Orientation "Default is 1" line.
+    let orientation = if let Some(orient_entry) = find(entries, TAG_ORIENTATION) {
         let orient = orient_entry.as_u32(bo)? as u16;
-        match orient {
-            1 => {
-                // Canonical "as-stored == as-displayed" — nothing
-                // to do; the rest of the decoder writes pixels in
-                // storage order which is also display order.
-            }
-            2..=8 => {
-                return Err(Error::Unsupported(format!(
-                    "TIFF: Orientation={orient} not supported; \
-                     §Orientation page 36 states 'Support for orientations \
-                     other than 1 is not a Baseline TIFF requirement'"
-                )));
-            }
-            other => {
-                return Err(Error::invalid(format!(
-                    "TIFF: Orientation={other} unknown (spec defines 1..=8)"
-                )));
-            }
+        if !(1..=8).contains(&orient) {
+            return Err(Error::invalid(format!(
+                "TIFF: Orientation={orient} unknown (spec defines 1..=8)"
+            )));
         }
-    }
+        orient
+    } else {
+        1
+    };
 
     // ResolutionUnit (TIFF 6.0 §"Physical Dimensions" / ResolutionUnit
     // tag 296, page 18). SHORT, N = 1, "Default = 2 (inch)." Spec defines
@@ -816,7 +812,77 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         }
     };
 
+    // Re-orient the storage-order image into display order per the
+    // §Orientation tag captured above. Value 1 is a no-op; 2..=8 remap
+    // pixel cells (and, for 5..=8, swap width and height).
+    let image = apply_orientation(image, orientation);
+
     Ok(image)
+}
+
+/// Remap a storage-order [`TiffImage`] into display order per the TIFF
+/// 6.0 §Orientation (tag 274) value `orientation` (1..=8). Value 1 is
+/// returned unchanged. The crate's pixel formats are all single-plane
+/// with `stride == width × bytes_per_pixel` (no row padding), so the
+/// remap operates on fixed-size pixel cells of `bpp` bytes.
+///
+/// Geometry (derived from the §Orientation page-36 table; `s` = stored
+/// `height`×`width`, `d` = display, indices row `r` / column `c`):
+///
+/// ```text
+///   2: d[r][c] = s[r][w-1-c]            (mirror horizontal)
+///   3: d[r][c] = s[h-1-r][w-1-c]        (rotate 180°)
+///   4: d[r][c] = s[h-1-r][c]            (mirror vertical)
+///   5: d[r][c] = s[c][r]                (transpose;        dims → h×w)
+///   6: d[r][c] = s[h-1-c][r]            (rotate 90° CW;    dims → h×w)
+///   7: d[r][c] = s[h-1-c][w-1-r]        (transpose+180°;   dims → h×w)
+///   8: d[r][c] = s[c][w-1-r]            (rotate 90° CCW;   dims → h×w)
+/// ```
+fn apply_orientation(image: TiffImage, orientation: u16) -> TiffImage {
+    if orientation == 1 {
+        return image;
+    }
+    let w = image.width as usize;
+    let h = image.height as usize;
+    let plane = &image.planes[0];
+    let bpp = plane.stride / w;
+    let src = &plane.data;
+
+    // 5..=8 transpose the axes: display width = stored height and vice
+    // versa. 2..=4 keep the (w, h) shape.
+    let transpose = orientation >= 5;
+    let (dw, dh) = if transpose { (h, w) } else { (w, h) };
+    let dstride = dw * bpp;
+    let mut data = vec![0u8; dstride * dh];
+
+    for r in 0..dh {
+        for c in 0..dw {
+            // Map the display cell (r, c) back to its stored (si, sj).
+            let (si, sj) = match orientation {
+                2 => (r, w - 1 - c),
+                3 => (h - 1 - r, w - 1 - c),
+                4 => (h - 1 - r, c),
+                5 => (c, r),
+                6 => (h - 1 - c, r),
+                7 => (h - 1 - c, w - 1 - r),
+                8 => (c, w - 1 - r),
+                _ => (r, c),
+            };
+            let s_off = si * plane.stride + sj * bpp;
+            let d_off = r * dstride + c * bpp;
+            data[d_off..d_off + bpp].copy_from_slice(&src[s_off..s_off + bpp]);
+        }
+    }
+
+    TiffImage {
+        width: dw as u32,
+        height: dh as u32,
+        pixel_format: image.pixel_format,
+        planes: vec![TiffPlane {
+            stride: dstride,
+            data,
+        }],
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

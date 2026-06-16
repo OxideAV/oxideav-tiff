@@ -299,18 +299,34 @@ every IFD. The spec defines eight values mapping the stored 0th row /
 0th column onto the displayed image: `1` is canonical (0th row = visual
 top, 0th column = visual left-hand side), `2..=8` cover the remaining
 horizontal-flip / vertical-flip / 90° / 180° / 270° / transpose /
-antitranspose permutations a writer may declare, and the spec closes
-with "Default is 1. Support for orientations other than 1 is not a
-Baseline TIFF requirement." The decoder is one such Baseline-only
-reader: it surfaces pixels in storage order without rotating or
-mirroring them, so the canonical value `1` is the only orientation it
-can honour without silently mis-rendering. An absent field defaults to
-`1` (every existing TIFF fixture decodes unchanged); an explicit
-`Orientation = 1` routes through the same path. Values `2..=8` are
-surfaced as precise typed errors rather than silently treated as `1`
-(which would yield a correctly-coloured but geometrically wrong
-image), and values `0` / `≥ 9` are surfaced as invalid-data errors
-because the spec lists `1..=8` only.
+antitranspose permutations a writer may declare. The decoder now
+**re-orients the fully-assembled image into display order** for every
+value, so a downstream consumer always sees the visually-correct
+geometry regardless of how the writer stored the rows. Values `2..=4`
+are in-place mirror / 180° permutations that preserve the stored
+`(width, height)` shape; values `5..=8` are transpose-family
+permutations that swap width and height (a 90° rotation turns a
+landscape strip into a portrait image). The remap operates on
+fixed-size pixel cells (`stride / width` bytes), so it is independent of
+photometric, bit depth, and compression — every decode path picks it up
+uniformly. The geometry of each value is derived directly from the
+§Orientation page-36 "0th row represents… / 0th column represents…"
+table:
+
+| Value | Display mapping `d[r][c] = s[..]`     | Description     |
+| ----- | ------------------------------------- | --------------- |
+| 1     | `s[r][c]`                             | identity        |
+| 2     | `s[r][w-1-c]`                         | mirror H        |
+| 3     | `s[h-1-r][w-1-c]`                     | rotate 180°     |
+| 4     | `s[h-1-r][c]`                         | mirror V        |
+| 5     | `s[c][r]` (→ h×w)                      | transpose       |
+| 6     | `s[h-1-c][r]` (→ h×w)                  | rotate 90° CW   |
+| 7     | `s[h-1-c][w-1-r]` (→ h×w)             | antitranspose   |
+| 8     | `s[c][w-1-r]` (→ h×w)                  | rotate 90° CCW  |
+
+An absent field defaults to `1` (every existing TIFF fixture decodes
+unchanged); value `0` and values `≥ 9` are surfaced as invalid-data
+errors because the spec lists `1..=8` only.
 
 `ResolutionUnit` (tag 296, TIFF 6.0 §"Physical Dimensions" page 18) is
 inspected on every IFD. The spec defines three values for the unit of
@@ -572,11 +588,13 @@ remaining gaps are:
 - **DNG / GeoTIFF / EXIF blob extraction.**
 - **Subsampled-YCbCr planar / tiled / predictor combinations** — the
   data-unit packing is single-strip chunky; these axes remain deferred.
-- **Non-canonical `Orientation` (2..=8)** — surfaced as a precise typed
-  error rather than mis-rendered. Float (`SampleFormat = 3`) grayscale
-  now decodes (see the SampleFormat section above); float RGB / palette /
-  CMYK / YCbCr / CIELab and the §14 float predictor (`Predictor = 3`)
-  remain precise typed errors.
+- **Float (`SampleFormat = 3`) grayscale** now decodes (see the
+  SampleFormat section above); float RGB / palette / CMYK / YCbCr /
+  CIELab remain precise typed errors. The §14 floating-point predictor
+  (`Predictor = 3`) is defined in Adobe TIFF Technical Note 3, which is
+  not present in `docs/image/tiff/`, so float predictor decode is
+  blocked on that note (TIFF 6.0 §14 itself defines only `Predictor = 1`
+  and `Predictor = 2`).
 
 ## Registration
 
