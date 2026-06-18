@@ -14,15 +14,19 @@
 //! as the 'last components' in each pixel." "The default is no extra
 //! samples. This field must be present if there are extra samples."
 //!
-//! Reader policy under test: values 0 and 2 decode with the trailing
-//! extra components skipped (the color components are stored straight
-//! so they render correctly without the extras); value 1 is surfaced
-//! as a precise `Unsupported` (the color components are pre-multiplied
-//! by the dropped alpha, so rendering them verbatim would be silently
-//! wrong); values ≥ 3 are `InvalidData`; and a count that does not
-//! leave a photometric-defined color-component count is `InvalidData`
-//! per the spec's "If SamplesPerPixel is, say, 5 then ExtraSamples
-//! will contain 2 values, one for each extra sample" arithmetic.
+//! Reader policy under test: values 0, 1, and 2 all decode with the
+//! trailing extra component(s) dropped and the leading color
+//! components rendered verbatim. For unspecified (0) and unassociated
+//! alpha (2) the stored color is straight; for associated alpha (1)
+//! the stored pre-multiplied color is the §18 "Associated Alpha
+//! Handling" (page 78) composite-over-black display value a display
+//! reader shows directly ("naive applications … can do so simply by
+//! displaying the RGB component values … the same as merging the
+//! image with a black background"). Values ≥ 3 are `InvalidData`; and
+//! a count that does not leave a photometric-defined color-component
+//! count is `InvalidData` per the spec's "If SamplesPerPixel is, say,
+//! 5 then ExtraSamples will contain 2 values, one for each extra
+//! sample" arithmetic.
 //!
 //! ## On-disk layout each test produces
 //!
@@ -216,15 +220,35 @@ fn extra_samples_two_unassociated_alpha_decodes_by_skipping() {
 }
 
 #[test]
-fn extra_samples_one_associated_alpha_is_rejected_unsupported() {
+fn extra_samples_one_associated_alpha_displays_premultiplied_rgb() {
     // `ExtraSamples = [1]` (associated alpha, pre-multiplied color):
-    // dropping the alpha component would render the pre-multiplied
-    // color components as an opaque image — silently wrong. The
-    // decoder surfaces a precise `Unsupported` instead, mirroring
-    // the §Orientation refuse-to-mis-render policy.
+    // §18 "Associated Alpha Handling" (page 78) states "naive
+    // applications that want to display an RGBA image on a display can
+    // do so simply by displaying the RGB component values. This works
+    // because it is effectively the same as merging the image with a
+    // black background. … Cr = Cover * Aover" — "which is exactly the
+    // pre-multiplied color; i.e. what is stored in the image." So the
+    // stored pre-multiplied leading triple IS the composite-over-black
+    // display value; the decoder renders it directly and drops the
+    // trailing alpha. The stored `(10, 20, 30)` is already
+    // pre-multiplied by alpha = 99, so it renders verbatim.
     let bytes = build_1x1_rgb(4, &[10, 20, 30, 99], Some(&[1]));
-    expect_err_containing(&bytes, "ExtraSamples=1");
-    expect_err_containing(&bytes, "unsupported");
+    let d = decode_tiff(&bytes).expect("ExtraSamples=[1] (associated alpha) must decode");
+    assert_eq!((d.width, d.height), (1, 1));
+    assert_eq!(d.frame.planes[0].data, vec![10, 20, 30]);
+}
+
+#[test]
+fn extra_samples_associated_alpha_zero_alpha_renders_stored_black() {
+    // §18 page 78: "If A is zero, then the color components should be
+    // interpreted as zero." A well-formed pre-multiplied page with
+    // alpha = 0 therefore stores `(0, 0, 0)` for the color; displaying
+    // the stored triple directly (composite over black) reproduces the
+    // fully-transparent pixel as black, which is the §18 naive-display
+    // result.
+    let bytes = build_1x1_rgb(4, &[0, 0, 0, 0], Some(&[1]));
+    let d = decode_tiff(&bytes).expect("ExtraSamples=[1] alpha=0 must decode");
+    assert_eq!(d.frame.planes[0].data, vec![0, 0, 0]);
 }
 
 #[test]
@@ -239,11 +263,16 @@ fn extra_samples_two_extras_spp5_decode_by_skipping() {
 }
 
 #[test]
-fn extra_samples_mixed_with_associated_alpha_is_rejected() {
-    // Any associated-alpha entry poisons the render even when the
-    // other extra is skippable.
+fn extra_samples_mixed_with_associated_alpha_decodes() {
+    // A `SamplesPerPixel = 5` RGB page declaring `[0, 1]` (one
+    // unspecified extra, one associated-alpha extra) still renders the
+    // leading R, G, B triple verbatim: the unspecified extra carries no
+    // meaning and the associated-alpha pre-multiplied color is the §18
+    // composite-over-black display value. Both trailing extras drop.
     let bytes = build_1x1_rgb(5, &[10, 20, 30, 99, 77], Some(&[0, 1]));
-    expect_err_containing(&bytes, "ExtraSamples=1");
+    let d = decode_tiff(&bytes).expect("ExtraSamples=[0,1] must decode");
+    assert_eq!((d.width, d.height), (1, 1));
+    assert_eq!(d.frame.planes[0].data, vec![10, 20, 30]);
 }
 
 #[test]

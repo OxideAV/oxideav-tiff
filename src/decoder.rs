@@ -288,17 +288,30 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     //   0 (unspecified data) — the extra components carry no defined
     //     meaning, so the color components render correctly without
     //     them; the pixel paths skip the trailing extras.
-    //   1 (associated alpha, pre-multiplied color) — the stored color
-    //     components are pre-multiplied by the alpha component, so
-    //     dropping the alpha would present composited-against-black
-    //     colors as a fully-opaque image: a silently-wrong render.
-    //     Surfaced as a precise `Unsupported`, mirroring the
-    //     §Orientation policy of refusing to mis-render.
+    //   1 (associated alpha, pre-multiplied color) — the color
+    //     components are stored pre-multiplied by the alpha component.
+    //     §18 "Associated Alpha Handling" (page 78) states that "naive
+    //     applications that want to display an RGBA image on a display
+    //     can do so simply by displaying the RGB component values. This
+    //     works because it is effectively the same as merging the image
+    //     with a black background. … Cr = Cover * Aover", which "is
+    //     exactly the pre-multiplied color; i.e. what is stored in the
+    //     image." So for a display-target render the stored
+    //     pre-multiplied color components ARE the composite-over-black
+    //     pixel values, and the decoder displays them directly (the
+    //     trailing alpha is dropped from the rendered plane). This is
+    //     the spec-endorsed display path, not a mis-render.
     //   2 (unassociated alpha) — "transparency information that
     //     logically exists independent of an image; it is commonly
     //     called a soft matte." The color components are stored
     //     straight (not pre-multiplied), so skipping the matte yields
     //     the correctly-colored fully-opaque render.
+    //
+    // Both alpha kinds therefore render the leading color components
+    // verbatim onto the display plane and drop the trailing extra(s):
+    // for unassociated alpha the stored color is already straight, and
+    // for associated alpha the stored pre-multiplied color is the
+    // composite-over-black value §18 says a display reader should show.
     //
     // "The default is no extra samples" — an absent field changes
     // nothing. Values ≥ 3 are surfaced as `InvalidData` because the
@@ -337,15 +350,17 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             }
         }
         for &v in &es {
-            if v == EXTRA_SAMPLE_UNSPECIFIED as u32 || v == EXTRA_SAMPLE_UNASSOCIATED_ALPHA as u32 {
-                // Skippable: the pixel paths drop the trailing extra
-                // components and render the color components.
-            } else if v == EXTRA_SAMPLE_ASSOCIATED_ALPHA as u32 {
-                return Err(Error::Unsupported(format!(
-                    "TIFF: ExtraSamples={v} (associated alpha, pre-multiplied color) \
-                     not supported; dropping the alpha component would mis-render \
-                     the pre-multiplied color components"
-                )));
+            if v == EXTRA_SAMPLE_UNSPECIFIED as u32
+                || v == EXTRA_SAMPLE_UNASSOCIATED_ALPHA as u32
+                || v == EXTRA_SAMPLE_ASSOCIATED_ALPHA as u32
+            {
+                // All three defined kinds render the leading color
+                // components and drop the trailing extra(s): unspecified
+                // and unassociated-alpha color is stored straight, and
+                // associated-alpha (pre-multiplied) color is the §18
+                // composite-over-black display value a display reader
+                // shows directly. The pixel-assembly arms below copy the
+                // leading color components verbatim in every case.
             } else {
                 return Err(Error::invalid(format!(
                     "TIFF: ExtraSamples={v} unknown (spec defines 0..=2)"
@@ -751,9 +766,11 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             // components that are present must be stored as the
             // 'last components' in each pixel" — the leading three
             // components are the R, G, B triple and the trailing
-            // n − 3 extras are skipped. The §ExtraSamples inspection
-            // above has already rejected the associated-alpha case
-            // whose color components could not render verbatim.
+            // n − 3 extras are dropped. For an associated-alpha (tag
+            // 338 = 1) RGBA page the leading triple is the §18
+            // pre-multiplied color, which §18 page 78 states is the
+            // composite-over-black value a display reader shows
+            // directly — so the same verbatim copy renders it.
             (
                 build_rgb_from_n_chunky_8bit(&pixel_buf, width, height, n as usize),
                 TiffPixelFormat::Rgb24,

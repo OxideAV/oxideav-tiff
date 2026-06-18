@@ -361,13 +361,22 @@ convention as the last components of each pixel. The count must leave
 a color-component tally the photometric defines (3 for RGB / YCbCr, 4
 for CMYK, 1 for the grayscale / palette / mask photometrics, 3-or-1
 for CIELab per §23) — any other arithmetic is `Error::InvalidData`.
-Per-value policy: `0` (unspecified data) and `2` (unassociated alpha —
-the soft matte logically independent of the straight-stored color)
-decode with the trailing extras skipped, so an RGB `SamplesPerPixel =
-4` page renders its `R G B` triple; `1` (associated alpha) is surfaced
-as a precise `Error::Unsupported` because the color components are
-pre-multiplied by the alpha being dropped and rendering them verbatim
-would be silently wrong; values `≥ 3` are `Error::InvalidData` because
+Per-value policy: all three defined kinds render the leading color
+components verbatim and drop the trailing extra(s), so an RGB
+`SamplesPerPixel = 4` page renders its `R G B` triple. `0` (unspecified
+data) and `2` (unassociated alpha — the soft matte logically
+independent of the straight-stored color) carry color stored straight,
+so dropping the extra is exact. `1` (associated alpha) **now decodes**:
+§18 "Associated Alpha Handling" (page 78) states that "naive
+applications that want to display an RGBA image on a display can do so
+simply by displaying the RGB component values … because it is
+effectively the same as merging the image with a black background"
+(`Cr = Cover * Aover`, "which is exactly the pre-multiplied color; i.e.
+what is stored in the image"), so the stored pre-multiplied leading
+triple **is** the composite-over-black display value a display reader
+shows directly — the decoder renders it verbatim and drops the alpha
+(§18 page 78: alpha = 0 stores `(0,0,0)`, which renders as black, the
+naive-display result). Values `≥ 3` are `Error::InvalidData` because
 the spec lists `0..=2` only. An absent field means "no extra samples"
 per the spec default, and an RGB page with `SamplesPerPixel ≥ 4` but
 no tag 338 still decodes by skipping the undeclared trailing

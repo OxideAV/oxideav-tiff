@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Associated-alpha (ExtraSamples = 1, pre-multiplied color) decode**
+  for 8-bit RGB pages (the premultiplied RGBA layout). TIFF 6.0 §18
+  "Associated Alpha Handling" (page 78) states that "naive applications
+  that want to display an RGBA image on a display can do so simply by
+  displaying the RGB component values … because it is effectively the
+  same as merging the image with a black background" — the stored
+  pre-multiplied leading triple is exactly the composite-over-black
+  display value (`Cr = Cover * Aover`). The decoder now renders that
+  triple verbatim and drops the trailing alpha, instead of the prior
+  refuse-to-mis-render `Error::Unsupported`. `SamplesPerPixel = 5` RGB
+  pages mixing an unspecified extra with an associated-alpha extra
+  (`[0, 1]`) likewise decode. Unknown ExtraSamples values (≥ 3) and the
+  photometric color-component count arithmetic stay rejected. The two
+  `tests/decode_extra_samples.rs` associated-alpha rejection tests are
+  rewritten to assert the §18 display render (incl. the page-78
+  alpha = 0 → `(0,0,0)` → black case).
+
 - 1-bit sub-byte **tile writing** (TIFF 6.0 §15) for `Bilevel` and
   `TransparencyMask` encode input. `EncodePage::tiling` now slices the
   MSB-first packed bilevel raster into a row-major grid where each tile
