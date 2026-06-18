@@ -107,9 +107,11 @@ pub struct EncodePage<'a> {
     /// byte-aligned chunky formats (`Gray8` / `Gray16Le` / `Rgb24` /
     /// `Palette8`) under None / PackBits / LZW / Deflate / Zstd, with or
     /// without the §14 predictor (applied per-tile, matching the
-    /// decoder). Tiling
-    /// is rejected on `Bilevel` (sub-byte tile slicing is not implemented
-    /// on either side) and on CCITT compression. It composes with
+    /// decoder), and on the 1-bit `Bilevel` / `TransparencyMask` formats
+    /// under the same byte-aligned compressors (sub-byte tile-row bit
+    /// packing with §15 edge replication, no predictor — see
+    /// `build_tiles_bilevel`). Tiling is rejected on CCITT compression.
+    /// It composes with
     /// `planar = true` on `Rgb24`: one row-major tile grid per component
     /// plane, emitted plane-0 first then plane-1, etc., per §15
     /// TileOffsets ("For PlanarConfiguration = 2, the offsets for the
@@ -943,21 +945,17 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                  (TIFF 6.0 §15 TileWidth / TileLength); got {tw}x{th}"
             )));
         }
-        // Bilevel tiles need sub-byte tile-row slicing the decoder
-        // rejects, and the CCITT coders are bilevel-only, so tiling is
-        // restricted to the byte-aligned chunky formats. The
-        // TransparencyMask variant carries identical 1-bit packing and
-        // is rejected for the same reason.
-        if matches!(
-            p.kind,
-            EncodePixelFormat::Bilevel { .. } | EncodePixelFormat::TransparencyMask { .. }
-        ) {
-            return Err(Error::invalid(
-                "TIFF encode: tiled layout (TIFF 6.0 §15) is not supported for 1-bit input \
-                 (Bilevel / TransparencyMask) — sub-byte tile slicing is unimplemented on \
-                 both sides",
-            ));
-        }
+        // 1-bit Bilevel / TransparencyMask input now tiles via the
+        // dedicated sub-byte slicer `build_tiles_bilevel` below (§15: each
+        // tile row is an independent byte-padded scanline, and `tile_w`
+        // being a multiple of 16 keeps every tile-column boundary
+        // byte-aligned at BitsPerSample = 1). It only combines with the
+        // byte-aligned compressors the decoder's sub-byte tile path reads
+        // (None / PackBits / LZW / Deflate / ZSTD): the CCITT schemes are
+        // facsimile-line coders the encoder emits strip-oriented, and the
+        // predictor is undefined for 1-bit data (both rejected just below
+        // / above), so reaching `build_tiles_bilevel` implies a plain
+        // byte-aligned compressor.
         if p.compression.is_ccitt() {
             return Err(Error::invalid(
                 "TIFF encode: tiled layout cannot combine with CCITT compression \
@@ -1276,6 +1274,20 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                 samples_per_pixel as usize,
                 bps,
                 p.predictor,
+                p.compression,
+            )?
+        } else if bps == 1 {
+            // Tiled 1-bit bilevel layout (TIFF 6.0 §15). The bilevel /
+            // mask raster is MSB-first packed at ceil(width/8) bytes per
+            // row; `build_tiles_bilevel` slices it into byte-padded tile
+            // rows with §15 edge replication. The predictor is already
+            // rejected for 1-bit input above, so this never differences.
+            build_tiles_bilevel(
+                &raw_pixels,
+                p.width as usize,
+                p.height as usize,
+                tile_w as usize,
+                tile_h as usize,
                 p.compression,
             )?
         } else {
@@ -1836,6 +1848,74 @@ fn build_tiles(
             // §15: "Tiles are compressed individually, just as strips
             // are compressed." Pass the tile geometry through (only the
             // CCITT coders read it, and tiling rejects CCITT upstream).
+            out.push(compression.pack(&tile, tile_w as u32, tile_h as u32)?);
+        }
+    }
+    Ok(out)
+}
+
+/// Tiled 1-bit bilevel layout (TIFF 6.0 §15). The input `pixels` is the
+/// MSB-first packed bilevel raster — `ceil(width / 8)` bytes per image
+/// row — that the `Bilevel` / `TransparencyMask` strip path also stores.
+/// Each tile is sliced into a row-major grid of `tile_w x tile_h` tiles
+/// (`tile_w` is a multiple of 16, validated by the caller), and within a
+/// tile "each row of data … is treated as a separate 'scanline'" (§15
+/// page 66), i.e. every tile row is independently packed MSB-first and
+/// padded to a byte boundary — `tile_row_bytes = tile_w / 8` bytes. This
+/// is the exact on-disk shape `decode_tiles` reassembles: it copies the
+/// visible portion of each tile row as a whole number of bytes at a
+/// byte-aligned destination offset (`tile_w` being a multiple of 16 makes
+/// every tile-column boundary land on a byte boundary at
+/// `BitsPerSample = 1`).
+///
+/// Boundary tiles are padded out to the full tile geometry by replicating
+/// the last visible column / row (§15 "Padding": "replicating the last
+/// column and last row"). The predictor (§14) is never applied — it is
+/// undefined for 1-bit input and the caller rejects `predictor` for
+/// bilevel — so each padded tile is packed and handed straight to the
+/// compressor (§15: "Tiles are compressed individually, just as strips
+/// are compressed"). Only `BitsPerSample = 1`, `SamplesPerPixel = 1`
+/// reaches here.
+fn build_tiles_bilevel(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    tile_w: usize,
+    tile_h: usize,
+    compression: TiffCompression,
+) -> Result<Vec<Vec<u8>>> {
+    let image_row_bytes = width.div_ceil(8);
+    // `tile_w` is a multiple of 16 (caller-validated), so this is exact.
+    let tile_row_bytes = tile_w.div_ceil(8);
+    let tile_size_bytes = tile_row_bytes * tile_h;
+
+    let tiles_across = width.div_ceil(tile_w);
+    let tiles_down = height.div_ceil(tile_h);
+
+    // Read bit (x, y) from the MSB-first packed source raster.
+    let src_bit = |x: usize, y: usize| -> u8 {
+        let byte = pixels[y * image_row_bytes + (x >> 3)];
+        (byte >> (7 - (x & 7))) & 1
+    };
+
+    let mut out = Vec::with_capacity(tiles_across * tiles_down);
+    for ty in 0..tiles_down {
+        for tx in 0..tiles_across {
+            let mut tile = vec![0u8; tile_size_bytes];
+            for r in 0..tile_h {
+                // Source row, clamped to the last visible row (§15 edge
+                // replication).
+                let src_y = (ty * tile_h + r).min(height - 1);
+                let row_base = r * tile_row_bytes;
+                for c in 0..tile_w {
+                    // Source column, clamped to the last visible column.
+                    let src_x = (tx * tile_w + c).min(width - 1);
+                    if src_bit(src_x, src_y) != 0 {
+                        // Pack MSB-first into the byte-padded tile row.
+                        tile[row_base + (c >> 3)] |= 0x80 >> (c & 7);
+                    }
+                }
+            }
             out.push(compression.pack(&tile, tile_w as u32, tile_h as u32)?);
         }
     }
@@ -3030,19 +3110,29 @@ mod tests {
     }
 
     #[test]
-    fn encode_tiling_rejects_bilevel() {
+    fn encode_tiling_bilevel_roundtrips() {
+        // Sub-byte (1-bit) tile writing (TIFF 6.0 §15) is now supported
+        // for the byte-aligned compressors. The tiled encode of a bilevel
+        // raster decodes to the same Gray8 plane as the strip encode of
+        // the identical pixels (the strip path is the independent oracle).
         let packed = bilevel_checkerboard(32, 16);
-        let page = EncodePage {
+        let strip = EncodePage {
             width: 32,
             height: 16,
             kind: EncodePixelFormat::Bilevel { pixels: &packed },
             compression: TiffCompression::None,
             predictor: false,
             planar: false,
-            tiling: Some((16, 16)),
+            tiling: None,
             bigtiff: false,
         };
-        assert!(encode_tiff(&page).is_err());
+        let tiled = EncodePage {
+            tiling: Some((16, 16)),
+            ..strip.clone()
+        };
+        let ds = decode_tiff(&encode_tiff(&strip).unwrap()).unwrap();
+        let dt = decode_tiff(&encode_tiff(&tiled).unwrap()).unwrap();
+        assert_eq!(dt.frame.planes[0].data, ds.frame.planes[0].data);
     }
 
     #[test]

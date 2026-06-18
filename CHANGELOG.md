@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 1-bit sub-byte **tile writing** (TIFF 6.0 §15) for `Bilevel` and
+  `TransparencyMask` encode input. `EncodePage::tiling` now slices the
+  MSB-first packed bilevel raster into a row-major grid where each tile
+  row is independently packed MSB-first and padded to a byte boundary
+  (`tile_w / 8` bytes; `tile_w` is a multiple of 16 so every tile-column
+  boundary is byte-aligned at `BitsPerSample = 1`), with §15 edge
+  replication on boundary tiles. Composes with None / PackBits / LZW /
+  Deflate / ZSTD and BigTIFF; the §14 predictor (undefined for 1-bit)
+  and the strip-oriented CCITT coders stay rejected. The tiled encode of
+  any 1-bit raster decodes byte-identically to the strip encode of the
+  same pixels (the decoder's sub-byte tile path was already supported).
 - SampleFormat=3 (IEEE 754 floating-point) 16-/32-/64-bit **RGB** decode
   (TIFF 6.0 §SampleFormat). 3-channel (PhotometricInterpretation=2,
   SamplesPerPixel=3) float strips/tiles render to an Rgb24 display plane

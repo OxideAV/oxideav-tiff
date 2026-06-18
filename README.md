@@ -228,9 +228,12 @@ result with the main image directly. On the encode side
 readers spot a mask IFD without consulting the photometric tag. Mask
 pages accept the same compressors a `Bilevel` page does
 (None / PackBits / LZW / Deflate / ZSTD / CCITT-MH / CCITT-T.4-1D); the spec
-recommends PackBits. Tiled, planar, and Predictor=2 layouts are
-rejected for 1-bit input on both encode and decode (sub-byte tile
-slicing and §14 component-differencing don't apply to packed bits).
+recommends PackBits. **Tiled layout (§15) now composes** with both
+1-bit variants on encode (1-bit tile-row packing with §15 edge
+replication; see the Encode tiling note) and decode; planar and
+Predictor=2 layouts remain rejected for 1-bit input on both sides
+(§14 component-differencing doesn't apply to packed bits, and §"Planar-
+Configuration" is irrelevant at `SamplesPerPixel = 1`).
 
 `FillOrder = 1` (MSB-first, the baseline default) and `FillOrder = 2`
 (LSB-first) are both accepted for the bit orderings the spec admits:
@@ -454,8 +457,10 @@ every tile is the same size before compression; the decoder displays only
 the `ImageWidth × ImageLength` region and ignores the padding. Works for
 the byte-aligned chunky formats (`Gray8` / `Gray16Le` / `Rgb24` /
 `Palette8`) under None / PackBits / LZW / Deflate / ZSTD, with or without
-`Predictor = 2` (applied per-tile). Tiling is rejected on `Bilevel`
-input and the CCITT compressors. An independent transcode of our tiled
+`Predictor = 2` (applied per-tile), and for the 1-bit `Bilevel` /
+`TransparencyMask` formats under the same byte-aligned compressors
+(sub-byte tile-row bit packing with §15 edge replication, no predictor).
+Tiling is rejected with the CCITT compressors. An independent transcode of our tiled
 output to an uncompressed TIFF re-decodes to the original pixels, and an
 independent reference reader reads it bit-exactly.
 
@@ -498,11 +503,29 @@ grayscale, 4-bit grayscale, 4-bit palette) across exact-fit,
 partial-edge, non-square-tile, odd-width, and oversized-single-tile
 geometries — a binary-independent oracle: a decoder that mishandled
 tile ordering, tile-row stride, byte-aligned column offsets, or §15
-edge padding would diverge from the trusted strip path. The
-**encoder** still writes only byte-aligned (8-/16-bit) chunky tiles;
-sub-byte tile *writing* (which needs sub-byte tile-row bit packing
-with §15 edge replication) is a separate increment, so `Bilevel`
-input continues to reject `tiling`.
+edge padding would diverge from the trusted strip path.
+
+The **encoder** now also **writes 1-bit tiles** for `Bilevel` and
+`TransparencyMask` input. `build_tiles_bilevel` slices the MSB-first
+packed bilevel raster (`ceil(width / 8)` bytes per image row) into a
+row-major tile grid where every tile row is independently packed
+MSB-first and padded to a byte boundary (`tile_w / 8` bytes — `tile_w`
+is a multiple of 16, so this is exact and every tile-column boundary
+lands on a byte boundary at `BitsPerSample = 1`). Boundary tiles are
+padded by replicating the last visible column / row (§15 "Padding").
+It composes with the byte-aligned compressors the decoder's sub-byte
+tile path reads (None / PackBits / LZW / Deflate / ZSTD) and with
+BigTIFF; the §14 predictor (undefined for 1-bit) and the strip-oriented
+CCITT coders stay rejected. `tests/encode_tiled_bilevel_roundtrip.rs`
+encodes the same 1-bit pixels both tiled and strip-based, decodes both,
+and asserts the rendered `Gray8` planes are byte-identical across the
+full compressor set and the exact-fit / partial-edge / non-square /
+odd-width / oversized-single-tile / 1-pixel-overhang geometries — the
+strip decode is the independent oracle. The 4-bit sub-byte tile
+*writer* (which would need 4-bit tile-row nibble packing) remains a
+separate increment; only the byte-aligned `Gray8` / `Gray16Le` /
+`Rgb24` / `Palette8` and the 1-bit `Bilevel` / `TransparencyMask`
+formats currently write tiles.
 
 Output is classic II little-endian TIFF, single-IFD via
 [`encode_tiff`] or multi-page via [`encode_tiff_multi`]. Files

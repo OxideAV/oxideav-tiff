@@ -347,28 +347,30 @@ fn gray8_page_does_not_set_mask_bit() {
     }
 }
 
-/// Tiled write is not supported for 1-bit input (decoder rejects
-/// sub-byte tile slicing); confirm TransparencyMask is rejected the
-/// same way Bilevel is, with a precise error.
+/// Sub-byte (1-bit) tile writing (TIFF 6.0 §15) now supports the mask
+/// path: the tiled encode decodes to the same polarity-pinned Gray8
+/// plane (1 -> 0xFF, 0 -> 0x00) as the strip encode of the identical
+/// 1-bit pixels. The strip path is the independent oracle.
 #[test]
-fn transparency_mask_tiled_rejected() {
-    let (w, h, packed) = (16u32, 16u32, vec![0u8; 2 * 16]);
-    let page = EncodePage {
+fn transparency_mask_tiled_matches_strip() {
+    let (w, h, packed) = mask_diagonal_24x4();
+    let strip = EncodePage {
         width: w,
         height: h,
         kind: EncodePixelFormat::TransparencyMask { pixels: &packed },
         compression: TiffCompression::None,
         predictor: false,
         planar: false,
-        tiling: Some((16, 16)),
+        tiling: None,
         bigtiff: false,
     };
-    let err = encode_tiff(&page).expect_err("tiled TransparencyMask must fail");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("tiled") || msg.contains("TransparencyMask") || msg.contains("Bilevel"),
-        "unexpected error message: {msg}"
-    );
+    let tiled = EncodePage {
+        tiling: Some((16, 16)),
+        ..strip.clone()
+    };
+    let ds = decode_tiff(&encode_tiff(&strip).expect("encode strip mask")).expect("decode strip");
+    let dt = decode_tiff(&encode_tiff(&tiled).expect("encode tiled mask")).expect("decode tiled");
+    assert_eq!(dt.frame.planes[0].data, ds.frame.planes[0].data);
 }
 
 /// `PlanarConfiguration = 2` is irrelevant for a single-sample page;
