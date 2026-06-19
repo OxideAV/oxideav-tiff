@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tiled JPEG-in-TIFF (Compression=7) test coverage.** The
+  `decode_ifd_jpeg_tiles` path (each tile a self-contained SOI..EOI JPEG
+  datastream, composited into the output plane with edge-tile clipping)
+  was untested; `tests/decode_imagemagick_fixtures.rs` now validates RGB
+  64×64/32×32-tile and a partial-edge grayscale 48×40/16×16-tile case
+  (3×3 tiles, last row 8px tall) against ImageMagick-written fixtures,
+  via the existing MSE oracle.
+
 - **`Predictor = 3` (IEEE floating-point predictor) decode** for
   16-/32-/64-bit `SampleFormat = 3` grayscale and RGB, across strip and
   tile layouts (chunky and per-plane) under any byte-oriented

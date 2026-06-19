@@ -543,6 +543,97 @@ fn mean_squared_error(a: &[u8], b: &[u8]) -> f64 {
     acc as f64 / a.len() as f64
 }
 
+/// **Tiled** JPEG-in-TIFF (Compression=7, TileWidth/TileLength present).
+/// Exercises `decode_ifd_jpeg_tiles`: every tile is a self-contained
+/// JPEG datastream and the decoder composites the tile grid (with edge
+/// tiles clipped to the image bounds) into the output plane. TIFF Tech
+/// Note 2 §"Tiles" carries JPEG exactly as the strip case, one
+/// datastream per tile. RGB photometric.
+#[cfg(feature = "registry")]
+#[test]
+fn decode_64x64_rgb_jpeg_tiled_imagemagick() {
+    if !convert_available() {
+        eprintln!("skipping: `convert` binary not found");
+        return;
+    }
+    let pixels = rgb_pattern_64();
+    let ppm = make_ppm_rgb(64, 64, &pixels);
+    let tiff = match convert_to_tiff(
+        &ppm,
+        "ppm",
+        &[
+            "-define",
+            "tiff:tile-geometry=32x32",
+            "-compress",
+            "jpeg",
+            "-quality",
+            "95",
+        ],
+    ) {
+        Some(b) => b,
+        None => {
+            eprintln!("skipping: convert failed to produce tiled JPEG-TIFF");
+            return;
+        }
+    };
+    let d = decode_tiff(&tiff).expect("decode_tiff (tiled JPEG-in-TIFF, RGB) failed");
+    assert_eq!((d.width, d.height), (64, 64));
+    let got = frame_to_rgb24_bytes(&d);
+    let mse = mean_squared_error(&got, &pixels);
+    assert!(
+        mse < 200.0,
+        "tiled RGB JPEG-in-TIFF reconstruction too far from input: MSE={mse}"
+    );
+}
+
+/// Tiled JPEG-in-TIFF with a non-square image whose right/bottom tile
+/// columns/rows are partial — the decoder must clip each edge tile to the
+/// visible region rather than overrun the destination plane. 48×40 image
+/// at 16×16 tiles gives 3×3 tiles, the last column 16px wide but the last
+/// row only 8px tall (40 = 16+16+8).
+#[cfg(feature = "registry")]
+#[test]
+fn decode_partial_edge_jpeg_tiled_imagemagick() {
+    if !convert_available() {
+        eprintln!("skipping: `convert` binary not found");
+        return;
+    }
+    let (w, h) = (48u32, 40u32);
+    let mut pixels = Vec::with_capacity((w * h) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            pixels.push(((x * 5 + y * 3) & 0xFF) as u8);
+        }
+    }
+    let pgm = make_pgm_gray(w, h, &pixels);
+    let tiff = match convert_to_tiff(
+        &pgm,
+        "pgm",
+        &[
+            "-define",
+            "tiff:tile-geometry=16x16",
+            "-compress",
+            "jpeg",
+            "-quality",
+            "95",
+        ],
+    ) {
+        Some(b) => b,
+        None => {
+            eprintln!("skipping: convert failed to produce partial-edge tiled JPEG-TIFF");
+            return;
+        }
+    };
+    let d = decode_tiff(&tiff).expect("decode_tiff (partial-edge tiled JPEG-in-TIFF) failed");
+    assert_eq!((d.width, d.height), (w, h));
+    let got = frame_to_gray8_bytes(&d);
+    let mse = mean_squared_error(&got, &pixels);
+    assert!(
+        mse < 200.0,
+        "partial-edge tiled gray JPEG-in-TIFF reconstruction too far from input: MSE={mse}"
+    );
+}
+
 /// Build a minimal valid TIFF file (1x1 image, RGB, 8 bps) with the
 /// given Compression value. Used only to drive the compression-tag
 /// validation in the decoder; the strip data is intentionally bogus

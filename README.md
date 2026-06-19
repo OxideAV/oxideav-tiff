@@ -110,6 +110,14 @@ Supported photometric / sampling combinations:
   etc., TIFF 6.0 §16 `InkSet = 1`). This is the layout a
   CMYK JPEG-compressed TIFF transcode produces.
 
+Both **strip- and tile-organised** JPEG-in-TIFF decode: with
+`TileWidth` / `TileLength` present each tile is its own SOI..EOI
+datastream (the `JPEGTables` reference applies identically), and the
+decoder composites the tile grid into the output plane, clipping
+right/bottom edge tiles to the image bounds. RGB, grayscale and YCbCr
+tiled JPEG are exercised against ImageMagick-written fixtures (incl. a
+partial-edge 48×40 / 16×16 grid).
+
 Not supported (return precise `Error::Unsupported`):
 12-bit (SOF1 with `P = 12`), arithmetic (SOF9 / SOF11),
 `PlanarConfiguration = 2` (`Compression = 7` only; the non-JPEG
