@@ -35,9 +35,19 @@ library source was consulted.
 | **CIELab (3 chan)** | 8         | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` (Lab→XYZ@D65→linear NTSC→sRGB) |
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
 
-`Predictor = 1` (no prediction) and `Predictor = 2` (horizontal
-differencing, per-component for `SamplesPerPixel > 1`) are both
-supported. Strip- and tile-based layouts both decode (any number of
+`Predictor = 1` (no prediction), `Predictor = 2` (horizontal
+differencing, per-component for `SamplesPerPixel > 1`) and
+`Predictor = 3` (the **IEEE floating-point predictor** — significance-
+ordered byte-plane de-interleave followed by an inclusive cumulative byte
+sum, per the Adobe TIFF §14 floating-point predictor) are all supported.
+Predictor 3 decodes for 16-/32-/64-bit `SampleFormat = 3` grayscale and
+RGB across strip and tile layouts (chunky and per-plane), under any
+byte-oriented compression (None / PackBits / LZW / Deflate / ZSTD); it is
+rejected over non-float or non-16/32/64-bit data per the §14 "the reader
+must give up" rule. Validated both with a binary-independent
+encode/decode oracle and against ImageMagick-written Predictor 1 vs 3
+float TIFFs (f32/f64, LZW + Deflate, grayscale + tiled). Strip- and
+tile-based layouts both decode (any number of
 strips or tiles), including **sub-byte (1-bit and 4-bit) chunky tiles**
 (BlackIsZero / WhiteIsZero grayscale and 4-bit palette): per TIFF 6.0
 §15, `TileWidth` is a multiple of 16 and each tile row is an

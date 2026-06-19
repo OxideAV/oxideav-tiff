@@ -145,7 +145,10 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         .map(|e| e.as_u32(bo))
         .transpose()?
         .unwrap_or(PREDICTOR_NONE as u32) as u16;
-    if predictor != PREDICTOR_NONE && predictor != PREDICTOR_HORIZONTAL {
+    if predictor != PREDICTOR_NONE
+        && predictor != PREDICTOR_HORIZONTAL
+        && predictor != PREDICTOR_FLOAT
+    {
         return Err(Error::invalid(format!(
             "TIFF: Predictor={predictor} not supported"
         )));
@@ -387,6 +390,30 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         return Err(Error::invalid(format!(
             "TIFF: BitsPerSample={bps_first} not supported"
         )));
+    }
+
+    // Predictor = 3 (the IEEE floating-point predictor) is validated here,
+    // before any strip/tile is decompressed, because the per-strip /
+    // per-tile assembly applies the predictor in-line. It is defined only
+    // for IEEE 754 floating-point samples at 16/32/64-bit widths (Adobe
+    // TIFF §14 floating-point predictor; see
+    // `docs/image/tiff/tiff-zstd-compression-50000.md` §4). With any other
+    // SampleFormat or width there is no sample-byte significance ordering
+    // for the byte-plane transform to reverse, so reject per the §14 "the
+    // reader must give up" rule rather than emit garbage.
+    if predictor == PREDICTOR_FLOAT {
+        if sample_format != SAMPLE_FORMAT_IEEE_FP {
+            return Err(Error::Unsupported(format!(
+                "TIFF: Predictor=3 (floating-point predictor) requires SampleFormat=3 \
+                 (IEEE floating-point); got SampleFormat={sample_format}"
+            )));
+        }
+        if !matches!(bps_first, 16 | 32 | 64) {
+            return Err(Error::Unsupported(format!(
+                "TIFF: Predictor=3 (floating-point predictor) requires 16-/32-/64-bit \
+                 IEEE samples; got BitsPerSample={bps_first}"
+            )));
+        }
     }
 
     // Extract CCITT/FillOrder-relevant IFD fields once.
@@ -637,10 +664,20 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
                  bits_per_sample={bps_first}"
             )));
         }
-        if predictor != PREDICTOR_NONE {
+        // The §14 integer horizontal-differencing predictor (value 2) is
+        // undefined over IEEE floating-point samples — only the
+        // floating-point predictor (value 3) applies. Value 3 is decoded
+        // in the per-strip / per-tile assembly below (byte-plane
+        // de-interleave + cumulative byte sum, see `undo_float_predictor`).
+        // The §14 integer horizontal-differencing predictor (value 2) is
+        // undefined over IEEE floating-point samples — only the
+        // floating-point predictor (value 3) applies, and it was already
+        // validated above (SampleFormat / width) before strip decode.
+        if predictor == PREDICTOR_HORIZONTAL {
             return Err(Error::Unsupported(format!(
                 "TIFF: SampleFormat=3 (IEEE floating-point) with Predictor={predictor} \
-                 not supported (§14 differencing is integer-only)"
+                 not supported (§14 horizontal differencing is integer-only; \
+                 float images use Predictor=3)"
             )));
         }
     }
@@ -1094,6 +1131,18 @@ fn decode_strips(
                 row_bytes,
                 bo,
             )?;
+        } else if predictor == PREDICTOR_FLOAT {
+            // §14 float predictor: byte-plane de-interleave + cumulative
+            // byte sum over the full-resolution sample row. The row holds
+            // `width × SamplesPerPixel` IEEE samples (chunky layout).
+            undo_float_predictor(
+                &mut strip,
+                width as usize * samples_per_pixel as usize,
+                rows_this_strip as usize,
+                bps_first as usize / 8,
+                row_bytes,
+                bo,
+            )?;
         }
         pixel_buf.extend_from_slice(&strip);
         rows_done += rows_this_strip;
@@ -1211,6 +1260,15 @@ fn decode_tiles(
                     tile_h as usize,
                     samples_per_pixel as usize,
                     bps_first as usize,
+                    tile_row_bytes,
+                    bo,
+                )?;
+            } else if predictor == PREDICTOR_FLOAT {
+                undo_float_predictor(
+                    &mut tile,
+                    tile_w as usize * samples_per_pixel as usize,
+                    tile_h as usize,
+                    bps_first as usize / 8,
                     tile_row_bytes,
                     bo,
                 )?;
@@ -1421,6 +1479,19 @@ fn decode_strips_planar(
                     plane_row_bytes,
                     bo,
                 )?;
+            } else if predictor == PREDICTOR_FLOAT {
+                // Within a plane the data is a single-component stream
+                // (§14 "Differencing works the same as it does for
+                // grayscale data"), so the float predictor runs with the
+                // plane width as its per-row sample count.
+                undo_float_predictor(
+                    &mut strip,
+                    width as usize,
+                    rows_this_strip as usize,
+                    bps_first as usize / 8,
+                    plane_row_bytes,
+                    bo,
+                )?;
             }
             plane_buf.extend_from_slice(&strip);
             rows_done += rows_this_strip;
@@ -1562,6 +1633,15 @@ fn decode_tiles_planar(
                         tile_h as usize,
                         1,
                         bps_first as usize,
+                        tile_row_bytes,
+                        bo,
+                    )?;
+                } else if predictor == PREDICTOR_FLOAT {
+                    undo_float_predictor(
+                        &mut tile,
+                        tile_w as usize,
+                        tile_h as usize,
+                        bps_first as usize / 8,
                         tile_row_bytes,
                         bo,
                     )?;
@@ -1802,6 +1882,93 @@ fn apply_horizontal_predictor(
                 "TIFF: predictor at bits_per_sample={bps} unsupported"
             )))
         }
+    }
+    Ok(())
+}
+
+/// Reverse the TIFF floating-point predictor (Predictor = 3) over a
+/// freshly decompressed strip / tile, in place.
+///
+/// The floating-point predictor (the only predictor defined for IEEE 754
+/// samples — see `tiff-zstd-compression-50000.md` §4 and the §14 reader
+/// rule) is a two-stage byte transform applied per scan-line at encode
+/// time, in this order:
+///
+///   1. **Byte-plane reorder.** A scan-line of `n` samples, each
+///      `bytes_per_sample` (BPS) wide, is regrouped so that the
+///      most-significant byte of all `n` samples comes first, then the
+///      next byte of all `n` samples, … i.e. `BPS` contiguous planes of
+///      `n` bytes. Grouping bytes of equal significance makes the
+///      subsequent difference stream highly compressible because adjacent
+///      floats share their high bytes.
+///   2. **Horizontal byte differencing.** Across the *reordered* byte
+///      stream of the row, every byte is replaced by its difference from
+///      the previous byte (modular `u8`), the first byte stored verbatim.
+///
+/// Decode reverses the two stages in the opposite order: first undo the
+/// byte differencing by an inclusive prefix sum across the row, then undo
+/// the plane reorder by scattering plane `p`, position `k` back to byte
+/// `p` of sample `k`. The reconstructed per-sample bytes are in the same
+/// significance order they had on the encoder's input — the transform is
+/// byte-order agnostic — so the downstream float reader applies the
+/// file's own `ByteOrder` unchanged.
+///
+/// The planes are ordered by **byte significance**, most-significant
+/// first: plane 0 holds the high byte of every sample, plane 1 the next
+/// byte, …, regardless of the file's endianness. So the scatter back to
+/// per-sample bytes is byte-order aware — for a big-endian file the high
+/// byte is sample byte 0 (`plane p → byte p`); for a little-endian file
+/// it is sample byte `bytes_per_sample-1` (`plane p → byte
+/// bytes_per_sample-1-p`). Grouping by significance (rather than raw
+/// in-file byte position) is what makes adjacent floats' shared high
+/// bytes line up for the differencing stage.
+///
+/// `width` is the row length in *samples* (already `width × samples` for
+/// chunky multi-component rows, or the plane width for planar layout),
+/// `bytes_per_sample` is BPS/8 (2, 4 or 8), `rows` the scan-lines in this
+/// strip/tile and `row_bytes` the padded stride. Trailing pad bytes past
+/// `width × bytes_per_sample` in each row are left untouched.
+fn undo_float_predictor(
+    buf: &mut [u8],
+    width: usize,
+    rows: usize,
+    bytes_per_sample: usize,
+    row_bytes: usize,
+    bo: ByteOrder,
+) -> Result<()> {
+    if width == 0 || rows == 0 {
+        return Ok(());
+    }
+    if !matches!(bytes_per_sample, 2 | 4 | 8) {
+        return Err(Error::invalid(format!(
+            "TIFF: floating-point predictor at bytes_per_sample={bytes_per_sample} unsupported \
+             (only 16-/32-/64-bit IEEE samples)"
+        )));
+    }
+    let row_len = width * bytes_per_sample;
+    let mut plane = vec![0u8; row_len];
+    for r in 0..rows {
+        let row = &mut buf[r * row_bytes..r * row_bytes + row_len];
+        // Stage 1 reversed: inclusive prefix sum (undo the horizontal
+        // byte differencing across the whole reordered row).
+        for i in 1..row_len {
+            row[i] = row[i].wrapping_add(row[i - 1]);
+        }
+        // Stage 2 reversed: scatter the significance-ordered plane bytes
+        // back into each sample's bytes. Plane `p` carries significance
+        // rank `p` (0 = most significant); map that rank onto the actual
+        // in-file byte position for this byte order.
+        for p in 0..bytes_per_sample {
+            // In-file byte index of significance rank `p`.
+            let dst = match bo {
+                ByteOrder::Big => p,
+                ByteOrder::Little => bytes_per_sample - 1 - p,
+            };
+            for k in 0..width {
+                plane[k * bytes_per_sample + dst] = row[p * width + k];
+            }
+        }
+        row.copy_from_slice(&plane);
     }
     Ok(())
 }

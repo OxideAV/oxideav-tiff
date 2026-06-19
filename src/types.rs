@@ -161,6 +161,14 @@ pub const PHOTO_CIELAB: u16 = 8;
 // --- Predictor (Section 14) ---------------------------------------------
 pub const PREDICTOR_NONE: u16 = 1;
 pub const PREDICTOR_HORIZONTAL: u16 = 2;
+// Predictor = 3 — the IEEE floating-point predictor. Defined for 16-,
+// 32- and 64-bit IEEE 754 samples only: each scan-line's sample bytes
+// are split into per-significance byte planes (most-significant byte of
+// every sample, then the next byte of every sample, …) and then run
+// through horizontal byte differencing across the reordered stream.
+// Decode reverses both steps (accumulate the byte differences, then
+// re-interleave the planes back into per-sample bytes).
+pub const PREDICTOR_FLOAT: u16 = 3;
 
 // --- SampleFormat (TIFF 6.0 §SampleFormat, tag 339 page 80) -------------
 //

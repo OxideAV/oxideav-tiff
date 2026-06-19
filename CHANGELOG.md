@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Predictor = 3` (IEEE floating-point predictor) decode** for
+  16-/32-/64-bit `SampleFormat = 3` grayscale and RGB, across strip and
+  tile layouts (chunky and per-plane) under any byte-oriented
+  compression (None / PackBits / LZW / Deflate / ZSTD). The Adobe TIFF
+  §14 floating-point predictor regroups each scan-line's sample bytes
+  into significance-ordered planes (most-significant byte of every
+  sample first) and then horizontally byte-differences the reordered
+  stream; the decoder reverses both — an inclusive prefix sum undoes the
+  differencing, then the planes are scattered back into per-sample bytes
+  at the byte order's significance positions (so the reconstructed bytes
+  follow the file's own endianness). Predictor 3 over non-float or
+  non-16/32/64-bit data is rejected before any strip/tile is decoded,
+  per the §14 "the reader must give up" reader rule. New
+  `tests/decode_predictor_float.rs` validates with a binary-independent
+  encode/decode oracle (f16/f32/f64 grayscale + RGB, single-row and
+  wide-dynamic-range) and against ImageMagick-written Predictor 1 vs 3
+  float TIFFs as a black-box (f32/f64 LZW, f32 Deflate, and tiled).
+
 - **Associated-alpha (ExtraSamples = 1, pre-multiplied color) decode**
   for 8-bit RGB pages (the premultiplied RGBA layout). TIFF 6.0 §18
   "Associated Alpha Handling" (page 78) states that "naive applications

@@ -629,16 +629,37 @@ fn zstd_hand_built_predictor2_reverses() {
 fn zstd_unknown_predictor_rejected() {
     // TIFF 6.0 §14 reader rule (restated in trace doc §4): a reader
     // that does not recognise the declared Predictor must give up
-    // rather than emit garbage. We support 1 and 2; 3 (the
-    // floating-point predictor) must be rejected.
+    // rather than emit garbage. We support 1 (none), 2 (horizontal
+    // differencing) and 3 (the floating-point predictor); any other
+    // value must be rejected.
+    let pixels: Vec<u8> = (0u8..16).collect();
+    let strip = raw_block_zstd_frame(&pixels);
+    let tiff = build_zstd_tiff(4, 4, &strip, Some(4));
+    let err = match decode_tiff(&tiff) {
+        Ok(_) => panic!("Predictor=4 (undefined) must be rejected"),
+        Err(e) => e,
+    };
+    assert!(format!("{err:?}").contains("Predictor"), "{err:?}");
+}
+
+#[test]
+fn zstd_float_predictor_on_integer_samples_rejected() {
+    // Predictor = 3 is the IEEE floating-point predictor; declaring it
+    // over plain 8-bit unsigned integer samples (no SampleFormat=3) has
+    // no defined meaning. The §14 reader rule requires giving up rather
+    // than reversing a byte-plane transform the data was never put
+    // through.
     let pixels: Vec<u8> = (0u8..16).collect();
     let strip = raw_block_zstd_frame(&pixels);
     let tiff = build_zstd_tiff(4, 4, &strip, Some(3));
     let err = match decode_tiff(&tiff) {
-        Ok(_) => panic!("Predictor=3 must be rejected"),
+        Ok(_) => panic!("Predictor=3 over integer samples must be rejected"),
         Err(e) => e,
     };
-    assert!(format!("{err:?}").contains("Predictor"), "{err:?}");
+    assert!(
+        format!("{err:?}").contains("Predictor=3") || format!("{err:?}").contains("SampleFormat"),
+        "{err:?}"
+    );
 }
 
 #[test]
