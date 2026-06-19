@@ -543,6 +543,37 @@ fn float_predictor_rgb_f32_handbuilt() {
 }
 
 #[test]
+fn float_predictor_magick_multistrip_f32_lzw() {
+    // Multiple strips (RowsPerStrip < height): the float predictor is
+    // applied per scan-line independently of strip boundaries, so the
+    // per-strip reversal must reconstruct exactly the same plane as the
+    // single-strip predictor=1 twin.
+    let Some(bin) = magick_bin() else {
+        eprintln!("skipping: no `magick`/`convert` binary");
+        return;
+    };
+    let (w, h) = (24u32, 16u32);
+    let pgm = make_pgm(w, h);
+    let rps = "tiff:rows-per-strip=4";
+    let Some(p1) = magick_float_tiff_ex(bin, &pgm, "pgm", 32, 1, "LZW", &[rps]) else {
+        eprintln!("skipping: magick did not produce predictor=1 multistrip float TIFF");
+        return;
+    };
+    let Some(p3) = magick_float_tiff_ex(bin, &pgm, "pgm", 32, 3, "LZW", &[rps]) else {
+        eprintln!("skipping: magick did not produce predictor=3 multistrip float TIFF");
+        return;
+    };
+    let d1 = decode_tiff(&p1).expect("decode magick predictor=1 multistrip float TIFF");
+    let d3 = decode_tiff(&p3).expect("decode magick predictor=3 multistrip float TIFF");
+    assert_eq!((d3.width, d3.height), (w, h));
+    assert_eq!(
+        frame_to_gray8(&d1),
+        frame_to_gray8(&d3),
+        "magick multistrip float Predictor=3 must decode identically to Predictor=1"
+    );
+}
+
+#[test]
 fn float_predictor_magick_tiled_f32_lzw() {
     // Tiled layout: the float predictor runs per tile-row with the tile
     // width as the per-row sample count.

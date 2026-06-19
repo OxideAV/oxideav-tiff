@@ -662,6 +662,97 @@ fn zstd_float_predictor_on_integer_samples_rejected() {
     );
 }
 
+/// Minimal classic-II **float32 grayscale** single-strip TIFF, tagged
+/// Compression = 50000 (ZSTD) + SampleFormat = 3, with an optional
+/// Predictor. The strip bytes are supplied verbatim (already a ZSTD
+/// frame).
+fn build_zstd_float_tiff(w: u16, h: u16, strip: &[u8], predictor: Option<u16>) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"II");
+    out.extend_from_slice(&42u16.to_le_bytes());
+    let strip_off = 8u32;
+    let ifd_off = 8 + strip.len() as u32;
+    out.extend_from_slice(&ifd_off.to_le_bytes());
+    out.extend_from_slice(strip);
+
+    let n: u16 = 10 + if predictor.is_some() { 1 } else { 0 };
+    out.extend_from_slice(&n.to_le_bytes());
+    out.extend_from_slice(&entry_short(256, w)); // ImageWidth
+    out.extend_from_slice(&entry_short(257, h)); // ImageLength
+    out.extend_from_slice(&entry_short(258, 32)); // BitsPerSample = 32
+    out.extend_from_slice(&entry_short(259, 50000)); // Compression = ZSTD
+    out.extend_from_slice(&entry_short(262, 1)); // Photometric = BlackIsZero
+    out.extend_from_slice(&entry_short(273, strip_off as u16)); // StripOffsets
+    out.extend_from_slice(&entry_short(277, 1)); // SamplesPerPixel
+    out.extend_from_slice(&entry_short(278, h)); // RowsPerStrip
+    out.extend_from_slice(&entry_short(279, strip.len() as u16)); // StripByteCounts
+    if let Some(p) = predictor {
+        out.extend_from_slice(&entry_short(317, p)); // Predictor
+    }
+    out.extend_from_slice(&entry_short(339, 3)); // SampleFormat = IEEE float
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out
+}
+
+/// Apply the encoder-side float predictor (MSB-first byte-plane reorder
+/// then horizontal byte differencing) to one little-endian float32 row of
+/// `n` samples.
+fn encode_float_predictor_row_f32(row: &[u8], n: usize) -> Vec<u8> {
+    let bytes = 4usize;
+    let mut planar = vec![0u8; row.len()];
+    for p in 0..bytes {
+        let src = bytes - 1 - p;
+        for k in 0..n {
+            planar[p * n + k] = row[k * bytes + src];
+        }
+    }
+    let mut out = planar.clone();
+    for i in (1..out.len()).rev() {
+        out[i] = planar[i].wrapping_sub(planar[i - 1]);
+    }
+    out
+}
+
+#[test]
+fn zstd_float32_predictor3_decodes() {
+    // Compression = 50000 (ZSTD) with the IEEE floating-point predictor
+    // (Predictor = 3) on float32 grayscale — the documented ZSTD + float
+    // predictor combination (tiff-zstd-compression-50000.md §4). The
+    // predictor-3 file must decode to the same display plane as its
+    // predictor-1 twin built from identical floats.
+    let (w, h) = (4u16, 2u16);
+    let n = (w * h) as usize;
+    // Floats spanning [0,1] so the linear extent→display map is exact.
+    let mut raw = Vec::with_capacity(n * 4);
+    for i in 0..n {
+        let v = i as f32 / (n - 1) as f32;
+        raw.extend_from_slice(&v.to_le_bytes());
+    }
+    let row_bytes = w as usize * 4;
+
+    // Predictor=1 twin.
+    let s1 = raw_block_zstd_frame(&raw);
+    let t1 = build_zstd_float_tiff(w, h, &s1, Some(1));
+    let d1 = decode_tiff(&t1).expect("zstd float32 predictor=1 must decode");
+
+    // Predictor=3: apply the encoder-side transform per row, then wrap in
+    // a ZSTD frame.
+    let mut pred = Vec::with_capacity(raw.len());
+    for r in 0..h as usize {
+        let row = &raw[r * row_bytes..r * row_bytes + row_bytes];
+        pred.extend_from_slice(&encode_float_predictor_row_f32(row, w as usize));
+    }
+    let s3 = raw_block_zstd_frame(&pred);
+    let t3 = build_zstd_float_tiff(w, h, &s3, Some(3));
+    let d3 = decode_tiff(&t3).expect("zstd float32 predictor=3 must decode");
+
+    assert_eq!((d3.width, d3.height), (w as u32, h as u32));
+    assert_eq!(
+        d1.frame.planes[0].data, d3.frame.planes[0].data,
+        "ZSTD float32 Predictor=3 must decode identically to Predictor=1"
+    );
+}
+
 #[test]
 fn zstd_corrupt_frame_is_error_not_panic() {
     // Garbage strip bytes under Compression=50000 → clean error.

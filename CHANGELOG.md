@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Predictor=3 over the ZSTD path + multi-strip coverage.** A hand-built
+  Compression=50000 (ZSTD) float32 grayscale fixture exercises the
+  documented ZSTD + floating-point-predictor combination
+  (`tiff-zstd-compression-50000.md` §4) end-to-end, and a multi-strip
+  (RowsPerStrip=4) ImageMagick fixture confirms the per-scan-line float
+  predictor reverses correctly across strip boundaries. Both assert byte
+  equality against the matching Predictor=1 twin.
+
 - **Tiled JPEG-in-TIFF (Compression=7) test coverage.** The
   `decode_ifd_jpeg_tiles` path (each tile a self-contained SOI..EOI JPEG
   datastream, composited into the output plane with edge-tile clipping)
