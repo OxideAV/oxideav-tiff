@@ -881,14 +881,22 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     // formats and the bit-packed bilevel format up front. The
     // multi-sample formats the encoder writes are Rgb24 (SPP=3),
     // CieLab8 (SPP=3 — three 8-bit L*/a*/b* component planes per
-    // §"PlanarConfiguration"), and Cmyk32 (SPP=4 — four 8-bit
-    // C / M / Y / K component planes per §16 + §"PlanarConfiguration").
+    // §"PlanarConfiguration"), Cmyk32 (SPP=4 — four 8-bit
+    // C / M / Y / K component planes per §16 + §"PlanarConfiguration"),
+    // and 4:4:4 YCbCr (SPP=3 — three full-resolution Y / Cb / Cr
+    // component planes; the §21 [1, 1] data unit is a plain chunky triple
+    // so §"PlanarConfiguration" applies exactly as it does for Rgb24).
+    // The non-1:1 chroma-subsampled YCbCr formats stay rejected by the
+    // §21 guard a few lines down (their on-disk data-unit stream is not a
+    // per-pixel component interleave that can be split into planes).
     if p.planar
         && !matches!(
             p.kind,
             EncodePixelFormat::Rgb24 { .. }
                 | EncodePixelFormat::CieLab8 { .. }
                 | EncodePixelFormat::Cmyk32 { .. }
+                | EncodePixelFormat::YCbCr24 { .. }
+                | EncodePixelFormat::YCbCrSubsampled24 { .. }
         )
     {
         return Err(Error::invalid(
@@ -915,18 +923,47 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         p.kind,
         EncodePixelFormat::YCbCr24 { .. } | EncodePixelFormat::YCbCrSubsampled24 { .. }
     );
+    // A YCbCr page is "4:4:4" (one luma sample per chroma pair) when its
+    // YCbCrSubSampling is [1, 1]. At that ratio the §21 "Ordering of
+    // Component Samples" data unit collapses to a plain chunky
+    // `(Y, Cb, Cr)` triple (TIFF 6.0 §21 page 91) — structurally identical
+    // to an Rgb24 page. `YCbCr24` always writes [1, 1]; `YCbCrSubsampled24`
+    // is 4:4:4 only when the caller passed (1, 1).
+    let is_ycbcr_444 = matches!(
+        p.kind,
+        EncodePixelFormat::YCbCr24 { .. }
+            | EncodePixelFormat::YCbCrSubsampled24 {
+                subsampling: (1, 1),
+                ..
+            }
+    );
     if is_ycbcr {
-        if p.planar {
+        // PlanarConfiguration=2 and the §14 horizontal-differencing
+        // predictor both operate on the on-disk sample layout. For 4:4:4
+        // YCbCr that layout is a plain chunky `(Y, Cb, Cr)` interleave, so
+        // both compose exactly as they do for Rgb24: §"PlanarConfiguration"
+        // splits the three full-resolution components into three planes,
+        // and §14 ("If PlanarConfiguration is 2 … Differencing works the
+        // same as it does for grayscale data") differences each plane /
+        // each chunky component independently. Under non-1:1 subsampling
+        // the on-disk stream is the packed §21 data-unit sequence (a 2-D
+        // luma block then single Cb/Cr), where neither a per-plane split
+        // nor a per-component horizontal difference has a defined shape —
+        // those stay rejected.
+        if p.planar && !is_ycbcr_444 {
             return Err(Error::invalid(
-                "TIFF encode: PlanarConfiguration=2 with YCbCr is not supported in this round \
-                 (the §21 data-unit ordering changes shape under non-1:1 subsampling)",
+                "TIFF encode: PlanarConfiguration=2 with chroma-subsampled YCbCr is not \
+                 supported (the §21 data-unit ordering changes shape under non-1:1 \
+                 subsampling); 4:4:4 YCbCr (YCbCrSubSampling = [1, 1]) does compose with \
+                 planar",
             ));
         }
-        if p.predictor {
+        if p.predictor && !is_ycbcr_444 {
             return Err(Error::invalid(
-                "TIFF encode: Predictor=2 with YCbCr is not supported in this round \
+                "TIFF encode: Predictor=2 with chroma-subsampled YCbCr is not supported \
                  (the §21 chroma-difference samples and the §14 cumulative-add reversal \
-                 interact through the §22 / §20 reference coding range)",
+                 interact through the §22 / §20 reference coding range); 4:4:4 YCbCr \
+                 (YCbCrSubSampling = [1, 1]) does compose with Predictor=2",
             ));
         }
         // §21 page 90: under subsampling, TileWidth / TileLength must be

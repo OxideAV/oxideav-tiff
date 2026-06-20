@@ -268,40 +268,16 @@ fn encoder_ycbcr24_compressors_lossless() {
 }
 
 #[test]
-fn encoder_ycbcr24_rejects_planar_predictor_ccitt() {
-    // These flags remain deferred — the §14 chroma-difference predictor
-    // and the §21 separate-plane layout both change the on-disk shape;
-    // CCITT is bilevel-only. (Tiled 4:4:4 is now supported — see the
-    // dedicated round-trip test below.)
+fn encoder_ycbcr24_444_rejects_ccitt_only() {
+    // For 4:4:4 YCbCr (`YCbCrSubSampling = [1, 1]`) the §21 "Ordering of
+    // Component Samples" data unit collapses to a plain chunky
+    // `(Y, Cb, Cr)` triple, so `PlanarConfiguration = 2` and the §14
+    // horizontal-differencing predictor now compose exactly as they do
+    // for Rgb24 (covered by the dedicated round-trip tests below). The
+    // only flag that stays rejected for YCbCr24 is CCITT — those schemes
+    // (`Compression = 2 / 3 / 4`) are bilevel-only per §10 / §11.
     let pixels = vec![128u8; 4 * 4 * 3];
 
-    // Predictor = true.
-    let page = EncodePage {
-        width: 4,
-        height: 4,
-        kind: EncodePixelFormat::YCbCr24 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-    };
-    assert!(encode_tiff(&page).is_err(), "predictor must reject");
-
-    // Planar = true.
-    let page = EncodePage {
-        width: 4,
-        height: 4,
-        kind: EncodePixelFormat::YCbCr24 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: true,
-        tiling: None,
-        bigtiff: false,
-    };
-    assert!(encode_tiff(&page).is_err(), "planar must reject");
-
-    // CCITT (bilevel-only).
     let page = EncodePage {
         width: 4,
         height: 4,
@@ -313,6 +289,55 @@ fn encoder_ycbcr24_rejects_planar_predictor_ccitt() {
         bigtiff: false,
     };
     assert!(encode_tiff(&page).is_err(), "CCITT must reject");
+}
+
+#[test]
+fn encoder_ycbcr_subsampled_rejects_planar_and_predictor() {
+    // Under non-1:1 subsampling the on-disk stream is the packed §21
+    // data-unit sequence (a 2-D luma block then single Cb / Cr samples),
+    // not a per-pixel chunky interleave. Neither a `PlanarConfiguration =
+    // 2` plane split nor a §14 per-component horizontal difference has a
+    // defined shape over that layout, so both stay rejected for the
+    // genuinely-subsampled `YCbCrSubsampled24` pairs.
+    let pixels = vec![128u8; 8 * 8 * 3];
+
+    for (sh, sv) in [(2u16, 1u16), (2, 2), (4, 1), (4, 2)] {
+        let planar_page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::YCbCrSubsampled24 {
+                pixels: &pixels,
+                subsampling: (sh, sv),
+            },
+            compression: TiffCompression::Lzw,
+            predictor: false,
+            planar: true,
+            tiling: None,
+            bigtiff: false,
+        };
+        assert!(
+            encode_tiff(&planar_page).is_err(),
+            "subsampled ({sh},{sv}) planar must reject"
+        );
+
+        let pred_page = EncodePage {
+            width: 8,
+            height: 8,
+            kind: EncodePixelFormat::YCbCrSubsampled24 {
+                pixels: &pixels,
+                subsampling: (sh, sv),
+            },
+            compression: TiffCompression::Lzw,
+            predictor: true,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        };
+        assert!(
+            encode_tiff(&pred_page).is_err(),
+            "subsampled ({sh},{sv}) predictor must reject"
+        );
+    }
 }
 
 /// A non-neutral `(Y, Cb, Cr)` raster (varying luma + chroma) so a tile
@@ -383,6 +408,224 @@ fn encoder_ycbcr24_tiled_444_roundtrips_against_strip() {
             );
         }
     }
+}
+
+#[test]
+fn encoder_ycbcr24_planar_444_roundtrips_against_chunky() {
+    // PlanarConfiguration = 2 (TIFF 6.0 §"PlanarConfiguration") for 4:4:4
+    // YCbCr: the encoder de-interleaves the chunky (Y, Cb, Cr) raster into
+    // three full-resolution component planes (Y plane, Cb plane, Cr plane)
+    // and writes StripOffsets / StripByteCounts as SamplesPerPixel ×
+    // StripsPerImage entries in plane order, then the decoder re-interleaves
+    // them back to chunky for the §22 YCbCr→RGB matrix. Encode the same
+    // pixels chunky and planar and assert both decode to the identical
+    // Rgb24 plane — the chunky encode (already validated against hand-built
+    // fixtures above) is the independent oracle. Strip and tiled planar
+    // layouts are both exercised across the byte-aligned compressors.
+    let cases = [
+        (16u32, 16u32, None),
+        (32, 24, None),
+        (16, 16, Some((16u32, 16u32))),
+        (48, 32, Some((16, 16))),
+        (40, 24, Some((16, 16))), // partial right + bottom edge tiles
+    ];
+    let compressors = [
+        TiffCompression::None,
+        TiffCompression::PackBits,
+        TiffCompression::Lzw,
+        TiffCompression::Deflate,
+    ];
+    for (w, h, tile) in cases {
+        let pixels = ycbcr_ramp(w as usize, h as usize);
+        for comp in compressors {
+            let chunky = EncodePage {
+                width: w,
+                height: h,
+                kind: EncodePixelFormat::YCbCr24 { pixels: &pixels },
+                compression: comp,
+                predictor: false,
+                planar: false,
+                tiling: tile,
+                bigtiff: false,
+            };
+            let planar = EncodePage {
+                width: w,
+                height: h,
+                kind: EncodePixelFormat::YCbCr24 { pixels: &pixels },
+                compression: comp,
+                predictor: false,
+                planar: true,
+                tiling: tile,
+                bigtiff: false,
+            };
+            let dc = decode_tiff(&encode_tiff(&chunky).unwrap()).unwrap();
+            let dp = decode_tiff(&encode_tiff(&planar).unwrap()).unwrap();
+            assert_eq!((dp.width, dp.height), (w, h));
+            assert_eq!(dp.pixel_format, TiffPixelFormat::Rgb24);
+            assert_eq!(
+                dp.frame.planes[0].data, dc.frame.planes[0].data,
+                "planar 4:4:4 YCbCr diverged from chunky for {w}x{h} tile {tile:?} comp {comp:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn encoder_ycbcr24_predictor_444_roundtrips_against_unpredicted() {
+    // Predictor = 2 (TIFF 6.0 §14 horizontal differencing) for 4:4:4
+    // YCbCr: §14 differences each component independently (offset =
+    // SamplesPerPixel for chunky, offset = 1 per plane for planar), and the
+    // decoder reverses it with its cumulative left-to-right add. The
+    // predicted file must decode to the identical Rgb24 as the unpredicted
+    // encode of the same source — the predictor is a lossless transform on
+    // the byte-aligned sample stream. Exercised chunky + planar, strip +
+    // tiled, across the byte-aligned compressors.
+    let cases = [
+        (16u32, 16u32, false, None),
+        (32, 24, false, None),
+        (16, 16, true, None), // planar strip
+        (32, 24, true, None), // planar strip
+        (32, 32, false, Some((16u32, 16u32))),
+        (40, 24, false, Some((16, 16))), // partial-edge tiles
+        (32, 32, true, Some((16, 16))),  // planar tiled
+    ];
+    let compressors = [
+        TiffCompression::None,
+        TiffCompression::PackBits,
+        TiffCompression::Lzw,
+        TiffCompression::Deflate,
+    ];
+    for (w, h, planar, tile) in cases {
+        let pixels = ycbcr_ramp(w as usize, h as usize);
+        for comp in compressors {
+            let plain = EncodePage {
+                width: w,
+                height: h,
+                kind: EncodePixelFormat::YCbCr24 { pixels: &pixels },
+                compression: comp,
+                predictor: false,
+                planar,
+                tiling: tile,
+                bigtiff: false,
+            };
+            let predicted = EncodePage {
+                width: w,
+                height: h,
+                kind: EncodePixelFormat::YCbCr24 { pixels: &pixels },
+                compression: comp,
+                predictor: true,
+                planar,
+                tiling: tile,
+                bigtiff: false,
+            };
+            let d0 = decode_tiff(&encode_tiff(&plain).unwrap()).unwrap();
+            let d1 = decode_tiff(&encode_tiff(&predicted).unwrap()).unwrap();
+            assert_eq!((d1.width, d1.height), (w, h));
+            assert_eq!(
+                d1.frame.planes[0].data, d0.frame.planes[0].data,
+                "predicted 4:4:4 YCbCr diverged from plain for {w}x{h} planar={planar} \
+                 tile {tile:?} comp {comp:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn encoder_ycbcr24_planar_predictor_compose() {
+    // PlanarConfiguration = 2 + Predictor = 2 together (TIFF 6.0 §14: "If
+    // PlanarConfiguration is 2 … Differencing works the same as it does for
+    // grayscale data" — each plane is a single-component stream differenced
+    // with offset 1). The combined output must still decode to the same
+    // Rgb24 as the plain chunky encode.
+    let (w, h) = (32u32, 24u32);
+    let pixels = ycbcr_ramp(w as usize, h as usize);
+    let oracle = {
+        let page = EncodePage {
+            width: w,
+            height: h,
+            kind: EncodePixelFormat::YCbCr24 { pixels: &pixels },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        };
+        decode_tiff(&encode_tiff(&page).unwrap())
+            .unwrap()
+            .frame
+            .planes[0]
+            .data
+            .clone()
+    };
+    for comp in [
+        TiffCompression::None,
+        TiffCompression::Lzw,
+        TiffCompression::Deflate,
+    ] {
+        for tile in [None, Some((16u32, 16u32))] {
+            let page = EncodePage {
+                width: w,
+                height: h,
+                kind: EncodePixelFormat::YCbCr24 { pixels: &pixels },
+                compression: comp,
+                predictor: true,
+                planar: true,
+                tiling: tile,
+                bigtiff: false,
+            };
+            let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
+            assert_eq!(
+                d.frame.planes[0].data, oracle,
+                "planar+predictor 4:4:4 YCbCr diverged for comp {comp:?} tile {tile:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn encoder_ycbcr24_subsampled_111_planar_predictor_compose() {
+    // The YCbCrSubsampled24 path at the trivial (1, 1) ratio is also 4:4:4
+    // (the §21 data unit is a plain chunky triple), so it must accept the
+    // planar + predictor flags the same way YCbCr24 does and decode to the
+    // identical Rgb24.
+    let (w, h) = (24u32, 16u32);
+    let pixels = ycbcr_ramp(w as usize, h as usize);
+    let oracle = {
+        let page = EncodePage {
+            width: w,
+            height: h,
+            kind: EncodePixelFormat::YCbCr24 { pixels: &pixels },
+            compression: TiffCompression::None,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        };
+        decode_tiff(&encode_tiff(&page).unwrap())
+            .unwrap()
+            .frame
+            .planes[0]
+            .data
+            .clone()
+    };
+    let page = EncodePage {
+        width: w,
+        height: h,
+        kind: EncodePixelFormat::YCbCrSubsampled24 {
+            pixels: &pixels,
+            subsampling: (1, 1),
+        },
+        compression: TiffCompression::Lzw,
+        predictor: true,
+        planar: true,
+        tiling: None,
+        bigtiff: false,
+    };
+    let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
+    assert_eq!(
+        d.frame.planes[0].data, oracle,
+        "subsampled(1,1) planar+predictor diverged from chunky 4:4:4"
+    );
 }
 
 #[test]

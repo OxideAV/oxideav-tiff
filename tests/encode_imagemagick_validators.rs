@@ -28,12 +28,20 @@ fn binary_available(name: &str) -> bool {
 }
 
 fn rand_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    // A monotonically-increasing per-process counter guarantees a unique
+    // suffix even when two parallel test threads call this within the same
+    // clock tick — `SystemTime::now().as_nanos()` alone collides at the
+    // OS clock resolution, which let one ImageMagick test read another's
+    // temp `in.tiff` / `out.ppm` under `--test-threads > 1`.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let n = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{n}")
+    format!("{n}-{seq}")
 }
 
 fn tmp_dir() -> PathBuf {

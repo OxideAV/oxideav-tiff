@@ -1007,6 +1007,51 @@ fn ycbcr_subsampling_factors(
     }
 }
 
+/// Reject a chroma-subsampled YCbCr page that arrives on the
+/// `PlanarConfiguration = 2` walkers.
+///
+/// The planar walkers size every component plane at the full image
+/// `width × height` (one sample per pixel per plane). That accounting is
+/// correct only for **4:4:4** YCbCr (`YCbCrSubSampling = [1, 1]`), where
+/// each of the Y / Cb / Cr planes is genuinely full-resolution and the
+/// §21 "Ordering of Component Samples" data unit collapses to a plain
+/// chunky `(Y, Cb, Cr)` triple. Under any other subsampling the spec
+/// (§"PlanarConfiguration" + §21) stores the Cb and Cr planes at the
+/// reduced `width/sh × height/sv` resolution, so the full-resolution
+/// plane stride would mis-read the chroma planes. The §22 default when
+/// the tag is absent is `[2, 2]` (subsampled), so an untagged planar
+/// YCbCr page is also rejected here rather than mis-decoded — a planar
+/// 4:4:4 page must carry an explicit `YCbCrSubSampling = [1, 1]`, which
+/// is exactly what this crate's encoder writes.
+fn reject_subsampled_planar_ycbcr(
+    entries: &[Entry],
+    bo: ByteOrder,
+    samples_per_pixel: u16,
+    bps_first: u16,
+    compression: u16,
+) -> Result<()> {
+    let photometric = find(entries, TAG_PHOTOMETRIC_INTERPRETATION)
+        .map(|e| e.as_u32(bo))
+        .transpose()?
+        .unwrap_or(0);
+    if let Some((sh, sv)) = ycbcr_subsampling_factors(
+        entries,
+        bo,
+        photometric,
+        samples_per_pixel,
+        bps_first,
+        compression,
+    )? {
+        return Err(Error::Unsupported(format!(
+            "TIFF: PlanarConfiguration=2 with chroma-subsampled YCbCr \
+             (YCbCrSubSampling=({sh},{sv})) is not supported — under non-1:1 subsampling \
+             the §21 Cb/Cr planes are stored at reduced resolution; only 4:4:4 \
+             (YCbCrSubSampling=[1,1]) planar YCbCr decodes"
+        )));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn decode_strips(
     input: &[u8],
@@ -1558,6 +1603,7 @@ fn decode_strips_planar(
             "TIFF: PlanarConfiguration=2 at sub-byte bit depths not supported",
         ));
     }
+    reject_subsampled_planar_ycbcr(entries, bo, samples_per_pixel, bps_first, compression)?;
     let rows_per_strip = find(entries, TAG_ROWS_PER_STRIP)
         .map(|e| e.as_u32(bo))
         .transpose()?
@@ -1718,6 +1764,7 @@ fn decode_tiles_planar(
             "TIFF: planar tiled images at sub-byte bit depths not supported",
         ));
     }
+    reject_subsampled_planar_ycbcr(entries, bo, samples_per_pixel, bps_first, compression)?;
     let tile_w = find(entries, TAG_TILE_WIDTH)
         .ok_or_else(|| Error::invalid("TIFF: missing TileWidth"))?
         .as_u32(bo)?;

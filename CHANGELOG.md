@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **4:4:4 YCbCr `PlanarConfiguration = 2` + `Predictor = 2` (TIFF 6.0
+  §"PlanarConfiguration" / §14 / §21).** At `YCbCrSubSampling = [1, 1]`
+  the §21 "Ordering of Component Samples" data unit collapses to a plain
+  chunky `(Y, Cb, Cr)` triple, so a YCbCr page is structurally identical
+  to an Rgb24 page. The encoder (`EncodePixelFormat::YCbCr24`, and
+  `YCbCrSubsampled24` at the trivial `(1, 1)` ratio) now composes with
+  `EncodePage::planar` (three full-resolution Y / Cb / Cr component planes,
+  `StripOffsets` / `StripByteCounts` written as `SamplesPerPixel ×
+  StripsPerImage` entries in plane order) and with `EncodePage::predictor`
+  (§14 "Differencing works the same as it does for grayscale data" —
+  per-component for chunky, per-plane offset 1 for planar). Both compose
+  with §15 tiling and the byte-aligned compressors. The decoder gained
+  matching support: a hand-built planar 4:4:4 YCbCr file re-interleaves
+  the three planes into chunky order and runs the §22 BT.601 matrix. The
+  genuinely chroma-subsampled planar case (Cb / Cr stored at reduced
+  resolution) is rejected with a precise `Unsupported` error on both
+  sides rather than mis-sized — `reject_subsampled_planar_ycbcr` guards
+  the planar strip and tile walkers. `tests/decode_ycbcr_planar.rs`
+  (hand-built chunky-vs-planar pixel-exact oracle + subsampled rejection)
+  and the new planar / predictor / planar+predictor round-trips in
+  `tests/encode_ycbcr_roundtrip.rs` cover it.
+
+### Fixed
+
+- **ImageMagick validator temp-dir collision under parallel test
+  threads.** `tests/encode_imagemagick_validators.rs` derived its
+  per-test temp directory from `SystemTime::now().as_nanos()` alone,
+  which collides at the OS clock resolution when two validator tests run
+  concurrently (`--test-threads > 1`), letting one test read another's
+  `in.tiff` / `out.ppm`. The suffix now appends a monotonic per-process
+  atomic counter so every temp dir is unique regardless of thread
+  scheduling.
+
 - **Tiled chroma-subsampled YCbCr encode (TIFF 6.0 §15 / §21).**
   `EncodePixelFormat::YCbCrSubsampled24` now composes with
   `EncodePage::tiling`. `build_tiles_ycbcr_subsampled` packs each tile's

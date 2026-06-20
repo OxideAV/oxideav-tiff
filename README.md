@@ -412,7 +412,7 @@ components.
 | **CIELab (3 chan)** | 8    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::CieLab8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 3, BitsPerSample = [8,8,8]) |
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**             | `EncodePixelFormat::CieLabL8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 1) |
 | **CMYK (4 chan)** | 8     | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Cmyk32` (writes PhotometricInterpretation = 5, SamplesPerPixel = 4, BitsPerSample = [8,8,8,8], plus optional `InkSet = 1` / `NumberOfInks = 4`) |
-| **YCbCr (3 chan, 4:4:4)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled** | `EncodePixelFormat::YCbCr24` (writes PhotometricInterpretation = 6, SamplesPerPixel = 3, BitsPerSample = [8,8,8], `YCbCrSubSampling = [1, 1]`, `YCbCrPositioning = 1`, `ReferenceBlackWhite = [0,255,128,255,128,255]` no-headroom full-range) |
+| **YCbCr (3 chan, 4:4:4)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, **`PlanarConfiguration = 2`** / **`Predictor = 2`** | `EncodePixelFormat::YCbCr24` (writes PhotometricInterpretation = 6, SamplesPerPixel = 3, BitsPerSample = [8,8,8], `YCbCrSubSampling = [1, 1]`, `YCbCrPositioning = 1`, `ReferenceBlackWhite = [0,255,128,255,128,255]` no-headroom full-range) |
 | **YCbCr (3 chan, subsampled)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled** | `EncodePixelFormat::YCbCrSubsampled24` (§21 data-unit packing for `[2,1]`/`[2,2]`/`[4,1]`/`[4,2]`; tiles per §21 page 90 multiple-of-subsampling-factor geometry) |
 
 `TiffCompression::CcittRle` selects Modified Huffman
@@ -605,10 +605,21 @@ tile's §21 data units (each `sh*sv` Y samples then the box-averaged Cb /
 Cr) from the full-resolution pixels with §15 edge replication, and the
 decoder's `decode_tiles_ycbcr_subsampled` reverses it. §21 page 90
 requires `TileWidth` / `TileLength` to be integer multiples of the
-subsampling factors (enforced on encode). `Predictor = 2` and
-`PlanarConfiguration = 2` remain deferred for YCbCr (the §14
-chroma-difference predictor and separate-plane layouts change the
-on-disk shape) and are rejected with a precise error. Hand-built classic-II fixtures carrying the same `(Y, Cb, Cr)` bytes
+subsampling factors (enforced on encode). **`PlanarConfiguration = 2`
+and `Predictor = 2` now compose with 4:4:4 YCbCr** (`YCbCrSubSampling =
+[1, 1]`): at the 1:1 ratio the §21 data unit collapses to a plain chunky
+`(Y, Cb, Cr)` triple, so §"PlanarConfiguration" splits the three
+full-resolution components into separate Y / Cb / Cr planes exactly as
+for `Rgb24`, and §14 differences each component independently
+("Differencing works the same as it does for grayscale data" — offset
+`SamplesPerPixel` chunky, offset 1 per plane). Both compose with §15
+tiling and the byte-aligned compressors. They stay **rejected for the
+genuinely chroma-subsampled pairs** (`[2,1]`/`[2,2]`/`[4,1]`/`[4,2]`),
+where the on-disk §21 data-unit stream is not a per-pixel component
+interleave a plane split or horizontal difference can act on. On the
+decode side a planar 4:4:4 YCbCr page re-interleaves the three planes
+into chunky order for the §22 matrix; a subsampled planar page (Cb / Cr
+stored at reduced resolution) is rejected rather than mis-sized. Hand-built classic-II fixtures carrying the same `(Y, Cb, Cr)` bytes
 decode to the same `Rgb24` as the encoder's output across the four
 accepted compressors; the IFD bytes are inspected byte-for-byte to
 confirm tags 262 / 277 / 284 / 530 / 531 / 532 carry the documented
@@ -655,15 +666,20 @@ remaining gaps are:
 - **Subsampled-YCbCr `PlanarConfiguration = 2` / predictor combinations**
   — chunky subsampled YCbCr now **encodes and decodes in both strip and
   tiled layouts** (TIFF 6.0 §21, `TileWidth` / `TileLength` integer
-  multiples of the subsampling factors); the separate-planes layout and
-  §14 differencing over the packed data-unit stream remain deferred.
-- **Float (`SampleFormat = 3`) grayscale and 3-channel RGB** now decode
-  (see the SampleFormat section above); float palette / CMYK / YCbCr /
-  CIELab remain precise typed errors. The §14 floating-point predictor
-  (`Predictor = 3`) is defined in Adobe TIFF Technical Note 3, which is
-  not present in `docs/image/tiff/`, so float predictor decode is
-  blocked on that note (TIFF 6.0 §14 itself defines only `Predictor = 1`
-  and `Predictor = 2`).
+  multiples of the subsampling factors), and the **4:4:4** ratio now
+  composes with both `PlanarConfiguration = 2` and `Predictor = 2` (see
+  the YCbCr write note above). The **genuinely chroma-subsampled**
+  separate-planes layout and §14 differencing over the packed data-unit
+  stream remain deferred (those would need the §21 data-unit geometry to
+  drive the plane split / horizontal difference, which has no
+  single-shape definition in the spec).
+- **Float (`SampleFormat = 3`) grayscale and 3-channel RGB** now decode,
+  and the **floating-point predictor (`Predictor = 3`)** is reversed for
+  16-/32-/64-bit float grayscale and RGB across strip / tile and chunky /
+  per-plane layouts (see the SampleFormat / Predictor notes above). Float
+  palette / CMYK / YCbCr / CIELab remain precise typed errors, and
+  `Predictor = 3` over non-float or non-16/32/64-bit data is rejected per
+  the §14 "the reader must give up" rule.
 
 ## Registration
 
