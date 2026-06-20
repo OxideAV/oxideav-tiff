@@ -369,7 +369,10 @@ fn rejects_wrong_buffer_length() {
 }
 
 #[test]
-fn rejects_predictor_planar_tiled_and_ccitt() {
+fn rejects_predictor_planar_and_ccitt() {
+    // Predictor / PlanarConfiguration=2 / CCITT remain deferred for
+    // subsampled YCbCr. (Tiled subsampled layout is now supported — see
+    // `subsampled_tiled_matches_strip` below.)
     let (w, h) = (8usize, 4usize);
     let pixels = block_uniform_chroma(w, h, 2, 2);
     let base = |comp, predictor, planar, tiling| EncodePage {
@@ -387,8 +390,74 @@ fn rejects_predictor_planar_tiled_and_ccitt() {
     };
     assert!(encode_tiff(&base(TiffCompression::None, true, false, None)).is_err());
     assert!(encode_tiff(&base(TiffCompression::None, false, true, None)).is_err());
-    assert!(encode_tiff(&base(TiffCompression::None, false, false, Some((16, 16)))).is_err());
     assert!(encode_tiff(&base(TiffCompression::CcittT6, false, false, None)).is_err());
+    // A tile geometry that is not a multiple of the subsampling factors
+    // is rejected (§21 page 90); TileLength 18 is not a multiple of sv=2.
+    assert!(encode_tiff(&base(TiffCompression::None, false, false, Some((16, 18)))).is_err());
+}
+
+#[test]
+fn subsampled_tiled_matches_strip() {
+    // Tiled subsampled YCbCr encode (TIFF 6.0 §15 + §21). Encode the same
+    // block-uniform-chroma raster strip-based and tiled and assert both
+    // decode to the identical Rgb24 plane across the legal subsampling
+    // pairs, byte-aligned compressors, and a spread of tile geometries.
+    // block_uniform_chroma keeps chroma constant within each sh×sv block,
+    // so the box-average + splat is the identity and the strip and tiled
+    // paths must agree exactly.
+    let pairs = [(2u16, 1u16), (2, 2), (4, 1), (4, 2)];
+    let geoms = [
+        (16u32, 16u32, (16u32, 16u32)),
+        (32, 32, (16, 16)),
+        (48, 32, (16, 16)),
+        (32, 16, (16, 16)),
+    ];
+    let comps = [
+        TiffCompression::None,
+        TiffCompression::PackBits,
+        TiffCompression::Lzw,
+        TiffCompression::Deflate,
+    ];
+    for (sh, sv) in pairs {
+        for (w, h, tile) in geoms {
+            // §21: width/height multiples of sh/sv; tile multiples too.
+            if w % sh as u32 != 0 || h % sv as u32 != 0 {
+                continue;
+            }
+            if tile.0 % sh as u32 != 0 || tile.1 % sv as u32 != 0 {
+                continue;
+            }
+            let pixels = block_uniform_chroma(w as usize, h as usize, sh as usize, sv as usize);
+            for comp in comps {
+                let strip = EncodePage {
+                    width: w,
+                    height: h,
+                    kind: EncodePixelFormat::YCbCrSubsampled24 {
+                        pixels: &pixels,
+                        subsampling: (sh, sv),
+                    },
+                    compression: comp,
+                    predictor: false,
+                    planar: false,
+                    tiling: None,
+                    bigtiff: false,
+                };
+                let tiled = EncodePage {
+                    tiling: Some(tile),
+                    ..strip.clone()
+                };
+                let ds = decode_tiff(&encode_tiff(&strip).unwrap()).unwrap();
+                let dt = decode_tiff(&encode_tiff(&tiled).unwrap()).unwrap();
+                assert_eq!((dt.width, dt.height), (w, h));
+                assert_eq!(dt.pixel_format, TiffPixelFormat::Rgb24);
+                assert_eq!(
+                    dt.frame.planes[0].data, ds.frame.planes[0].data,
+                    "tiled subsampled ({sh},{sv}) diverged from strip for {w}x{h} \
+                     tile {tile:?} comp {comp:?}"
+                );
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

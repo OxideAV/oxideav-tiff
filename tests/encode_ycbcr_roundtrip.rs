@@ -386,10 +386,11 @@ fn encoder_ycbcr24_tiled_444_roundtrips_against_strip() {
 }
 
 #[test]
-fn encoder_ycbcr_subsampled_tiled_still_rejected() {
-    // The non-1:1 subsampled tiled writer is still deferred (the on-disk
-    // byte order is the packed §21 data-unit stream, not a per-pixel
-    // interleave the generic tile packer produces).
+fn encoder_ycbcr_subsampled_tiled_rejects_non_multiple_tile() {
+    // Tiled subsampled YCbCr is now supported (round-trips are covered in
+    // encode_ycbcr_subsampled_roundtrip.rs), but §21 page 90 requires the
+    // tile dimensions to be integer multiples of the subsampling factors.
+    // A TileLength (18) that is not a multiple of sv (2) must reject.
     let pixels = vec![128u8; 16 * 16 * 3];
     let page = EncodePage {
         width: 16,
@@ -401,10 +402,13 @@ fn encoder_ycbcr_subsampled_tiled_still_rejected() {
         compression: TiffCompression::Lzw,
         predictor: false,
         planar: false,
-        tiling: Some((16, 16)),
+        tiling: Some((16, 18)),
         bigtiff: false,
     };
-    assert!(encode_tiff(&page).is_err(), "subsampled tiled must reject");
+    assert!(
+        encode_tiff(&page).is_err(),
+        "non-multiple tile geometry must reject"
+    );
 }
 
 #[test]

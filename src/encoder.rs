@@ -901,39 +901,25 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     // CCITT schemes are bilevel-only (rejected above) so they never
     // reach the planar path; the predictor is handled per-plane below.
 
-    // YCbCr encode: `PlanarConfiguration = 2`, tiled layout, and the §14
-    // predictor all depend on the §21 "Ordering of Component Samples"
-    // data-unit shape. At `YCbCrSubSampling = [1, 1]` (4:4:4) that shape
-    // collapses to a plain chunky `(Y, Cb, Cr)` triple per pixel, which
-    // the generic byte-aligned tile packer handles exactly as it does
-    // Rgb24 — so the **tiled 4:4:4** combination is now permitted (the
-    // decoder's regular tile path reads it and runs the same
-    // `build_rgb24_from_ycbcr` walker at sh = sv = 1). The non-1:1
-    // subsampled tile/planar packers and the §14 chroma-difference
-    // predictor remain deferred: under subsampling the on-disk byte order
-    // is the packed data-unit stream, not a per-pixel interleave, so the
-    // generic packers would mis-tile it.
+    // YCbCr encode: `PlanarConfiguration = 2` and the §14 predictor both
+    // depend on the §21 "Ordering of Component Samples" data-unit shape
+    // and remain deferred. Tiled layout is now supported for both 4:4:4
+    // (the data unit collapses to a plain chunky `(Y, Cb, Cr)` triple,
+    // handled by the generic byte-aligned tile packer) and the non-1:1
+    // chroma-subsampled case (`build_tiles_ycbcr_subsampled` packs each
+    // tile's §21 data units, the layout `decode_tiles` /
+    // `decode_tiles_ycbcr_subsampled` reverses). §21 page 90 requires
+    // `TileWidth` / `TileLength` to be integer multiples of the
+    // subsampling factors, which the geometry check below enforces.
     let is_ycbcr = matches!(
         p.kind,
         EncodePixelFormat::YCbCr24 { .. } | EncodePixelFormat::YCbCrSubsampled24 { .. }
     );
-    let ycbcr_is_444 = match &p.kind {
-        EncodePixelFormat::YCbCr24 { .. } => true,
-        EncodePixelFormat::YCbCrSubsampled24 { subsampling, .. } => *subsampling == (1, 1),
-        _ => false,
-    };
     if is_ycbcr {
         if p.planar {
             return Err(Error::invalid(
                 "TIFF encode: PlanarConfiguration=2 with YCbCr is not supported in this round \
                  (the §21 data-unit ordering changes shape under non-1:1 subsampling)",
-            ));
-        }
-        if p.tiling.is_some() && !ycbcr_is_444 {
-            return Err(Error::invalid(
-                "TIFF encode: tiled layout with chroma-subsampled YCbCr is not supported in \
-                 this round (the §21 data-unit packing is single-strip chunky only here); \
-                 4:4:4 (YCbCrSubSampling = [1, 1]) tiles are supported",
             ));
         }
         if p.predictor {
@@ -942,6 +928,20 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                  (the §21 chroma-difference samples and the §14 cumulative-add reversal \
                  interact through the §22 / §20 reference coding range)",
             ));
+        }
+        // §21 page 90: under subsampling, TileWidth / TileLength must be
+        // integer multiples of the subsampling factors so a tile is a
+        // whole number of data units.
+        if let (Some((tw, th)), EncodePixelFormat::YCbCrSubsampled24 { subsampling, .. }) =
+            (p.tiling, &p.kind)
+        {
+            let (sh, sv) = *subsampling;
+            if tw % (sh as u32) != 0 || th % (sv as u32) != 0 {
+                return Err(Error::invalid(format!(
+                    "TIFF encode: subsampled-YCbCr TileWidth/TileLength ({tw}x{th}) must be \
+                     integer multiples of YCbCrSubSampling ({sh},{sv}) per TIFF 6.0 §21 page 90"
+                )));
+            }
         }
     }
 
@@ -1249,14 +1249,22 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                         pixels.len()
                     )));
                 }
-                let packed = pack_ycbcr_data_units(
-                    pixels,
-                    p.width as usize,
-                    p.height as usize,
-                    sh as usize,
-                    sv as usize,
-                );
-                (3u16, vec![8u16, 8, 8], PHOTO_YCBCR, packed, None)
+                // Strip layout packs the whole-image §21 data-unit stream
+                // up front. Tiled layout instead packs per-tile data units
+                // (`build_tiles_ycbcr_subsampled` below) directly from the
+                // full-resolution pixels, so leave them unpacked here.
+                let buf = if p.tiling.is_some() {
+                    pixels.to_vec()
+                } else {
+                    pack_ycbcr_data_units(
+                        pixels,
+                        p.width as usize,
+                        p.height as usize,
+                        sh as usize,
+                        sv as usize,
+                    )
+                };
+                (3u16, vec![8u16, 8, 8], PHOTO_YCBCR, buf, None)
             }
         };
 
@@ -1266,9 +1274,35 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     // plane order (component 0 first), matching the decoder's planar
     // walker; tiled pages emit one segment per tile (row-major, TIFF 6.0
     // §15), each independently compressed.
+    // Non-1:1 chroma-subsampled YCbCr tiles pack §21 data units, not a
+    // per-pixel chunky interleave, so they take a dedicated tile packer.
+    let ycbcr_subsampling_nontrivial: Option<(usize, usize)> = match &p.kind {
+        EncodePixelFormat::YCbCrSubsampled24 { subsampling, .. } if *subsampling != (1, 1) => {
+            Some((subsampling.0 as usize, subsampling.1 as usize))
+        }
+        _ => None,
+    };
+
     let bps = bits_per_sample[0] as usize;
     let strips: Vec<Vec<u8>> = if let Some((tile_w, tile_h)) = p.tiling {
-        if p.planar {
+        if let Some((sh, sv)) = ycbcr_subsampling_nontrivial {
+            // Tiled chroma-subsampled YCbCr (TIFF 6.0 §15 + §21). Each
+            // tile carries a whole tile_w/sh × tile_h/sv grid of §21 data
+            // units packed from the full-resolution pixels (`raw_pixels`
+            // holds the unpacked pixels for this case — see the
+            // YCbCrSubsampled24 match arm). The decoder reverses this in
+            // `decode_tiles_ycbcr_subsampled`.
+            build_tiles_ycbcr_subsampled(
+                &raw_pixels,
+                p.width as usize,
+                p.height as usize,
+                tile_w as usize,
+                tile_h as usize,
+                sh,
+                sv,
+                p.compression,
+            )?
+        } else if p.planar {
             // Tiled PlanarConfiguration=2 (TIFF 6.0 §15 + §"Planar-
             // Configuration"): one row-major tile grid per component
             // plane, emitted plane-0 first then plane-1, etc. — exactly
@@ -1778,6 +1812,73 @@ fn pack_ycbcr_data_units(src: &[u8], width: usize, height: usize, sh: usize, sv:
         }
     }
     out
+}
+
+/// Pack a chroma-subsampled YCbCr (TIFF 6.0 §21) image into a row-major
+/// grid of tiles, each carrying a whole `tile_w/sh × tile_h/sv` block of
+/// §21 "data units" (each `sh*sv` Y samples in row-major order, then the
+/// box-averaged Cb and Cr). §21 page 90 constrains `TileWidth` /
+/// `TileLength` to integer multiples of the subsampling factors, so a
+/// tile is a whole number of data units and no unit straddles a tile
+/// boundary. Boundary tiles replicate the last visible pixel column /
+/// row (§15 "Padding") by clamping the source pixel coordinate, so every
+/// tile holds exactly `(tile_w/sh)*(tile_h/sv)` units before
+/// compression. Returns one compressed payload per tile, row-major
+/// (§15 `TileOffsets`). The §14 predictor is undefined over the packed
+/// data-unit layout and is rejected upstream, so no differencing runs.
+#[allow(clippy::too_many_arguments)]
+fn build_tiles_ycbcr_subsampled(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    tile_w: usize,
+    tile_h: usize,
+    sh: usize,
+    sv: usize,
+    compression: TiffCompression,
+) -> Result<Vec<Vec<u8>>> {
+    let unit_len = sh * sv + 2;
+    let tile_du_across = tile_w / sh;
+    let tile_du_down = tile_h / sv;
+    let tile_unit_count = tile_du_across * tile_du_down;
+
+    let tiles_across = width.div_ceil(tile_w);
+    let tiles_down = height.div_ceil(tile_h);
+
+    let mut out = Vec::with_capacity(tiles_across * tiles_down);
+    for ty in 0..tiles_down {
+        for tx in 0..tiles_across {
+            let mut tile = vec![0u8; tile_unit_count * unit_len];
+            for ur in 0..tile_du_down {
+                for uc in 0..tile_du_across {
+                    let unit_off = (ur * tile_du_across + uc) * unit_len;
+                    let mut cb_sum: u32 = 0;
+                    let mut cr_sum: u32 = 0;
+                    for sy in 0..sv {
+                        for sx in 0..sh {
+                            // Full-resolution pixel for this Y sample,
+                            // clamped to the image bounds (§15 edge
+                            // replication for boundary tiles).
+                            let px = (tx * tile_w + uc * sh + sx).min(width - 1);
+                            let py = (ty * tile_h + ur * sv + sy).min(height - 1);
+                            let s = (py * width + px) * 3;
+                            tile[unit_off + sy * sh + sx] = pixels[s];
+                            cb_sum += pixels[s + 1] as u32;
+                            cr_sum += pixels[s + 2] as u32;
+                        }
+                    }
+                    let n = (sh * sv) as u32;
+                    tile[unit_off + sh * sv] = ((cb_sum + n / 2) / n) as u8;
+                    tile[unit_off + sh * sv + 1] = ((cr_sum + n / 2) / n) as u8;
+                }
+            }
+            // §15: tiles are compressed individually. CCITT is rejected
+            // upstream, so the tile geometry passed here is only used by
+            // the byte-aligned coders that ignore it.
+            out.push(compression.pack(&tile, tile_w as u32, tile_h as u32)?);
+        }
+    }
+    Ok(out)
 }
 
 /// Split a chunky raster into a row-major grid of `tile_w x tile_h`

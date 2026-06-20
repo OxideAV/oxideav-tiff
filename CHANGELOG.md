@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tiled chroma-subsampled YCbCr encode (TIFF 6.0 §15 / §21).**
+  `EncodePixelFormat::YCbCrSubsampled24` now composes with
+  `EncodePage::tiling`. `build_tiles_ycbcr_subsampled` packs each tile's
+  §21 "data units" (each `sh*sv` Y samples in row-major order, then the
+  box-averaged Cb and Cr) directly from the full-resolution pixels with
+  §15 edge replication on boundary tiles; the decoder's
+  `decode_tiles_ycbcr_subsampled` reverses it. §21 page 90 requires
+  `TileWidth` / `TileLength` to be integer multiples of the subsampling
+  factors (enforced on encode). The strip path is unchanged (it still
+  packs the whole-image data-unit stream up front).
+  `tests/encode_ycbcr_subsampled_roundtrip.rs` encodes the same
+  block-uniform-chroma raster strip-based and tiled and asserts both
+  decode to byte-identical `Rgb24` across the legal subsampling pairs
+  (`[2,1]`/`[2,2]`/`[4,1]`/`[4,2]`), the byte-aligned compressors, and a
+  spread of tile geometries (exact-fit / multi-tile / partial-edge).
+
 - **Tiled 4:4:4 YCbCr encode (TIFF 6.0 §15 / §21).**
   `EncodePixelFormat::YCbCr24` now composes with `EncodePage::tiling`. At
   `YCbCrSubSampling = [1, 1]` the §21 "Ordering of Component Samples"
