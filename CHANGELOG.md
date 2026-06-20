@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Binary-independent planar CMYK decode + round-trip coverage (TIFF
+  6.0 §16 / §"PlanarConfiguration").** `PlanarConfiguration = 2` CMYK
+  (four full-resolution C / M / Y / K component planes) decoded through
+  the generic planar walker but was previously exercised only
+  indirectly. `tests/decode_cmyk_planar.rs` adds a hand-built
+  chunky-vs-planar pixel-exact decode oracle (so a plane mis-order or
+  mis-stride is caught), a solid-ink plane-order regression, and a full
+  `EncodePixelFormat::Cmyk32` planar round-trip matrix (None / PackBits /
+  LZW / Deflate × predictor × strip / tiled) against the chunky encode.
+  No behaviour change — this closes the decode-side coverage gap for the
+  separated-photometric planar path.
+
 - **4:4:4 YCbCr `PlanarConfiguration = 2` + `Predictor = 2` (TIFF 6.0
   §"PlanarConfiguration" / §14 / §21).** At `YCbCrSubSampling = [1, 1]`
   the §21 "Ordering of Component Samples" data unit collapses to a plain
