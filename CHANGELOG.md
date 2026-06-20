@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tiled chroma-subsampled YCbCr decode (TIFF 6.0 §21).** A
+  `PhotometricInterpretation = 6` page with a non-1:1 `YCbCrSubSampling`
+  (`[2,1]` / `[2,2]` / `[4,1]` / `[4,2]`) organised in tiles
+  (`TileWidth` / `TileLength` / `TileOffsets` / `TileByteCounts`) now
+  decodes. Per §21 page 90, `TileWidth` / `TileLength` are integer
+  multiples of the subsampling factors, so each tile holds a whole
+  `tile_w/sh × tile_h/sv` grid of §21 "data units" and no data unit
+  straddles a tile boundary; the decoder reassembles the tiles into the
+  same whole-image data-unit buffer the strip path produces and runs the
+  shared YCbCr→RGB walker, dropping right/bottom-edge tile overhang. A
+  non-conformant tile geometry that is not a multiple of the subsampling
+  factors is rejected, as is `Predictor = 2` over the packed data-unit
+  layout (§14 differencing is undefined there). Works under the
+  byte-aligned compressors (None / PackBits / LZW / Deflate / ZSTD). New
+  `tests/decode_ycbcr_subsampled_tiled.rs` is a binary-independent
+  oracle: it decodes the strip and tiled fixtures of the same data units
+  and asserts the rendered `Rgb24` planes are byte-identical across the
+  legal subsampling pairs, exact-fit / partial-edge / non-square /
+  oversized-single-tile geometries, and a PackBits-compressed variant.
+
 - **Predictor=3 over the ZSTD path + multi-strip coverage.** A hand-built
   Compression=50000 (ZSTD) float32 grayscale fixture exercises the
   documented ZSTD + floating-point-predictor combination

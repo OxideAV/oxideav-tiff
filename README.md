@@ -644,8 +644,12 @@ remaining gaps are:
   (it is a bit-rate control extension, not a compression win for
   facsimile content).
 - **DNG / GeoTIFF / EXIF blob extraction.**
-- **Subsampled-YCbCr planar / tiled / predictor combinations** — the
-  data-unit packing is single-strip chunky; these axes remain deferred.
+- **Subsampled-YCbCr `PlanarConfiguration = 2` / predictor combinations**
+  — chunky subsampled YCbCr now **decodes in both strip and tiled
+  layouts** (TIFF 6.0 §21, `TileWidth` / `TileLength` integer multiples
+  of the subsampling factors); the separate-planes layout and §14
+  differencing over the packed data-unit stream remain deferred (the
+  encoder still writes single-strip chunky only).
 - **Float (`SampleFormat = 3`) grayscale and 3-channel RGB** now decode
   (see the SampleFormat section above); float palette / CMYK / YCbCr /
   CIELab remain precise typed errors. The §14 floating-point predictor

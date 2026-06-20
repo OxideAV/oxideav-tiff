@@ -960,6 +960,53 @@ fn apply_orientation(image: TiffImage, orientation: u16) -> TiffImage {
     }
 }
 
+/// Detect the chroma-subsampled YCbCr (TIFF 6.0 §21,
+/// `PlanarConfiguration = 1`) byte-aligned layout for an IFD and return
+/// the `(ChromaSubsampleHoriz, ChromaSubsampleVert)` factors when the
+/// page is subsampled (i.e. not the trivial 1:1 / full-resolution
+/// case). Returns `None` for non-YCbCr pages, the 1:1 chunky case (which
+/// the standard full-resolution accounting already handles), and the
+/// JPEG-compressed YCbCr path (each segment is a self-contained JPEG
+/// datastream decoded elsewhere).
+///
+/// §21 page 90: "Both Cb and Cr have the same subsampling ratio. Also,
+/// YCbCrSubsampleVert shall always be less than or equal to
+/// YCbCrSubsampleHoriz." The §21 default (page 90) is `[2, 2]`.
+fn ycbcr_subsampling_factors(
+    entries: &[Entry],
+    bo: ByteOrder,
+    photometric: u32,
+    samples_per_pixel: u16,
+    bps_first: u16,
+    compression: u16,
+) -> Result<Option<(usize, usize)>> {
+    if photometric != PHOTO_YCBCR as u32
+        || samples_per_pixel != 3
+        || bps_first != 8
+        || matches!(compression, COMPRESSION_JPEG_OLD | COMPRESSION_JPEG_NEW)
+    {
+        return Ok(None);
+    }
+    let (sh, sv) = match find(entries, TAG_YCBCR_SUBSAMPLING) {
+        Some(e) => {
+            let v = e.as_u32_vec(bo)?;
+            if v.len() < 2 {
+                return Err(Error::invalid("TIFF: YCbCrSubSampling too short"));
+            }
+            (v[0] as usize, v[1] as usize)
+        }
+        None => (2, 2),
+    };
+    if sh == 0 || sv == 0 {
+        return Err(Error::invalid("TIFF: YCbCrSubSampling must be > 0"));
+    }
+    if (sh, sv) == (1, 1) {
+        Ok(None)
+    } else {
+        Ok(Some((sh, sv)))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn decode_strips(
     input: &[u8],
@@ -1006,33 +1053,14 @@ fn decode_strips(
         .map(|e| e.as_u32(bo))
         .transpose()?
         .unwrap_or(0);
-    let ycbcr_subsampling: Option<(usize, usize)> = if photometric == PHOTO_YCBCR as u32
-        && samples_per_pixel == 3
-        && bps_first == 8
-        && !matches!(compression, COMPRESSION_JPEG_OLD | COMPRESSION_JPEG_NEW)
-    {
-        let (sh, sv) = match find(entries, TAG_YCBCR_SUBSAMPLING) {
-            Some(e) => {
-                let v = e.as_u32_vec(bo)?;
-                if v.len() < 2 {
-                    return Err(Error::invalid("TIFF: YCbCrSubSampling too short"));
-                }
-                (v[0] as usize, v[1] as usize)
-            }
-            // §21 page 90 default is [2, 2].
-            None => (2, 2),
-        };
-        if sh == 0 || sv == 0 {
-            return Err(Error::invalid("TIFF: YCbCrSubSampling must be > 0"));
-        }
-        if (sh, sv) != (1, 1) {
-            Some((sh, sv))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let ycbcr_subsampling: Option<(usize, usize)> = ycbcr_subsampling_factors(
+        entries,
+        bo,
+        photometric,
+        samples_per_pixel,
+        bps_first,
+        compression,
+    )?;
 
     // For sub-byte bit depths, rows are padded to byte boundaries
     // per TIFF 6.0 spec.
@@ -1202,6 +1230,44 @@ fn decode_tiles(
         )));
     }
 
+    // Chroma-subsampled YCbCr (TIFF 6.0 §21, PlanarConfiguration = 1)
+    // stores §21 "data units" rather than full-resolution per-pixel
+    // triples, so a tile's on-disk byte budget is computed from the
+    // data-unit geometry, not `tile_w * SamplesPerPixel * bps`. §21
+    // page 90 requires "TileWidth and TileLength … be integer multiples
+    // of YCbCrSubsampleHoriz and YCbCrSubsampleVert respectively", so a
+    // tile is a whole number of data units in each axis and no data
+    // unit straddles a tile boundary. Reassemble the tiles into the same
+    // whole-image data-unit buffer the strip path produces, then hand it
+    // to `build_rgb24_from_ycbcr`.
+    if let Some((sh, sv)) = ycbcr_subsampling_factors(
+        entries,
+        bo,
+        find(entries, TAG_PHOTOMETRIC_INTERPRETATION)
+            .map(|e| e.as_u32(bo))
+            .transpose()?
+            .unwrap_or(0),
+        samples_per_pixel,
+        bps_first,
+        compression,
+    )? {
+        return decode_tiles_ycbcr_subsampled(
+            input,
+            width,
+            height,
+            tile_w,
+            tile_h,
+            &tile_offsets,
+            &tile_byte_counts,
+            tiles_across,
+            tiles_down,
+            compression,
+            predictor,
+            sh,
+            sv,
+        );
+    }
+
     let bits_per_sample = bps_first as u64;
     let bits_per_tile_row = (tile_w as u64) * (samples_per_pixel as u64) * bits_per_sample;
     let tile_row_bytes = bits_per_tile_row.div_ceil(8) as usize;
@@ -1321,6 +1387,117 @@ fn decode_tiles(
                 let dst_off = (dst_origin_y + r) * image_row_bytes + dst_origin_x;
                 out[dst_off..dst_off + visible_row_bytes]
                     .copy_from_slice(&tile[src_off..src_off + visible_row_bytes]);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Reassemble a chroma-subsampled YCbCr (TIFF 6.0 §21,
+/// `PlanarConfiguration = 1`) tiled image into the whole-image §21
+/// "data unit" buffer the strip path produces, so the shared
+/// `build_rgb24_from_ycbcr` walker can finish the decode.
+///
+/// Layout: each data unit is `sh*sv + 2` bytes (`sh*sv` Y samples in a
+/// `sv`-row × `sh`-column array, then one Cb and one Cr). §21 page 90
+/// constrains `TileWidth` / `TileLength` to integer multiples of the
+/// subsampling factors, so a tile is `tile_w/sh × tile_h/sv` whole data
+/// units and no unit straddles a tile boundary. The whole-image buffer
+/// is `du_across = ceil(width/sh)` units wide by
+/// `du_down = ceil(height/sv)` unit-rows, row-major — identical to the
+/// strip path's concatenated output. Tile `(tx, ty)` contributes its
+/// units starting at data-unit position
+/// `(tx · tile_w/sh, ty · tile_h/sv)`; units that overhang the
+/// `du_across × du_down` grid on a right/bottom edge tile are dropped
+/// (the matching pixels lie outside `width × height`).
+#[allow(clippy::too_many_arguments)]
+fn decode_tiles_ycbcr_subsampled(
+    input: &[u8],
+    width: u32,
+    height: u32,
+    tile_w: u32,
+    tile_h: u32,
+    tile_offsets: &[u64],
+    tile_byte_counts: &[u64],
+    tiles_across: u32,
+    tiles_down: u32,
+    compression: u16,
+    predictor: u16,
+    sh: usize,
+    sv: usize,
+) -> Result<Vec<u8>> {
+    // §14 horizontal differencing is undefined over the §21 packed
+    // data-unit layout (one row interleaves a 2-D Y block with single
+    // Cb/Cr samples), exactly as in the strip path. Reject rather than
+    // mis-apply across the data-unit boundaries.
+    if predictor == PREDICTOR_HORIZONTAL {
+        return Err(Error::invalid(
+            "TIFF: Predictor=2 with chroma-subsampled YCbCr tiles (TIFF 6.0 §21 data units) \
+             is unsupported — §14 differencing has no defined meaning over the packed \
+             data-unit layout",
+        ));
+    }
+
+    // §21 page 90: TileWidth / TileLength must be integer multiples of
+    // the subsampling factors so a tile is a whole number of data units.
+    if tile_w as usize % sh != 0 || tile_h as usize % sv != 0 {
+        return Err(Error::invalid(format!(
+            "TIFF: subsampled-YCbCr TileWidth/TileLength ({tile_w}x{tile_h}) must be integer \
+             multiples of YCbCrSubSampling ({sh},{sv}) per TIFF 6.0 §21"
+        )));
+    }
+
+    let unit_bytes = sh * sv + 2;
+    let du_across = (width as usize).div_ceil(sh);
+    let du_down = (height as usize).div_ceil(sv);
+    // Per-tile data-unit grid (whole units by the constraint above).
+    let tile_du_across = tile_w as usize / sh;
+    let tile_du_down = tile_h as usize / sv;
+    let tile_unit_count = tile_du_across * tile_du_down;
+    let tile_byte_budget = tile_unit_count * unit_bytes;
+
+    // Whole-image data-unit buffer, row-major over data units.
+    let mut out = vec![0u8; du_across * du_down * unit_bytes];
+
+    for ty in 0..tiles_down {
+        for tx in 0..tiles_across {
+            let idx = (ty * tiles_across + tx) as usize;
+            let off = tile_offsets[idx] as usize;
+            let bc = tile_byte_counts[idx] as usize;
+            let end = off
+                .checked_add(bc)
+                .ok_or_else(|| Error::invalid("TIFF: tile length overflow"))?;
+            if end > input.len() {
+                return Err(Error::invalid("TIFF: tile extends past EOF"));
+            }
+            let raw = &input[off..end];
+            let mut tile = decompress_block(raw, tile_byte_budget, compression, None)?;
+            if tile.len() < tile_byte_budget {
+                return Err(Error::invalid(
+                    "TIFF: subsampled-YCbCr tile short after decompress",
+                ));
+            }
+            tile.truncate(tile_byte_budget);
+
+            // Place this tile's data units into the whole-image buffer.
+            let du_origin_x = tx as usize * tile_du_across;
+            let du_origin_y = ty as usize * tile_du_down;
+            for r in 0..tile_du_down {
+                let dst_uy = du_origin_y + r;
+                if dst_uy >= du_down {
+                    break; // bottom-edge overhang: no matching pixels.
+                }
+                for c in 0..tile_du_across {
+                    let dst_ux = du_origin_x + c;
+                    if dst_ux >= du_across {
+                        break; // right-edge overhang.
+                    }
+                    let src_unit = (r * tile_du_across + c) * unit_bytes;
+                    let dst_unit = (dst_uy * du_across + dst_ux) * unit_bytes;
+                    out[dst_unit..dst_unit + unit_bytes]
+                        .copy_from_slice(&tile[src_unit..src_unit + unit_bytes]);
+                }
             }
         }
     }
