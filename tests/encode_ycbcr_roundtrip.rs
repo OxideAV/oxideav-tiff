@@ -25,9 +25,10 @@
 //!      walker independent of our decoder.
 //!   4. None / PackBits / LZW / Deflate compression all round-trip to
 //!      the same decoded `Rgb24` (lossless byte-aligned compressors).
-//!   5. Planar / tiled / predictor combinations are rejected with a
-//!      precise error in this round (deferred to a future round
-//!      alongside chroma-subsampled YCbCr).
+//!   5. Tiled 4:4:4 layout round-trips (the §21 data unit collapses to
+//!      a plain chunky triple, so the generic §15 tile packer applies);
+//!      planar / predictor / CCITT and the non-1:1 subsampled tiled
+//!      writer remain rejected with a precise error.
 
 use oxideav_tiff::{
     decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, TiffCompression, TiffPixelFormat,
@@ -267,10 +268,11 @@ fn encoder_ycbcr24_compressors_lossless() {
 }
 
 #[test]
-fn encoder_ycbcr24_rejects_planar_tiled_predictor() {
-    // These flags are deferred — the §21 data-unit ordering changes
-    // shape under non-1:1 subsampling, so the encoder pins them off in
-    // this initial YCbCr round.
+fn encoder_ycbcr24_rejects_planar_predictor_ccitt() {
+    // These flags remain deferred — the §14 chroma-difference predictor
+    // and the §21 separate-plane layout both change the on-disk shape;
+    // CCITT is bilevel-only. (Tiled 4:4:4 is now supported — see the
+    // dedicated round-trip test below.)
     let pixels = vec![128u8; 4 * 4 * 3];
 
     // Predictor = true.
@@ -299,21 +301,6 @@ fn encoder_ycbcr24_rejects_planar_tiled_predictor() {
     };
     assert!(encode_tiff(&page).is_err(), "planar must reject");
 
-    // Tiled.
-    let page = EncodePage {
-        width: 16,
-        height: 16,
-        kind: EncodePixelFormat::YCbCr24 {
-            pixels: &vec![128u8; 16 * 16 * 3],
-        },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: false,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-    };
-    assert!(encode_tiff(&page).is_err(), "tiled must reject");
-
     // CCITT (bilevel-only).
     let page = EncodePage {
         width: 4,
@@ -326,6 +313,98 @@ fn encoder_ycbcr24_rejects_planar_tiled_predictor() {
         bigtiff: false,
     };
     assert!(encode_tiff(&page).is_err(), "CCITT must reject");
+}
+
+/// A non-neutral `(Y, Cb, Cr)` raster (varying luma + chroma) so a tile
+/// reassembly bug would surface as a colour divergence.
+fn ycbcr_ramp(w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let p = (y * w + x) * 3;
+            out[p] = ((x * 7 + y * 11) % 256) as u8; // Y
+            out[p + 1] = (64 + (x * 3) % 128) as u8; // Cb
+            out[p + 2] = (64 + (y * 5) % 128) as u8; // Cr
+        }
+    }
+    out
+}
+
+#[test]
+fn encoder_ycbcr24_tiled_444_roundtrips_against_strip() {
+    // At YCbCrSubSampling = [1, 1] the §21 data unit collapses to a plain
+    // chunky (Y, Cb, Cr) triple, so the generic §15 tile packer handles
+    // it exactly as it does Rgb24. Encode the same pixels strip-based and
+    // tiled and assert both decode to the identical Rgb24 plane across the
+    // byte-aligned compressors and a spread of tile geometries.
+    let cases = [
+        (16u32, 16u32, (16u32, 16u32)), // single exact-fit tile
+        (32, 32, (16, 16)),             // 2×2 grid
+        (48, 32, (16, 16)),             // 3×2 grid, exact fit
+        (40, 24, (16, 16)),             // partial right + bottom edges
+        (48, 40, (32, 16)),             // non-square tiles, partial edge
+    ];
+    let compressors = [
+        TiffCompression::None,
+        TiffCompression::PackBits,
+        TiffCompression::Lzw,
+        TiffCompression::Deflate,
+    ];
+    for (w, h, tile) in cases {
+        let pixels = ycbcr_ramp(w as usize, h as usize);
+        for comp in compressors {
+            let strip = EncodePage {
+                width: w,
+                height: h,
+                kind: EncodePixelFormat::YCbCr24 { pixels: &pixels },
+                compression: comp,
+                predictor: false,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+            };
+            let tiled = EncodePage {
+                width: w,
+                height: h,
+                kind: EncodePixelFormat::YCbCr24 { pixels: &pixels },
+                compression: comp,
+                predictor: false,
+                planar: false,
+                tiling: Some(tile),
+                bigtiff: false,
+            };
+            let ds = decode_tiff(&encode_tiff(&strip).unwrap()).unwrap();
+            let dt = decode_tiff(&encode_tiff(&tiled).unwrap()).unwrap();
+            assert_eq!((dt.width, dt.height), (w, h));
+            assert_eq!(dt.pixel_format, TiffPixelFormat::Rgb24);
+            assert_eq!(
+                dt.frame.planes[0].data, ds.frame.planes[0].data,
+                "tiled 4:4:4 YCbCr diverged from strip for {w}x{h} tile {tile:?} comp {comp:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn encoder_ycbcr_subsampled_tiled_still_rejected() {
+    // The non-1:1 subsampled tiled writer is still deferred (the on-disk
+    // byte order is the packed §21 data-unit stream, not a per-pixel
+    // interleave the generic tile packer produces).
+    let pixels = vec![128u8; 16 * 16 * 3];
+    let page = EncodePage {
+        width: 16,
+        height: 16,
+        kind: EncodePixelFormat::YCbCrSubsampled24 {
+            pixels: &pixels,
+            subsampling: (2, 2),
+        },
+        compression: TiffCompression::Lzw,
+        predictor: false,
+        planar: false,
+        tiling: Some((16, 16)),
+        bigtiff: false,
+    };
+    assert!(encode_tiff(&page).is_err(), "subsampled tiled must reject");
 }
 
 #[test]

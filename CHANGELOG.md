@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tiled 4:4:4 YCbCr encode (TIFF 6.0 §15 / §21).**
+  `EncodePixelFormat::YCbCr24` now composes with `EncodePage::tiling`. At
+  `YCbCrSubSampling = [1, 1]` the §21 "Ordering of Component Samples"
+  data unit collapses to a plain chunky `(Y, Cb, Cr)` triple, so the
+  generic byte-aligned §15 tile packer applies exactly as it does for
+  `Rgb24`, and the decoder's regular (full-resolution) tile path reads it
+  back through the shared YCbCr→RGB walker. `PlanarConfiguration = 2`,
+  `Predictor = 2`, CCITT, and the non-1:1 chroma-subsampled tiled writer
+  remain rejected with a precise error (under subsampling the on-disk
+  byte order is the packed §21 data-unit stream, not a per-pixel
+  interleave). `tests/encode_ycbcr_roundtrip.rs` encodes the same
+  non-neutral `(Y, Cb, Cr)` raster strip-based and tiled across the
+  byte-aligned compressors and a spread of tile geometries (exact-fit /
+  multi-tile / partial-edge / non-square) and asserts the decoded `Rgb24`
+  planes are byte-identical.
+
 - **Tiled chroma-subsampled YCbCr decode (TIFF 6.0 §21).** A
   `PhotometricInterpretation = 6` page with a non-1:1 `YCbCrSubSampling`
   (`[2,1]` / `[2,2]` / `[4,1]` / `[4,2]`) organised in tiles

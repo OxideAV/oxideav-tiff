@@ -412,7 +412,7 @@ components.
 | **CIELab (3 chan)** | 8    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::CieLab8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 3, BitsPerSample = [8,8,8]) |
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**             | `EncodePixelFormat::CieLabL8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 1) |
 | **CMYK (4 chan)** | 8     | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Cmyk32` (writes PhotometricInterpretation = 5, SamplesPerPixel = 4, BitsPerSample = [8,8,8,8], plus optional `InkSet = 1` / `NumberOfInks = 4`) |
-| **YCbCr (3 chan, 4:4:4)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**               | `EncodePixelFormat::YCbCr24` (writes PhotometricInterpretation = 6, SamplesPerPixel = 3, BitsPerSample = [8,8,8], `YCbCrSubSampling = [1, 1]`, `YCbCrPositioning = 1`, `ReferenceBlackWhite = [0,255,128,255,128,255]` no-headroom full-range) |
+| **YCbCr (3 chan, 4:4:4)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled** | `EncodePixelFormat::YCbCr24` (writes PhotometricInterpretation = 6, SamplesPerPixel = 3, BitsPerSample = [8,8,8], `YCbCrSubSampling = [1, 1]`, `YCbCrPositioning = 1`, `ReferenceBlackWhite = [0,255,128,255,128,255]` no-headroom full-range) |
 
 `TiffCompression::CcittRle` selects Modified Huffman
 (`Compression = 2`, TIFF 6.0 §10), `TiffCompression::CcittT4OneD`
@@ -595,12 +595,16 @@ inverse of those same weights, so writing the tag would just restate
 the spec default. Compressors accepted: None / PackBits / LZW /
 Deflate (the byte-aligned photometric-agnostic set). CCITT is
 bilevel-only per §10 / §11 and rejected with a precise error.
-`Predictor = 2`, `PlanarConfiguration = 2`, tiled layout, and the
-chroma-subsampled `YCbCrSubSampling` values are deferred to a future
-round (the §21 data-unit shape changes shape under non-1:1
-subsampling, so the encoder pins those flags off here and rejects the
-combinations rather than emit something the decoder might mis-tile).
-Hand-built classic-II fixtures carrying the same `(Y, Cb, Cr)` bytes
+**Tiled 4:4:4 layout (§15) now composes** with `YCbCr24`: at
+`YCbCrSubSampling = [1, 1]` the §21 data unit collapses to a plain
+chunky `(Y, Cb, Cr)` triple, so the generic byte-aligned tile packer
+handles it exactly as it does `Rgb24` and the decoder's regular tile
+path reads it back. `Predictor = 2`, `PlanarConfiguration = 2`, and the
+non-1:1 chroma-subsampled tiled / planar writers remain deferred to a
+future round (under subsampling the on-disk byte order is the packed
+§21 data-unit stream, not a per-pixel interleave, so the generic
+packers would mis-tile it — those combinations are rejected with a
+precise error). Hand-built classic-II fixtures carrying the same `(Y, Cb, Cr)` bytes
 decode to the same `Rgb24` as the encoder's output across the four
 accepted compressors; the IFD bytes are inspected byte-for-byte to
 confirm tags 262 / 277 / 284 / 530 / 531 / 532 carry the documented

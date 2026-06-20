@@ -901,28 +901,39 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     // CCITT schemes are bilevel-only (rejected above) so they never
     // reach the planar path; the predictor is handled per-plane below.
 
-    // YCbCr24 encode is restricted to the chunky-444 surface in this
-    // round: `PlanarConfiguration = 2` and tiled layout both depend on
-    // the §21 "Ordering of Component Samples" data-unit shape, which
-    // collapses to the trivial `(Y, Cb, Cr)` interleave only at
-    // `YCbCrSubSampling = [1, 1]`. Future rounds add the
-    // chroma-subsampled data-unit packer plus the planar / tiled
-    // §21 layouts; until then, reject the combinations precisely so
-    // the writer never emits something the decoder might mis-tile.
-    if matches!(
+    // YCbCr encode: `PlanarConfiguration = 2`, tiled layout, and the §14
+    // predictor all depend on the §21 "Ordering of Component Samples"
+    // data-unit shape. At `YCbCrSubSampling = [1, 1]` (4:4:4) that shape
+    // collapses to a plain chunky `(Y, Cb, Cr)` triple per pixel, which
+    // the generic byte-aligned tile packer handles exactly as it does
+    // Rgb24 — so the **tiled 4:4:4** combination is now permitted (the
+    // decoder's regular tile path reads it and runs the same
+    // `build_rgb24_from_ycbcr` walker at sh = sv = 1). The non-1:1
+    // subsampled tile/planar packers and the §14 chroma-difference
+    // predictor remain deferred: under subsampling the on-disk byte order
+    // is the packed data-unit stream, not a per-pixel interleave, so the
+    // generic packers would mis-tile it.
+    let is_ycbcr = matches!(
         p.kind,
         EncodePixelFormat::YCbCr24 { .. } | EncodePixelFormat::YCbCrSubsampled24 { .. }
-    ) {
+    );
+    let ycbcr_is_444 = match &p.kind {
+        EncodePixelFormat::YCbCr24 { .. } => true,
+        EncodePixelFormat::YCbCrSubsampled24 { subsampling, .. } => *subsampling == (1, 1),
+        _ => false,
+    };
+    if is_ycbcr {
         if p.planar {
             return Err(Error::invalid(
                 "TIFF encode: PlanarConfiguration=2 with YCbCr is not supported in this round \
                  (the §21 data-unit ordering changes shape under non-1:1 subsampling)",
             ));
         }
-        if p.tiling.is_some() {
+        if p.tiling.is_some() && !ycbcr_is_444 {
             return Err(Error::invalid(
-                "TIFF encode: tiled layout with YCbCr is not supported in this round \
-                 (the §21 data-unit packing is single-strip chunky only here)",
+                "TIFF encode: tiled layout with chroma-subsampled YCbCr is not supported in \
+                 this round (the §21 data-unit packing is single-strip chunky only here); \
+                 4:4:4 (YCbCrSubSampling = [1, 1]) tiles are supported",
             ));
         }
         if p.predictor {
