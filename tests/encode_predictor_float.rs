@@ -31,7 +31,8 @@
 //! §SampleFormat and the §14 floating-point predictor.
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, TiffCompression, TiffPixelFormat,
+    decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
+    TiffCompression, TiffPixelFormat,
 };
 
 // ---------------------------------------------------------------------------
@@ -540,6 +541,62 @@ fn float_rejects_grayscale_planar_and_ccitt() {
         bigtiff: false,
     };
     assert!(encode_tiff(&ccitt).is_err(), "CCITT float must be rejected");
+}
+
+#[test]
+fn float_multipage_chain_roundtrips() {
+    // A multi-IFD float chain (encode_tiff_multi): a GrayF32 page with the
+    // float predictor, then an RgbF64 page, then a GrayF64 tiled page.
+    // Each must decode (via decode_tiff_all) to its own display plane.
+    let (gw, gh, gpix) = gray_samples_f32();
+    let gwant = display_map(&gpix.iter().map(|&x| x as f64).collect::<Vec<_>>());
+
+    let (rw, rh, rpix32) = rgb_samples_f32();
+    let rpix: Vec<f64> = rpix32.iter().map(|&x| x as f64).collect();
+    let rwant = display_map(&rpix);
+
+    let (tw, th) = (32u32, 16u32);
+    let tpix: Vec<f64> = (0..(tw * th)).map(|i| (i as f64) * 0.25 - 50.0).collect();
+    let twant = display_map(&tpix);
+
+    let pages = vec![
+        EncodePage {
+            width: gw,
+            height: gh,
+            kind: EncodePixelFormat::GrayF32 { pixels: &gpix },
+            compression: TiffCompression::Lzw,
+            predictor: true,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        },
+        EncodePage {
+            width: rw,
+            height: rh,
+            kind: EncodePixelFormat::RgbF64 { pixels: &rpix },
+            compression: TiffCompression::Deflate,
+            predictor: false,
+            planar: false,
+            tiling: None,
+            bigtiff: false,
+        },
+        EncodePage {
+            width: tw,
+            height: th,
+            kind: EncodePixelFormat::GrayF64 { pixels: &tpix },
+            compression: TiffCompression::Zstd,
+            predictor: true,
+            planar: false,
+            tiling: Some((16, 16)),
+            bigtiff: false,
+        },
+    ];
+    let bytes = encode_tiff_multi(&pages).unwrap();
+    let frames = decode_tiff_all(&bytes).unwrap();
+    assert_eq!(frames.len(), 3, "three-page float chain");
+    assert_eq!(frames[0].planes[0].data, gwant, "page 0 GrayF32");
+    assert_eq!(frames[1].planes[0].data, rwant, "page 1 RgbF64");
+    assert_eq!(frames[2].planes[0].data, twant, "page 2 GrayF64 tiled");
 }
 
 #[test]

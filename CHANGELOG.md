@@ -29,7 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   errors. This gives the float subsystem (previously decode-only,
   validated only against externally-written fixtures) a fully
   binary-independent self-roundtrip oracle. New
-  `tests/encode_predictor_float.rs` (14 tests): a display-plane oracle
+  `tests/encode_predictor_float.rs` (15 tests, incl. a three-page
+  `encode_tiff_multi` chain mixing GrayF32 / RgbF64 / tiled GrayF64): a
+  display-plane oracle
   (encode → `decode_tiff` → compare against the §SampleFormat linear
   extent map computed in the test) across the compressor set × predictor
   on/off for all four formats, a raw-byte oracle that walks the encoded
