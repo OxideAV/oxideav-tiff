@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Floating-point (`SampleFormat = 3`) encode + `Predictor = 3` writer
+  (TIFF 6.0 §SampleFormat / §14 floating-point predictor).** Four new
+  `EncodePixelFormat` variants — `GrayF32` / `GrayF64` (BlackIsZero
+  grayscale, `SamplesPerPixel = 1`, `BitsPerSample = 32 / 64`) and
+  `RgbF32` / `RgbF64` (RGB, `SamplesPerPixel = 3`) — write IEEE 754
+  single-/double-precision samples as little-endian bytes and emit the
+  `SampleFormat = 3` tag (339) so the decoder routes through its float
+  display-map render. `EncodePage::predictor` now selects the §14
+  *floating-point* predictor (`Predictor = 3`) for these formats instead
+  of the integer horizontal-differencing predictor: a new
+  `forward_float_predictor` is the exact inverse of the decoder's
+  `undo_float_predictor` (per scan-line significance-ordered byte-plane
+  reorder, then horizontal byte differencing), applied per-strip and
+  per-tile. Compressors None / PackBits / LZW / Deflate / Zstd, §15
+  tiling, BigTIFF, and the multi-page chain all compose; `Predictor = 2`
+  is undefined for IEEE samples, `PlanarConfiguration = 2` for float RGB
+  is deferred, and CCITT is bilevel-only — all rejected with precise
+  errors. This gives the float subsystem (previously decode-only,
+  validated only against externally-written fixtures) a fully
+  binary-independent self-roundtrip oracle. New
+  `tests/encode_predictor_float.rs` (12 tests): a display-plane oracle
+  (encode → `decode_tiff` → compare against the §SampleFormat linear
+  extent map computed in the test) across the compressor set × predictor
+  on/off for all four formats, a raw-byte oracle that walks the encoded
+  IFD and reverses the float predictor with a test-local routine to
+  recover the input sample bytes exactly, SampleFormat / Predictor tag
+  inspection, tiled-vs-strip equivalence, BigTIFF, and the planar / CCITT
+  / wrong-buffer-size negative paths. f16 (binary16) float *encode* is a
+  separate increment (no native Rust half type; the decoder already
+  widens binary16 on read).
+
 - **Binary-independent planar CMYK decode + round-trip coverage (TIFF
   6.0 §16 / §"PlanarConfiguration").** `PlanarConfiguration = 2` CMYK
   (four full-resolution C / M / Y / K component planes) decoded through

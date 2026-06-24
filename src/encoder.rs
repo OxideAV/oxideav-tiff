@@ -185,6 +185,51 @@ pub enum EncodePixelFormat<'a> {
         indices: &'a [u8],
         palette: &'a [RgbColor],
     },
+    /// 32-bit IEEE 754 single-precision floating-point grayscale
+    /// (`PhotometricInterpretation = 1` BlackIsZero, `SamplesPerPixel = 1`,
+    /// `BitsPerSample = 32`, `SampleFormat = 3`) per TIFF 6.0 §SampleFormat
+    /// (tag 339, page 80) — the layout scientific / elevation / HDR-source
+    /// TIFFs use. `pixels` is one `f32` per pixel in row-major order;
+    /// `pixels.len() == width * height`. The encoder writes each sample as
+    /// four little-endian bytes (the file's own II byte order) and emits the
+    /// `SampleFormat = 3` tag so the decoder routes through its float
+    /// display-map render. Compressors accepted: None / PackBits / LZW /
+    /// Deflate / Zstd (the byte-aligned, photometric-agnostic set the other
+    /// multi-bit photometric paths use); CCITT is bilevel-only per §10 / §11
+    /// and rejected. `Predictor = 3` (the §14 floating-point predictor)
+    /// composes via `EncodePage::predictor`; `Predictor = 2` is undefined
+    /// for float samples (§14 differences integer components) and rejected.
+    /// `PlanarConfiguration = 2` is irrelevant for a single sample and
+    /// rejected; tiled layout (§15) and BigTIFF compose.
+    GrayF32 { pixels: &'a [f32] },
+    /// 64-bit IEEE 754 double-precision floating-point grayscale
+    /// (`PhotometricInterpretation = 1`, `SamplesPerPixel = 1`,
+    /// `BitsPerSample = 64`, `SampleFormat = 3`). `pixels` is one `f64` per
+    /// pixel, `pixels.len() == width * height`. Same field set, compressor
+    /// set, and `Predictor = 3` composition as [`Self::GrayF32`]; each
+    /// sample is written as eight little-endian bytes.
+    GrayF64 { pixels: &'a [f64] },
+    /// 32-bit IEEE 754 single-precision floating-point RGB
+    /// (`PhotometricInterpretation = 2`, `SamplesPerPixel = 3`,
+    /// `BitsPerSample = [32, 32, 32]`, `SampleFormat = 3`). `pixels` is
+    /// row-major interleaved `(R, G, B)` `f32` triples,
+    /// `pixels.len() == width * height * 3`. Field set and compressor set
+    /// match [`Self::GrayF32`]; the decoder renders the three channels onto
+    /// an Rgb24 display plane through a single shared sample extent (so the
+    /// pixel's chromaticity survives the display map). `Predictor = 3`
+    /// composes (the §14 byte-plane transform groups all three components'
+    /// bytes by significance across the scan-line); `Predictor = 2`,
+    /// `PlanarConfiguration = 2` (deferred — the §14 float predictor's
+    /// planar form needs per-plane geometry), and CCITT are rejected.
+    /// Tiled layout (§15) and BigTIFF compose.
+    RgbF32 { pixels: &'a [f32] },
+    /// 64-bit IEEE 754 double-precision floating-point RGB
+    /// (`PhotometricInterpretation = 2`, `SamplesPerPixel = 3`,
+    /// `BitsPerSample = [64, 64, 64]`, `SampleFormat = 3`). `pixels` is
+    /// row-major interleaved `(R, G, B)` `f64` triples,
+    /// `pixels.len() == width * height * 3`. Same semantics as
+    /// [`Self::RgbF32`] at eight bytes per sample.
+    RgbF64 { pixels: &'a [f64] },
     /// 8-bit chunky 1976 CIE L\*a\*b\* (`PhotometricInterpretation = 8`,
     /// `SamplesPerPixel = 3`, `BitsPerSample = 8 / 8 / 8`) per TIFF 6.0
     /// §23 "CIE L\*a\*b\* Images" (page 110). `pixels` is row-major
@@ -597,7 +642,7 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
             // a safe superset for the SHORT blobs too.
             let align: u64 = match id {
                 BlobId::ReferenceBlackWhite => 4,
-                BlobId::BitsPerSample | BlobId::ColorMapWords => 2,
+                BlobId::BitsPerSample | BlobId::ColorMapWords | BlobId::SampleFormat => 2,
             };
             if cursor % align != 0 {
                 cursor += align - (cursor % align);
@@ -818,6 +863,11 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
 enum BlobId {
     BitsPerSample,
     ColorMapWords,
+    /// `SampleFormat` (tag 339) SHORT array — one value per component.
+    /// For RGB float (3 components = 6 bytes) it spills out of line on
+    /// classic TIFF; grayscale (2 bytes) stays inline. SampleFormat = 3
+    /// (IEEE floating point) per TIFF 6.0 §SampleFormat.
+    SampleFormat,
     /// 6-RATIONAL `ReferenceBlackWhite` (tag 532) blob — six
     /// 8-byte RATIONAL values = 48 bytes, always out of line.
     /// Carries the §20 "no headroom/footroom" full-range YCbCr
@@ -871,6 +921,41 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         return Err(Error::invalid(
             "TIFF encode: CCITT compression (Compression=2/3) requires Bilevel or \
              TransparencyMask input",
+        ));
+    }
+
+    // Float formats (SampleFormat = 3) take the §14 *floating-point*
+    // predictor (Predictor = 3) when `p.predictor` is set, not the §14
+    // horizontal-differencing predictor (Predictor = 2). The integer
+    // predictor is undefined for IEEE samples and the float predictor is
+    // undefined for integer samples, so the same `predictor` flag selects
+    // the format-appropriate transform. `PlanarConfiguration = 2` for
+    // multi-sample float RGB is deferred (the §14 float predictor's planar
+    // form needs per-plane byte-plane geometry), so float RGB is excluded
+    // from the planar allow-list below and rejected with a precise error.
+    let is_float = matches!(
+        p.kind,
+        EncodePixelFormat::GrayF32 { .. }
+            | EncodePixelFormat::GrayF64 { .. }
+            | EncodePixelFormat::RgbF32 { .. }
+            | EncodePixelFormat::RgbF64 { .. }
+    );
+
+    // PlanarConfiguration=2 for float RGB is deferred: the §14
+    // floating-point predictor's planar form would split each plane's
+    // bytes by significance independently, which has no validated shape
+    // here yet. Reject it precisely (a generic "requires multi-sample"
+    // message would be misleading — RgbF32/F64 *are* multi-sample).
+    if p.planar
+        && matches!(
+            p.kind,
+            EncodePixelFormat::RgbF32 { .. } | EncodePixelFormat::RgbF64 { .. }
+        )
+    {
+        return Err(Error::invalid(
+            "TIFF encode: PlanarConfiguration=2 with float RGB (SampleFormat=3) is not yet \
+             supported (the §14 floating-point predictor's per-plane byte-plane geometry is \
+             deferred); chunky float RGB does compose with Predictor=3 and tiling",
         ));
     }
 
@@ -1160,6 +1245,68 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                 }
                 (1u16, vec![8u16], PHOTO_PALETTE, indices.to_vec(), Some(cm))
             }
+            EncodePixelFormat::GrayF32 { pixels } => {
+                // TIFF 6.0 §SampleFormat (tag 339): SampleFormat = 3 IEEE
+                // 754 single-precision grayscale. BitsPerSample fixes the
+                // width at 32; the encoder always writes II, so each f32 is
+                // four little-endian bytes.
+                let want = (p.width as usize) * (p.height as usize);
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/GrayF32: pixel buffer is {} samples, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                let mut buf = Vec::with_capacity(want * 4);
+                for s in *pixels {
+                    buf.extend_from_slice(&s.to_le_bytes());
+                }
+                (1u16, vec![32u16], PHOTO_BLACK_IS_ZERO, buf, None)
+            }
+            EncodePixelFormat::GrayF64 { pixels } => {
+                let want = (p.width as usize) * (p.height as usize);
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/GrayF64: pixel buffer is {} samples, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                let mut buf = Vec::with_capacity(want * 8);
+                for s in *pixels {
+                    buf.extend_from_slice(&s.to_le_bytes());
+                }
+                (1u16, vec![64u16], PHOTO_BLACK_IS_ZERO, buf, None)
+            }
+            EncodePixelFormat::RgbF32 { pixels } => {
+                // SampleFormat = 3 IEEE 754 single-precision RGB
+                // (PhotometricInterpretation = 2, SamplesPerPixel = 3).
+                let want = (p.width as usize) * (p.height as usize) * 3;
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/RgbF32: pixel buffer is {} samples, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                let mut buf = Vec::with_capacity(want * 4);
+                for s in *pixels {
+                    buf.extend_from_slice(&s.to_le_bytes());
+                }
+                (3u16, vec![32u16, 32, 32], PHOTO_RGB, buf, None)
+            }
+            EncodePixelFormat::RgbF64 { pixels } => {
+                let want = (p.width as usize) * (p.height as usize) * 3;
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/RgbF64: pixel buffer is {} samples, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                let mut buf = Vec::with_capacity(want * 8);
+                for s in *pixels {
+                    buf.extend_from_slice(&s.to_le_bytes());
+                }
+                (3u16, vec![64u16, 64, 64], PHOTO_RGB, buf, None)
+            }
             EncodePixelFormat::CieLab8 { pixels } => {
                 // TIFF 6.0 §23 "CIE L*a*b* Images" (page 110):
                 // 3-sample chunky `(L*, a*, b*)` at 8 bits per sample.
@@ -1390,7 +1537,8 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                 tile_h as usize,
                 samples_per_pixel as usize,
                 bps,
-                p.predictor,
+                p.predictor && !is_float,
+                p.predictor && is_float,
                 p.compression,
             )?
         }
@@ -1431,21 +1579,34 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         }
         out_strips
     } else {
-        // Apply the §14 horizontal-differencing predictor *before*
-        // compression. The encoder stores first differences; the
-        // decoder's cumulative left-to-right add reverses it exactly.
-        // Chunky single-strip layout, so `row_bytes` is the packed
-        // sample stride and the whole image is one differencing region.
+        // Apply the predictor *before* compression. The encoder stores
+        // the transform; the decoder reverses it exactly. Chunky
+        // single-strip layout, so `row_bytes` is the packed sample stride
+        // and the whole image is one differencing region. Float formats
+        // take the §14 floating-point predictor (significance byte-plane
+        // reorder + byte differencing) reversed by the decoder's
+        // `undo_float_predictor`; integer formats take the §14
+        // horizontal-differencing predictor reversed by the cumulative add.
         if p.predictor {
             let row_bytes = (p.width as usize) * (samples_per_pixel as usize) * (bps / 8);
-            forward_horizontal_predictor(
-                &mut raw_pixels,
-                p.width as usize,
-                p.height as usize,
-                samples_per_pixel as usize,
-                bps,
-                row_bytes,
-            )?;
+            if is_float {
+                forward_float_predictor(
+                    &mut raw_pixels,
+                    (p.width as usize) * (samples_per_pixel as usize),
+                    p.height as usize,
+                    bps / 8,
+                    row_bytes,
+                )?;
+            } else {
+                forward_horizontal_predictor(
+                    &mut raw_pixels,
+                    p.width as usize,
+                    p.height as usize,
+                    samples_per_pixel as usize,
+                    bps,
+                    row_bytes,
+                )?;
+            }
         }
         vec![p.compression.pack(&raw_pixels, p.width, p.height)?]
     };
@@ -1632,15 +1793,22 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         }
         _ => {}
     }
-    // 317 Predictor (SHORT) — only when horizontal differencing is on.
-    // Default (Predictor=1, no prediction) is omitted; the decoder
-    // treats an absent tag as 1.
+    // 317 Predictor (SHORT) — only when a predictor is on. Default
+    // (Predictor=1, no prediction) is omitted; the decoder treats an
+    // absent tag as 1. Float formats (SampleFormat=3) write Predictor=3
+    // (the §14 floating-point predictor); integer formats write
+    // Predictor=2 (horizontal differencing).
     if p.predictor {
+        let predictor_value = if is_float {
+            PREDICTOR_FLOAT
+        } else {
+            PREDICTOR_HORIZONTAL
+        };
         entries.push(PageIfdEntry {
             tag: TAG_PREDICTOR,
             field_type: TYPE_SHORT,
             count: 1,
-            value: IfdValue::Inline(PREDICTOR_HORIZONTAL.to_le_bytes().to_vec()),
+            value: IfdValue::Inline(predictor_value.to_le_bytes().to_vec()),
         });
     }
     // 320 ColorMap (SHORT, 3*2^bps) — palette only.
@@ -1719,6 +1887,38 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
             count: 1,
             value: IfdValue::Inline(4u16.to_le_bytes().to_vec()),
         });
+    }
+
+    // 339 SampleFormat (SHORT × SamplesPerPixel) — TIFF 6.0 §SampleFormat
+    // (page 80). Only emitted for the float formats (SampleFormat = 3,
+    // IEEE floating point); the integer / unsigned formats default to
+    // SampleFormat = 1 and omit the tag (an absent field defaults to 1
+    // per the spec). One value per component (uniform across the page).
+    // Tag 339 sits between 334 (NumberOfInks) and 530 (YCbCrSubSampling)
+    // in ascending IFD-tag order. The SHORT array packs to
+    // `2 * SamplesPerPixel` bytes — 2 for grayscale (fits inline at the
+    // 4-byte classic threshold) and 6 for RGB (spills out-of-line on
+    // classic, fits inline at the 8-byte BigTIFF threshold), so reuse the
+    // inline-vs-external decision the BitsPerSample path uses.
+    if is_float {
+        let sf_words = vec![SAMPLE_FORMAT_IEEE_FP; samples_per_pixel as usize];
+        let sf_bytes: Vec<u8> = sf_words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        if sf_bytes.len() <= inline_threshold {
+            entries.push(PageIfdEntry {
+                tag: TAG_SAMPLE_FORMAT,
+                field_type: TYPE_SHORT,
+                count: sf_words.len() as u64,
+                value: IfdValue::Inline(sf_bytes),
+            });
+        } else {
+            externals.push((BlobId::SampleFormat, sf_bytes));
+            entries.push(PageIfdEntry {
+                tag: TAG_SAMPLE_FORMAT,
+                field_type: TYPE_SHORT,
+                count: sf_words.len() as u64,
+                value: IfdValue::ExternalBlob(BlobId::SampleFormat),
+            });
+        }
     }
 
     // 530 YCbCrSubSampling (SHORT × 2), 531 YCbCrPositioning (SHORT),
@@ -1950,6 +2150,7 @@ fn build_tiles(
     samples: usize,
     bps: usize,
     predictor: bool,
+    float_predictor: bool,
     compression: TiffCompression,
 ) -> Result<Vec<Vec<u8>>> {
     let bytes_per_sample = bps / 8;
@@ -1983,8 +2184,19 @@ fn build_tiles(
             // §14 / §15: each tile is a self-contained image for the
             // predictor — difference per-tile with the tile's own row
             // stride so the decoder's per-tile cumulative add reverses
-            // it exactly.
-            if predictor {
+            // it exactly. Float tiles take the §14 floating-point
+            // predictor (significance byte-plane reorder + byte
+            // differencing), reversed per-tile by the decoder's
+            // `undo_float_predictor`.
+            if float_predictor {
+                forward_float_predictor(
+                    &mut tile,
+                    tile_w * samples,
+                    tile_h,
+                    bytes_per_sample,
+                    tile_row_bytes,
+                )?;
+            } else if predictor {
                 forward_horizontal_predictor(
                     &mut tile,
                     tile_w,
@@ -2138,6 +2350,9 @@ fn build_tiles_planar(
             1,
             bps,
             predictor,
+            // Planar float is rejected upstream, so the float predictor
+            // never runs on a planar tile grid.
+            false,
             compression,
         )?;
         out.extend(plane_tiles);
@@ -2205,6 +2420,72 @@ fn forward_horizontal_predictor(
                 "TIFF encode: Predictor=2 at bits_per_sample={bps} unsupported"
             )));
         }
+    }
+    Ok(())
+}
+
+/// Forward TIFF floating-point predictor (Predictor = 3, the only
+/// predictor defined for IEEE 754 samples — Adobe TIFF §14 floating-point
+/// predictor). The exact inverse of the decoder's `undo_float_predictor`.
+///
+/// Per scan-line, in this order:
+///   1. **Byte-plane reorder.** Each sample's `bytes_per_sample` bytes are
+///      scattered into `bytes_per_sample` significance-ordered planes of
+///      `width` bytes — plane 0 holds the most-significant byte of every
+///      sample, plane 1 the next, … — and the planes are laid out
+///      contiguously across the row. Grouping bytes of equal significance
+///      makes the difference stream highly compressible because adjacent
+///      floats share their high bytes.
+///   2. **Horizontal byte differencing.** Across the reordered row, every
+///      byte is replaced by its difference from the previous byte (modular
+///      `u8`); the first byte is stored verbatim.
+///
+/// The encoder always writes II (little-endian), so significance rank `p`
+/// (0 = most significant) lives at in-file sample byte
+/// `bytes_per_sample - 1 - p`. `width` is the row length in *samples*
+/// (already `image_width × samples` for chunky multi-component rows),
+/// `bytes_per_sample` is BPS/8 (2, 4 or 8), and `row_bytes` the padded
+/// stride. Trailing pad bytes past `width × bytes_per_sample` in each row
+/// are left untouched. The decoder reverses stage 1 then stage 2 in the
+/// opposite order (prefix sum, then scatter back), so the round-trip is
+/// bit-exact.
+fn forward_float_predictor(
+    buf: &mut [u8],
+    width: usize,
+    rows: usize,
+    bytes_per_sample: usize,
+    row_bytes: usize,
+) -> Result<()> {
+    if width == 0 || rows == 0 {
+        return Ok(());
+    }
+    if !matches!(bytes_per_sample, 2 | 4 | 8) {
+        return Err(Error::invalid(format!(
+            "TIFF encode: floating-point predictor at bytes_per_sample={bytes_per_sample} \
+             unsupported (only 16-/32-/64-bit IEEE samples)"
+        )));
+    }
+    let row_len = width * bytes_per_sample;
+    let mut plane = vec![0u8; row_len];
+    for r in 0..rows {
+        let row = &mut buf[r * row_bytes..r * row_bytes + row_len];
+        // Stage 1: scatter each sample's bytes into significance-ordered
+        // planes. Plane `p` (significance rank p) takes in-file byte
+        // `bytes_per_sample - 1 - p` (the encoder writes little-endian, so
+        // the most-significant byte is the last in-file byte).
+        for p in 0..bytes_per_sample {
+            let src = bytes_per_sample - 1 - p;
+            for k in 0..width {
+                plane[p * width + k] = row[k * bytes_per_sample + src];
+            }
+        }
+        // Stage 2: horizontal byte differencing across the reordered row,
+        // right-to-left so each "previous" byte is still its original
+        // value when its successor is differenced.
+        for i in (1..row_len).rev() {
+            plane[i] = plane[i].wrapping_sub(plane[i - 1]);
+        }
+        row.copy_from_slice(&plane);
     }
     Ok(())
 }

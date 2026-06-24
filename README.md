@@ -42,11 +42,16 @@ ordered byte-plane de-interleave followed by an inclusive cumulative byte
 sum, per the Adobe TIFF §14 floating-point predictor) are all supported.
 Predictor 3 decodes for 16-/32-/64-bit `SampleFormat = 3` grayscale and
 RGB across strip and tile layouts (chunky and per-plane), under any
-byte-oriented compression (None / PackBits / LZW / Deflate / ZSTD); it is
+byte-oriented compression (None / PackBits / LZW / Deflate / ZSTD), and
+is now **written on encode** for 32-/64-bit float grayscale and RGB
+(`EncodePixelFormat::{GrayF32, GrayF64, RgbF32, RgbF64}`) across strip /
+tile / BigTIFF / multi-page — `forward_float_predictor` being the exact
+inverse of the decode-side `undo_float_predictor`. It is
 rejected over non-float or non-16/32/64-bit data per the §14 "the reader
-must give up" rule. Validated both with a binary-independent
-encode/decode oracle and against ImageMagick-written Predictor 1 vs 3
-float TIFFs (f32/f64, LZW + Deflate, grayscale + tiled). Strip- and
+must give up" rule. Validated with a binary-independent
+encode/decode oracle (including the new float-encode self-roundtrip and
+raw-byte predictor-reversal oracles) and against ImageMagick-written
+Predictor 1 vs 3 float TIFFs (f32/f64, LZW + Deflate, grayscale + tiled). Strip- and
 tile-based layouts both decode (any number of
 strips or tiles), including **sub-byte (1-bit and 4-bit) chunky tiles**
 (BlackIsZero / WhiteIsZero grayscale and 4-bit palette): per TIFF 6.0
@@ -407,7 +412,9 @@ components.
 | WhiteIsZero    | 1         | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `EncodePixelFormat::Bilevel` |
 | **Transparency Mask** | 1  | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate / **ZSTD** | `EncodePixelFormat::TransparencyMask` (sets PhotometricInterpretation = 4 and NewSubfileType bit 2) |
 | BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Gray8` / `::Gray16Le` |
+| **BlackIsZero float** (SampleFormat = 3) | 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`** | `EncodePixelFormat::GrayF32` / `::GrayF64` (writes SampleFormat = 3; the §14 floating-point predictor) |
 | RGB            | 8         | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Rgb24`     |
+| **RGB float** (SampleFormat = 3) | 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`** | `EncodePixelFormat::RgbF32` / `::RgbF64` (writes SampleFormat = 3, SamplesPerPixel = 3; `PlanarConfiguration = 2` deferred) |
 | Palette        | 8         | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Palette8`  |
 | **CIELab (3 chan)** | 8    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::CieLab8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 3, BitsPerSample = [8,8,8]) |
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**             | `EncodePixelFormat::CieLabL8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 1) |
@@ -673,13 +680,21 @@ remaining gaps are:
   stream remain deferred (those would need the §21 data-unit geometry to
   drive the plane split / horizontal difference, which has no
   single-shape definition in the spec).
-- **Float (`SampleFormat = 3`) grayscale and 3-channel RGB** now decode,
-  and the **floating-point predictor (`Predictor = 3`)** is reversed for
-  16-/32-/64-bit float grayscale and RGB across strip / tile and chunky /
-  per-plane layouts (see the SampleFormat / Predictor notes above). Float
-  palette / CMYK / YCbCr / CIELab remain precise typed errors, and
-  `Predictor = 3` over non-float or non-16/32/64-bit data is rejected per
-  the §14 "the reader must give up" rule.
+- **Float (`SampleFormat = 3`) grayscale and 3-channel RGB** decode **and
+  encode** (`EncodePixelFormat::{GrayF32, GrayF64, RgbF32, RgbF64}`,
+  32-/64-bit), and the **floating-point predictor (`Predictor = 3`)** is
+  reversed on decode for 16-/32-/64-bit float grayscale and RGB across
+  strip / tile and chunky / per-plane layouts, and **written** on encode
+  for 32-/64-bit grayscale and RGB across strip / tile / BigTIFF /
+  multi-page (see the SampleFormat / Predictor notes above). The float
+  encode + Predictor = 3 writer now gives the subsystem a fully
+  binary-independent self-roundtrip oracle. Remaining float gaps: f16
+  (binary16) *encode* (no native Rust half type — decode already widens
+  it), `PlanarConfiguration = 2` float RGB encode, and float palette /
+  CMYK / YCbCr / CIELab (no defensible display mapping — precise typed
+  errors on both sides). `Predictor = 3` over non-float or
+  non-16/32/64-bit data is rejected per the §14 "the reader must give up"
+  rule.
 
 ## Registration
 
