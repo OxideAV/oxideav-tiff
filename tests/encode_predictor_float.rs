@@ -449,30 +449,90 @@ fn rgbf32_bigtiff_roundtrip() {
 }
 
 #[test]
-fn float_rejects_planar_and_predictor2_mismatch() {
+fn rgbf32_planar_matches_chunky() {
+    // PlanarConfiguration=2 float RGB: the encoder de-interleaves into
+    // three Y/Cb/Cr-style planes and applies the §14 float predictor
+    // per-plane; the decoder reverses it per-plane and re-interleaves.
+    // The planar encode of identical samples must decode to the same
+    // display plane as the chunky encode.
     let (w, h, fpix) = rgb_samples_f32();
-    // Planar float RGB is deferred -> precise error.
+    let samples64: Vec<f64> = fpix.iter().map(|&x| x as f64).collect();
+    let want = display_map(&samples64);
+
+    for comp in [
+        TiffCompression::None,
+        TiffCompression::Lzw,
+        TiffCompression::Deflate,
+        TiffCompression::Zstd,
+    ] {
+        for predictor in [false, true] {
+            for tiling in [None, Some((16u32, 16u32))] {
+                let page = EncodePage {
+                    width: w,
+                    height: h,
+                    kind: EncodePixelFormat::RgbF32 { pixels: &fpix },
+                    compression: comp,
+                    predictor,
+                    planar: true,
+                    tiling,
+                    bigtiff: false,
+                };
+                let bytes = encode_tiff(&page).unwrap();
+                let dec = decode_tiff(&bytes).unwrap();
+                assert_eq!(
+                    dec.frame.planes[0].data, want,
+                    "RgbF32 planar comp={comp:?} predictor={predictor} tiling={tiling:?} \
+                     must match the chunky display map"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rgbf64_planar_predictor_matches_chunky() {
+    let (w, h, f32pix) = rgb_samples_f32();
+    let fpix: Vec<f64> = f32pix.iter().map(|&x| x as f64).collect();
+    let want = display_map(&fpix);
+    let page = EncodePage {
+        width: w,
+        height: h,
+        kind: EncodePixelFormat::RgbF64 { pixels: &fpix },
+        compression: TiffCompression::Deflate,
+        predictor: true,
+        planar: true,
+        tiling: None,
+        bigtiff: false,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    let dec = decode_tiff(&bytes).unwrap();
+    assert_eq!(dec.frame.planes[0].data, want);
+}
+
+#[test]
+fn float_rejects_grayscale_planar_and_ccitt() {
+    let (w, h, fpix) = gray_samples_f32();
+    // PlanarConfiguration=2 is irrelevant for a single sample -> rejected.
     let planar = EncodePage {
         width: w,
         height: h,
-        kind: EncodePixelFormat::RgbF32 { pixels: &fpix },
+        kind: EncodePixelFormat::GrayF32 { pixels: &fpix },
         compression: TiffCompression::None,
         predictor: false,
         planar: true,
         tiling: None,
         bigtiff: false,
     };
-    let err = encode_tiff(&planar).unwrap_err();
     assert!(
-        format!("{err}").contains("PlanarConfiguration=2 with float RGB"),
-        "expected float-planar rejection, got: {err}"
+        encode_tiff(&planar).is_err(),
+        "single-sample float planar must be rejected (PlanarConfiguration irrelevant)"
     );
 
     // CCITT with float is rejected (bilevel-only).
     let ccitt = EncodePage {
         width: w,
         height: h,
-        kind: EncodePixelFormat::RgbF32 { pixels: &fpix },
+        kind: EncodePixelFormat::GrayF32 { pixels: &fpix },
         compression: TiffCompression::CcittRle,
         predictor: false,
         planar: false,

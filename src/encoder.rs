@@ -218,10 +218,12 @@ pub enum EncodePixelFormat<'a> {
     /// an Rgb24 display plane through a single shared sample extent (so the
     /// pixel's chromaticity survives the display map). `Predictor = 3`
     /// composes (the §14 byte-plane transform groups all three components'
-    /// bytes by significance across the scan-line); `Predictor = 2`,
-    /// `PlanarConfiguration = 2` (deferred — the §14 float predictor's
-    /// planar form needs per-plane geometry), and CCITT are rejected.
-    /// Tiled layout (§15) and BigTIFF compose.
+    /// bytes by significance across the scan-line). `PlanarConfiguration =
+    /// 2` composes too — the encoder de-interleaves into three component
+    /// planes and applies the §14 float predictor per-plane (§14
+    /// "Differencing works the same as it does for grayscale data"),
+    /// matching the decoder's per-plane reversal. `Predictor = 2` and
+    /// CCITT are rejected. Tiled layout (§15) and BigTIFF compose.
     RgbF32 { pixels: &'a [f32] },
     /// 64-bit IEEE 754 double-precision floating-point RGB
     /// (`PhotometricInterpretation = 2`, `SamplesPerPixel = 3`,
@@ -941,24 +943,6 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
             | EncodePixelFormat::RgbF64 { .. }
     );
 
-    // PlanarConfiguration=2 for float RGB is deferred: the §14
-    // floating-point predictor's planar form would split each plane's
-    // bytes by significance independently, which has no validated shape
-    // here yet. Reject it precisely (a generic "requires multi-sample"
-    // message would be misleading — RgbF32/F64 *are* multi-sample).
-    if p.planar
-        && matches!(
-            p.kind,
-            EncodePixelFormat::RgbF32 { .. } | EncodePixelFormat::RgbF64 { .. }
-        )
-    {
-        return Err(Error::invalid(
-            "TIFF encode: PlanarConfiguration=2 with float RGB (SampleFormat=3) is not yet \
-             supported (the §14 floating-point predictor's per-plane byte-plane geometry is \
-             deferred); chunky float RGB does compose with Predictor=3 and tiling",
-        ));
-    }
-
     // PlanarConfiguration=2 (separate component planes) is only
     // meaningful when there is more than one sample per pixel; TIFF 6.0
     // §"PlanarConfiguration" (page 38): "If SamplesPerPixel is 1,
@@ -982,6 +966,8 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                 | EncodePixelFormat::Cmyk32 { .. }
                 | EncodePixelFormat::YCbCr24 { .. }
                 | EncodePixelFormat::YCbCrSubsampled24 { .. }
+                | EncodePixelFormat::RgbF32 { .. }
+                | EncodePixelFormat::RgbF64 { .. }
         )
     {
         return Err(Error::invalid(
@@ -1502,7 +1488,8 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                 tile_h as usize,
                 samples_per_pixel as usize,
                 bps,
-                p.predictor,
+                p.predictor && !is_float,
+                p.predictor && is_float,
                 p.compression,
             )?
         } else if bps == 1 {
@@ -1563,17 +1550,30 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
             // §14: "If PlanarConfiguration is 2 … Differencing works the
             // same as it does for grayscale data." Each plane is a
             // single-component image, so the predictor runs with an
-            // offset of one sample.
+            // offset of one sample. Float planes take the §14
+            // floating-point predictor (the decoder reverses it per-plane
+            // with the plane width as its row sample count); integer
+            // planes take the horizontal-differencing predictor.
             if p.predictor {
                 let plane_row_bytes = (p.width as usize) * bytes_per_sample;
-                forward_horizontal_predictor(
-                    &mut plane_buf,
-                    p.width as usize,
-                    p.height as usize,
-                    1,
-                    bps,
-                    plane_row_bytes,
-                )?;
+                if is_float {
+                    forward_float_predictor(
+                        &mut plane_buf,
+                        p.width as usize,
+                        p.height as usize,
+                        bytes_per_sample,
+                        plane_row_bytes,
+                    )?;
+                } else {
+                    forward_horizontal_predictor(
+                        &mut plane_buf,
+                        p.width as usize,
+                        p.height as usize,
+                        1,
+                        bps,
+                        plane_row_bytes,
+                    )?;
+                }
             }
             out_strips.push(p.compression.pack(&plane_buf, p.width, p.height)?);
         }
@@ -2315,6 +2315,7 @@ fn build_tiles_planar(
     samples: usize,
     bps: usize,
     predictor: bool,
+    float_predictor: bool,
     compression: TiffCompression,
 ) -> Result<Vec<Vec<u8>>> {
     let bytes_per_sample = bps / 8;
@@ -2350,9 +2351,9 @@ fn build_tiles_planar(
             1,
             bps,
             predictor,
-            // Planar float is rejected upstream, so the float predictor
-            // never runs on a planar tile grid.
-            false,
+            // Float planes (RgbF32/F64) take the §14 floating-point
+            // predictor per-tile; the decoder reverses it per-plane.
+            float_predictor,
             compression,
         )?;
         out.extend(plane_tiles);

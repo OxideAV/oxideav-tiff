@@ -29,16 +29,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   errors. This gives the float subsystem (previously decode-only,
   validated only against externally-written fixtures) a fully
   binary-independent self-roundtrip oracle. New
-  `tests/encode_predictor_float.rs` (12 tests): a display-plane oracle
+  `tests/encode_predictor_float.rs` (14 tests): a display-plane oracle
   (encode → `decode_tiff` → compare against the §SampleFormat linear
   extent map computed in the test) across the compressor set × predictor
   on/off for all four formats, a raw-byte oracle that walks the encoded
   IFD and reverses the float predictor with a test-local routine to
   recover the input sample bytes exactly, SampleFormat / Predictor tag
-  inspection, tiled-vs-strip equivalence, BigTIFF, and the planar / CCITT
-  / wrong-buffer-size negative paths. f16 (binary16) float *encode* is a
-  separate increment (no native Rust half type; the decoder already
-  widens binary16 on read).
+  inspection, tiled-vs-strip equivalence, BigTIFF, and the negative paths
+  (single-sample float planar / CCITT / wrong-buffer-size). f16 (binary16)
+  float *encode* is a separate increment (no native Rust half type; the
+  decoder already widens binary16 on read).
+
+- **`PlanarConfiguration = 2` (separate component planes) for float RGB
+  encode (TIFF 6.0 §"PlanarConfiguration" / §14).** `RgbF32` / `RgbF64`
+  now compose with `EncodePage::planar`: the encoder de-interleaves the
+  chunky `R G B` raster into three full-resolution component planes and
+  applies the §14 floating-point predictor per-plane (§14 "Differencing
+  works the same as it does for grayscale data" — the plane width is the
+  per-row sample count), matching the decoder's existing per-plane
+  `undo_float_predictor` reversal and chunky re-interleave. Composes with
+  §15 tiling (one tile grid per plane), the byte-aligned compressors, and
+  BigTIFF. Two new tests assert the planar encode of identical samples
+  decodes to the same display plane as the chunky encode across the
+  compressor set × predictor × strip / tiled (`rgbf32_planar_matches_chunky`,
+  `rgbf64_planar_predictor_matches_chunky`). Single-sample float
+  (`GrayF32` / `GrayF64`) planar stays rejected — §"PlanarConfiguration"
+  is irrelevant at `SamplesPerPixel = 1`.
 
 - **Binary-independent planar CMYK decode + round-trip coverage (TIFF
   6.0 §16 / §"PlanarConfiguration").** `PlanarConfiguration = 2` CMYK

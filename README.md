@@ -414,7 +414,7 @@ components.
 | BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Gray8` / `::Gray16Le` |
 | **BlackIsZero float** (SampleFormat = 3) | 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`** | `EncodePixelFormat::GrayF32` / `::GrayF64` (writes SampleFormat = 3; the §14 floating-point predictor) |
 | RGB            | 8         | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Rgb24`     |
-| **RGB float** (SampleFormat = 3) | 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`** | `EncodePixelFormat::RgbF32` / `::RgbF64` (writes SampleFormat = 3, SamplesPerPixel = 3; `PlanarConfiguration = 2` deferred) |
+| **RGB float** (SampleFormat = 3) | 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`**, **`PlanarConfiguration = 2`** | `EncodePixelFormat::RgbF32` / `::RgbF64` (writes SampleFormat = 3, SamplesPerPixel = 3) |
 | Palette        | 8         | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Palette8`  |
 | **CIELab (3 chan)** | 8    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::CieLab8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 3, BitsPerSample = [8,8,8]) |
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**             | `EncodePixelFormat::CieLabL8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 1) |
@@ -686,15 +686,16 @@ remaining gaps are:
   reversed on decode for 16-/32-/64-bit float grayscale and RGB across
   strip / tile and chunky / per-plane layouts, and **written** on encode
   for 32-/64-bit grayscale and RGB across strip / tile / BigTIFF /
-  multi-page (see the SampleFormat / Predictor notes above). The float
+  multi-page, and float RGB additionally encodes in
+  `PlanarConfiguration = 2` (three component planes, §14 float predictor
+  per-plane) — see the SampleFormat / Predictor notes above. The float
   encode + Predictor = 3 writer now gives the subsystem a fully
   binary-independent self-roundtrip oracle. Remaining float gaps: f16
   (binary16) *encode* (no native Rust half type — decode already widens
-  it), `PlanarConfiguration = 2` float RGB encode, and float palette /
-  CMYK / YCbCr / CIELab (no defensible display mapping — precise typed
-  errors on both sides). `Predictor = 3` over non-float or
-  non-16/32/64-bit data is rejected per the §14 "the reader must give up"
-  rule.
+  it), and float palette / CMYK / YCbCr / CIELab (no defensible display
+  mapping — precise typed errors on both sides). `Predictor = 3` over
+  non-float or non-16/32/64-bit data is rejected per the §14 "the reader
+  must give up" rule.
 
 ## Registration
 
