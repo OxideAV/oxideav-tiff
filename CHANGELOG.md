@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.4...v0.0.5) - 2026-06-24
+
+### Other
+
+- float multi-page chain (encode_tiff_multi) round-trip
+- PlanarConfiguration=2 for float RGB (SampleFormat=3)
+- floating-point (SampleFormat=3) encode + Predictor=3 writer
+- binary-independent planar CMYK decode + round-trip coverage (TIFF 6.0 §16 / §"PlanarConfiguration")
+- 4:4:4 YCbCr PlanarConfiguration=2 + Predictor=2 (TIFF 6.0 §"PlanarConfiguration" / §14 / §21)
+- tiled chroma-subsampled YCbCr write (TIFF 6.0 §15 / §21)
+- tiled 4:4:4 YCbCr write (TIFF 6.0 §15 / §21)
+- tiled chroma-subsampled YCbCr decode (TIFF 6.0 §21)
+- cover float Predictor=3 over ZSTD and multi-strip layouts
+- cover tiled JPEG-in-TIFF (Compression=7) decode
+- decode Predictor=3 (IEEE floating-point predictor)
+- ExtraSamples=1 (associated/pre-multiplied alpha) RGB decode (TIFF 6.0 §18)
+- 1-bit sub-byte tile writing for Bilevel / TransparencyMask (TIFF 6.0 §15)
+- SampleFormat=3 (IEEE float) 3-channel RGB decode (TIFF 6.0 §SampleFormat)
+- decode non-canonical Orientation (tag 274, values 2..=8)
+- SampleFormat=3 (IEEE float) 16-/32-/64-bit grayscale decode (TIFF 6.0 §SampleFormat)
+- refresh to current status, drop per-round changelog cruft
+
 ### Added
 
 - **Floating-point (`SampleFormat = 3`) encode + `Predictor = 3` writer
