@@ -505,14 +505,35 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             "TIFF: Compression=7 (JPEG-in-TIFF) requires the `registry` feature".into(),
         ));
     }
-    // The TIFF 6.0 §22 "old-style" JPEG (Compression=6) is officially
-    // deprecated by Tech Note 2 and we don't attempt it.
+    // The TIFF 6.0 §22 "old-style" JPEG (Compression=6) is deprecated
+    // by Tech Note 2, but TN2 keeps the tag values "reserved
+    // indefinitely" precisely so readers can continue to decode
+    // existing files. The §22 interchange-format layout (tag 513
+    // pointing at a complete SOI..EOI bitstream) decodes; the §22
+    // tables-form layout is recognised and rejected with a precise
+    // error (see `jpeg_old`).
     if compression == COMPRESSION_JPEG_OLD {
-        return Err(Error::Unsupported(
-            "TIFF: Compression=6 (old-style JPEG) is deprecated by TIFF Tech Note 2; \
-             writers should emit Compression=7 instead"
-                .into(),
-        ));
+        // §22 "Overview of the JPEG Extension to TIFF": "The
+        // PlanarConfiguration Field is used to specify whether or not
+        // the compressed data is interleaved." The non-interleaved
+        // (PlanarConfiguration = 2) arrangement stores one component
+        // per JPEG scan; our JPEG path is chunky-only, as for
+        // Compression=7.
+        if planar == PLANAR_SEPARATE {
+            return Err(Error::Unsupported(
+                "TIFF/JPEG(§22): PlanarConfiguration=2 (not interleaved) is not supported".into(),
+            ));
+        }
+        return decode_ifd_jpeg_old(
+            input,
+            entries,
+            bo,
+            width,
+            height,
+            samples_per_pixel,
+            bps_first,
+            photometric,
+        );
     }
 
     let pixel_buf = if find(entries, TAG_TILE_WIDTH).is_some() {
@@ -3066,6 +3087,145 @@ fn decode_ifd_jpeg(
             data: dst,
         }],
     })
+}
+
+// ---------------------------------------------------------------------------
+// Old-style JPEG (Compression = 6) decode, per TIFF 6.0 §22.
+// ---------------------------------------------------------------------------
+
+/// Decode a TIFF 6.0 §22 old-style JPEG IFD (`Compression = 6`).
+///
+/// Only the §22 interchange-format layout decodes:
+/// `JPEGInterchangeFormat` (tag 513) "points to the Start of Image
+/// (SOI) marker code" of a complete ISO JPEG bitstream covering the
+/// whole image — §22 "Strips and Tiles": "Compressed images
+/// conforming to the syntax of the JPEG interchange format can be
+/// converted to TIFF simply by defining a single strip or tile for
+/// the entire image and then concatenating the TIFF image description
+/// fields to the JPEG compressed image data." The bitstream is handed
+/// to the JPEG codec exactly like a Compression=7 segment; any strip /
+/// tile pointers present are redundant views into the same bitstream
+/// and are ignored. The §22 tables-form layout (raw table payloads +
+/// entropy-coded strips) is recognised and rejected with a precise
+/// error (see [`crate::jpeg_old::OldJpegFields::tables_form_error`]).
+#[allow(clippy::too_many_arguments)]
+fn decode_ifd_jpeg_old(
+    input: &[u8],
+    entries: &[Entry],
+    bo: ByteOrder,
+    width: u32,
+    height: u32,
+    samples_per_pixel: u16,
+    bps_first: u16,
+    photometric: u16,
+) -> Result<TiffImage> {
+    let fields = crate::jpeg_old::parse_old_jpeg_fields(entries, bo, samples_per_pixel)?;
+
+    // Locate the interchange-format bitstream first: an IFD with no
+    // JPEG bitstream at all (the tables-form layout, or a bare
+    // Compression=6 with no §22 fields) gets its precise layout error
+    // ahead of the photometric / bit-depth gates below.
+    let Some(stream) = fields.interchange_stream(input)? else {
+        return Err(fields.tables_form_error());
+    };
+
+    // §22 "Overview of the JPEG Extension to TIFF": "JPEG is
+    // effective only on continuous-tone color spaces: Grayscale
+    // (Photometric Interpretation = 1), RGB (2), CMYK (5), YCbCr
+    // (6)." (The §22 minimum-requirements table also lists "0,1 :
+    // Monochrome".)
+    match (photometric, samples_per_pixel) {
+        (PHOTO_BLACK_IS_ZERO, 1) | (PHOTO_WHITE_IS_ZERO, 1) => {}
+        (PHOTO_RGB, 3) | (PHOTO_YCBCR, 3) => {}
+        (PHOTO_CMYK, 4) => {}
+        (p, s) => {
+            return Err(Error::invalid(format!(
+                "TIFF/JPEG(§22): photometric={p} samples_per_pixel={s} is not a §22 \
+                 continuous-tone layout"
+            )));
+        }
+    }
+    // §22 "JPEG Baseline Process": "The algorithm accepts as input
+    // only those images having 8 bits per component." (The §22
+    // lossless process allows 2..16-bit precision, but this build's
+    // JPEG codec renders 8-bit planes only.)
+    if bps_first != 8 {
+        return Err(Error::Unsupported(format!(
+            "TIFF/JPEG(§22): BitsPerSample={bps_first} (only 8-bit decodes in this build)"
+        )));
+    }
+
+    decode_jpeg_old_interchange(stream, width, height, photometric)
+}
+
+/// Decode the §22 interchange-format bitstream (one JPEG frame
+/// covering the whole image) through the same per-segment decode +
+/// composite machinery the Compression=7 path uses, as a single
+/// full-image segment.
+#[cfg(feature = "registry")]
+fn decode_jpeg_old_interchange(
+    stream: &[u8],
+    width: u32,
+    height: u32,
+    photometric: u16,
+) -> Result<TiffImage> {
+    let (pixel_format, dst_row_stride, dst_size) = match photometric {
+        PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO => (
+            TiffPixelFormat::Gray8,
+            width as usize,
+            width as usize * height as usize,
+        ),
+        PHOTO_RGB | PHOTO_YCBCR | PHOTO_CMYK => (
+            TiffPixelFormat::Rgb24,
+            width as usize * 3,
+            width as usize * 3 * height as usize,
+        ),
+        _ => unreachable!("photometric vetted by caller"),
+    };
+    let mut dst = vec![0u8; dst_size];
+    let invert = photometric == PHOTO_WHITE_IS_ZERO;
+    let want_yuv = photometric == PHOTO_YCBCR;
+
+    let seg = crate::jpeg::decode_segment(None, stream, width, height, photometric)?;
+    composite_segment(
+        &seg,
+        width,
+        height,
+        &mut dst,
+        dst_row_stride,
+        0,
+        0,
+        invert,
+        want_yuv,
+        photometric,
+    )?;
+
+    Ok(TiffImage {
+        width,
+        height,
+        pixel_format,
+        planes: vec![TiffPlane {
+            stride: dst_row_stride,
+            data: dst,
+        }],
+    })
+}
+
+/// Without the `registry` feature the JPEG codec (`oxideav-mjpeg`) is
+/// unavailable — same story as Compression=7. The §22 field
+/// validation above still ran, so malformed old-style IFDs get their
+/// precise errors in both build modes.
+#[cfg(not(feature = "registry"))]
+fn decode_jpeg_old_interchange(
+    _stream: &[u8],
+    _width: u32,
+    _height: u32,
+    _photometric: u16,
+) -> Result<TiffImage> {
+    Err(Error::Unsupported(
+        "TIFF/JPEG(§22): Compression=6 interchange-format decode requires the `registry` feature"
+            .into(),
+    ))
 }
 
 #[cfg(feature = "registry")]

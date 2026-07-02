@@ -58,6 +58,53 @@ pub struct JpegSegment {
     pub pixel_format: JpegPixelFormat,
 }
 
+impl JpegSegment {
+    /// Verify every plane is large enough to back the segment's
+    /// declared dimensions, so the compositors can blit without
+    /// per-pixel bounds checks.
+    ///
+    /// The JPEG codec sizes its output planes from the bitstream's
+    /// SOF marker. TN2 mandates the SOF dimensions match the TIFF
+    /// segment dimensions, and a §22 interchange stream carries its
+    /// frame dimensions only in the SOF — so when a malformed file's
+    /// IFD claims *larger* dimensions than the JPEG frame actually
+    /// stores, the mismatch surfaces here as a typed error instead of
+    /// an index panic in a compositor. (Larger-than-needed planes —
+    /// e.g. MCU-height padding — are fine.)
+    pub fn validate_dims(&self) -> Result<()> {
+        let bytes_per_sample = match self.pixel_format {
+            JpegPixelFormat::Rgb24Packed => 3usize,
+            JpegPixelFormat::Cmyk8 => 4,
+            _ => 1,
+        };
+        for (i, p) in self.planes.iter().enumerate() {
+            let (pw, ph) = plane_dims(self.pixel_format, self.width, self.height, i);
+            let need_row = pw as usize * bytes_per_sample;
+            if p.stride < need_row {
+                return Err(Error::invalid(format!(
+                    "TIFF/JPEG: plane {i} stride {} cannot hold {need_row} bytes per row \
+                     for a {}x{} segment",
+                    p.stride, self.width, self.height
+                )));
+            }
+            if ph == 0 {
+                continue;
+            }
+            let need = (ph as usize - 1) * p.stride + need_row;
+            if p.data.len() < need {
+                return Err(Error::invalid(format!(
+                    "TIFF/JPEG: plane {i} has {} bytes, needs {need} for a {}x{} segment \
+                     (JPEG frame smaller than the IFD-declared dimensions?)",
+                    p.data.len(),
+                    self.width,
+                    self.height
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Pixel formats `oxideav-mjpeg` produces that we know how to splat
 /// into a TIFF output buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,12 +391,16 @@ pub fn decode_segment(
         })
         .collect();
 
-    Ok(JpegSegment {
+    let seg = JpegSegment {
         width: seg_w,
         height: seg_h,
         planes,
         pixel_format: pf,
-    })
+    };
+    // Guarantee the compositors' blit loops are in-bounds (a frame
+    // smaller than the segment dims becomes a typed error here).
+    seg.validate_dims()?;
+    Ok(seg)
 }
 
 /// Plane dimensions for component `i` of a `JpegPixelFormat`-format

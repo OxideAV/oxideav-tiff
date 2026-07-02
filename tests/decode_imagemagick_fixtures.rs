@@ -507,8 +507,12 @@ fn decode_64x64_cmyk_jpeg_imagemagick() {
     );
 }
 
-/// Verify we reject Compression=6 (deprecated old-style JPEG per
-/// TN2) with a precise Unsupported error rather than mis-decoding.
+/// A bare Compression=6 (TIFF 6.0 §22 old-style JPEG) IFD with none
+/// of the §22 fields carries no JPEG bitstream at all: no
+/// `JPEGInterchangeFormat` (tag 513) and no `JPEGProc` (tag 512,
+/// mandatory with no default). Verify it is rejected with a precise
+/// error rather than mis-decoded. (The interchange-format layout
+/// *does* decode — see `tests/decode_oldstyle_jpeg.rs`.)
 #[test]
 fn reject_old_style_jpeg_compression_6() {
     use oxideav_tiff::types::COMPRESSION_JPEG_OLD;

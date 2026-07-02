@@ -53,9 +53,13 @@
 //! * Predictor: 2 (horizontal differencing) via [`EncodePage::predictor`]
 //! * Multi-page chain via [`encode_tiff_multi`]
 //!
-//! Out of scope for this round (next-round backlog): the deprecated
-//! TIFF 6.0 §22 old-style JPEG (Compression=6) and encode-side
-//! JPEG-in-TIFF (Compression=7). YCbCr encode is currently
+//! The deprecated TIFF 6.0 §22 old-style JPEG (Compression=6) decodes
+//! in its interchange-format layout (`JPEGInterchangeFormat`, tag 513,
+//! points at a complete SOI..EOI bitstream); the §22 tables-form
+//! layout (raw JPEGQTables/JPEGDCTables/JPEGACTables + entropy-coded
+//! strips) is recognised and rejected with a precise error — see
+//! [`jpeg_old`]. Encode-side JPEG-in-TIFF (Compression=7) remains out
+//! of scope. YCbCr encode is currently
 //! `YCbCrSubSampling = [1, 1]` chunky 4:4:4 only; the
 //! chroma-subsampled writes (`[2, 1]` / `[2, 2]` / `[4, 1]` /
 //! `[4, 2]` / `[1, 2]`) and the YCbCr planar / tiled / predictor
@@ -88,6 +92,13 @@ pub mod container;
 
 #[cfg(feature = "registry")]
 pub mod jpeg;
+
+// TIFF 6.0 §22 old-style JPEG (Compression = 6) field parsing. Not
+// registry-gated: the §22 field validation and the precise
+// recognition / rejection semantics have no `oxideav-mjpeg`
+// dependency; only the actual interchange-stream decode (in
+// `decoder`) does.
+pub mod jpeg_old;
 
 #[cfg(feature = "registry")]
 pub mod registry;

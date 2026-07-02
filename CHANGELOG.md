@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Old-style JPEG (`Compression = 6`, TIFF 6.0 §22): interchange-format
+  decode + precise recognition/rejection semantics.** The §22 fields
+  (tags 512–521: JPEGProc, JPEGInterchangeFormat[Length],
+  JPEGRestartInterval, JPEGLosslessPredictors, JPEGPointTransforms,
+  JPEGQTables, JPEGDCTables, JPEGACTables) are now parsed and validated
+  by the new `jpeg_old` module (not registry-gated — the field
+  semantics have no JPEG-codec dependency). The **interchange-format
+  layout decodes**: per §22 "Strips and Tiles", a writer may store "a
+  single strip or tile for the entire image" as a complete JPEG
+  interchange bitstream, with `JPEGInterchangeFormat` (513) pointing
+  "to the Start of Image (SOI) marker code" and
+  `JPEGInterchangeFormatLength` (514) giving its extent — the decoder
+  slices that bitstream (tolerating an absent length field and
+  trailing padding by trimming to the last EOI) and routes it through
+  the same `oxideav-mjpeg` segment decode + composite machinery the
+  TN2 `Compression = 7` path uses, for the §22 continuous-tone
+  photometrics (grayscale BlackIsZero/WhiteIsZero, RGB, YCbCr incl.
+  chroma subsampling, CMYK), both byte orders, with or without
+  redundant strip pointers, with or without `JPEGProc` (a bare
+  interchange dump carries its process in its SOF marker), and down
+  the multi-page next-IFD chain. The **tables-form layout** (raw
+  64-byte zigzag Q tables + raw BITS/VALUES Huffman tables + strips
+  pointing "directly to the start of the entropy coded data") is
+  recognised and rejected precisely: missing §22-mandatory fields for
+  the declared JPEGProc are `InvalidData` naming the gap; a
+  well-formed tables-form IFD is `Unsupported` (reconstructing a
+  datastream from raw tables requires ISO 10918-1 marker synthesis,
+  outside the TIFF spec); JPEGProc values other than 1/14, bad
+  lossless predictor selection-values, out-of-bounds/non-SOI
+  interchange offsets, `PlanarConfiguration = 2`, and non-8-bit
+  precision all get typed errors. `JpegSegment::validate_dims` also
+  hardens every JPEG composite (old- and new-style) against frames
+  smaller than the IFD-declared dimensions (typed error instead of an
+  index panic). New `tests/decode_oldstyle_jpeg.rs` (21 tests):
+  hand-built §22 wrappers around ImageMagick-produced bitstreams
+  (black-box), byte-exact equivalence oracles against the
+  `Compression = 7` wrapping of the identical bitstream, an LE/BE
+  equivalence pair, a two-page §22 chain, and a 12-case hand-built
+  rejection matrix that runs in both registry and standalone builds.
+
 - **Floating-point (`SampleFormat = 3`) encode + `Predictor = 3` writer
   (TIFF 6.0 §SampleFormat / §14 floating-point predictor).** Four new
   `EncodePixelFormat` variants — `GrayF32` / `GrayF64` (BlackIsZero

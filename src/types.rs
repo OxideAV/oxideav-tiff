@@ -113,6 +113,31 @@ pub const TAG_T6_OPTIONS: u16 = 293;
 // EOI around the merged result.
 pub const TAG_JPEG_TABLES: u16 = 347;
 
+// --- Old-style JPEG fields (TIFF 6.0 §22 "JPEG Compression") -------------
+//
+// TIFF 6.0 §22 (pages 95-109) defines `Compression = 6` together with
+// nine auxiliary fields. TIFF Technical Note 2 (17-Mar-95) replaces
+// the design with `Compression = 7` but states that "the 6.0 JPEG
+// fields and tag values will remain reserved indefinitely" so readers
+// can continue to read existing files — which is exactly what this
+// crate does (see `jpeg_old`).
+pub const TAG_JPEG_PROC: u16 = 512; // SHORT, N=1 — mandatory, no default
+pub const TAG_JPEG_INTERCHANGE_FORMAT: u16 = 513; // LONG, N=1 — offset of SOI
+pub const TAG_JPEG_INTERCHANGE_FORMAT_LENGTH: u16 = 514; // LONG, N=1 — bytes
+pub const TAG_JPEG_RESTART_INTERVAL: u16 = 515; // SHORT, N=1 — MCUs per RSTn
+pub const TAG_JPEG_LOSSLESS_PREDICTORS: u16 = 517; // SHORT, N=SamplesPerPixel
+pub const TAG_JPEG_POINT_TRANSFORMS: u16 = 518; // SHORT, N=SamplesPerPixel
+pub const TAG_JPEG_Q_TABLES: u16 = 519; // LONG, N=SamplesPerPixel — offsets
+pub const TAG_JPEG_DC_TABLES: u16 = 520; // LONG, N=SamplesPerPixel — offsets
+pub const TAG_JPEG_AC_TABLES: u16 = 521; // LONG, N=SamplesPerPixel — offsets
+
+/// §22 "JPEGProc" (tag 512) value 1: "Baseline sequential process".
+pub const JPEG_PROC_BASELINE: u16 = 1;
+/// §22 "JPEGProc" (tag 512) value 14: "Lossless process with Huffman
+/// coding". Per the spec, "values indicating JPEG processes other
+/// than those specified above will be defined in the future."
+pub const JPEG_PROC_LOSSLESS: u16 = 14;
+
 // T4Options bits (Section 11):
 pub const T4OPT_2D_CODING: u32 = 1 << 0;
 pub const T4OPT_UNCOMPRESSED: u32 = 1 << 1;
