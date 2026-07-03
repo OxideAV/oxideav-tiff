@@ -28,6 +28,11 @@ pub const TYPE_SRATIONAL: u16 = 10;
 pub const TYPE_FLOAT: u16 = 11;
 pub const TYPE_DOUBLE: u16 = 12;
 // BigTIFF additions (Adobe Pagemaker 6.0 → BigTIFF spec):
+/// IFD — a 4-byte child-IFD file offset (the 32-bit sibling of
+/// [`TYPE_IFD8`]; type code 13 is a registered-identifier fact).
+/// Value-shaped exactly like [`TYPE_LONG`]; readers treat it as an
+/// unsigned 32-bit IFD offset.
+pub const TYPE_IFD: u16 = 13;
 pub const TYPE_LONG8: u16 = 16;
 pub const TYPE_SLONG8: u16 = 17;
 pub const TYPE_IFD8: u16 = 18;
@@ -38,7 +43,7 @@ pub fn type_size(t: u16) -> u32 {
     match t {
         TYPE_BYTE | TYPE_ASCII | TYPE_SBYTE | TYPE_UNDEFINED => 1,
         TYPE_SHORT | TYPE_SSHORT => 2,
-        TYPE_LONG | TYPE_SLONG | TYPE_FLOAT => 4,
+        TYPE_LONG | TYPE_SLONG | TYPE_FLOAT | TYPE_IFD => 4,
         TYPE_RATIONAL | TYPE_SRATIONAL | TYPE_DOUBLE => 8,
         // BigTIFF: 64-bit unsigned/signed long + 64-bit IFD pointer.
         TYPE_LONG8 | TYPE_SLONG8 | TYPE_IFD8 => 8,

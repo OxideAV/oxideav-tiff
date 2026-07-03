@@ -58,7 +58,7 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_tiff::compress::{unpack_deflate, unpack_lzw, unpack_packbits, unpack_zstd};
 use oxideav_tiff::ifd::{parse_header, parse_ifd};
-use oxideav_tiff::{decode_tiff, decode_tiff_all};
+use oxideav_tiff::{decode_tiff, decode_tiff_all, decode_tiff_at};
 
 /// Cap the standalone-decompressor `expected_len` so a tiny fuzz
 /// input claiming a huge expected size cannot drive a multi-gibibyte
@@ -77,6 +77,15 @@ fuzz_target!(|data: &[u8]| {
     // -----------------------------------------------------------------
     let _ = decode_tiff(data);
     let _ = decode_tiff_all(data);
+    // `decode_tiff_at` takes an explicit (attacker-controllable in a
+    // hostile SubIFDs entry) IFD offset — probe it with a
+    // fuzzer-chosen offset and a couple of fixed danger spots (header
+    // overlap, EOF boundary).
+    if let Some((&prefix, _)) = data.split_first() {
+        let _ = decode_tiff_at(data, prefix as u64);
+        let _ = decode_tiff_at(data, data.len() as u64);
+        let _ = decode_tiff_at(data, u64::MAX);
+    }
 
     // -----------------------------------------------------------------
     // 2. Direct IFD entry-points. Reachable as public API for

@@ -129,7 +129,7 @@ impl Entry {
                 }
                 Ok(out)
             }
-            TYPE_LONG => {
+            TYPE_LONG | TYPE_IFD => {
                 if self.data.len() < n * 4 {
                     return Err(Error::invalid("TIFF: LONG entry truncated"));
                 }

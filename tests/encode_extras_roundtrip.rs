@@ -491,3 +491,138 @@ fn multi_page_chain_with_extras_and_children() {
     assert_eq!(child.len(), 1);
     assert_eq!(child[0].tag, 40961);
 }
+
+// ---------------------------------------------------------------------------
+// Foreign-writer pointer types + BigTIFF array spill
+// ---------------------------------------------------------------------------
+
+/// Hand-build a classic-II file whose SubIFDs entry uses field type 13
+/// ("IFD" — the registered 4-byte child-IFD offset code some writers
+/// use instead of LONG). The reader must accept it exactly like LONG.
+#[test]
+fn foreign_subifd_pointer_typed_ifd13_reads() {
+    let mut f: Vec<u8> = Vec::new();
+    f.extend_from_slice(b"II");
+    f.extend_from_slice(&42u16.to_le_bytes());
+    f.extend_from_slice(&0u32.to_le_bytes()); // patched below
+                                              // Main 2x2 gray pixels + child 1x1 gray pixel.
+    let main_px = [10u8, 20, 30, 40];
+    let child_px = [200u8];
+    let main_px_off = f.len() as u32;
+    f.extend_from_slice(&main_px);
+    let child_px_off = f.len() as u32;
+    f.extend_from_slice(&child_px);
+    f.push(0); // pad to even
+               // Child IFD (offset known before main IFD since it comes first).
+    let child_ifd_off = f.len() as u32;
+    let child_entries: [(u16, u16, u32, u32); 8] = [
+        (256, 3, 1, 1),            // width 1
+        (257, 3, 1, 1),            // height 1
+        (258, 3, 1, 8),            // bits 8
+        (259, 3, 1, 1),            // no compression
+        (262, 3, 1, 1),            // BlackIsZero
+        (273, 4, 1, child_px_off), // strip offset
+        (278, 3, 1, 1),            // rows/strip
+        (279, 4, 1, child_px.len() as u32),
+    ];
+    f.extend_from_slice(&(child_entries.len() as u16).to_le_bytes());
+    for (tag, typ, count, value) in child_entries {
+        f.extend_from_slice(&tag.to_le_bytes());
+        f.extend_from_slice(&typ.to_le_bytes());
+        f.extend_from_slice(&count.to_le_bytes());
+        if typ == 3 {
+            f.extend_from_slice(&(value as u16).to_le_bytes());
+            f.extend_from_slice(&0u16.to_le_bytes());
+        } else {
+            f.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    f.extend_from_slice(&0u32.to_le_bytes()); // child next IFD
+                                              // Main IFD with tag 330 typed 13 (IFD).
+    let main_ifd_off = f.len() as u32;
+    let main_entries: [(u16, u16, u32, u32); 9] = [
+        (256, 3, 1, 2),
+        (257, 3, 1, 2),
+        (258, 3, 1, 8),
+        (259, 3, 1, 1),
+        (262, 3, 1, 1),
+        (273, 4, 1, main_px_off),
+        (278, 3, 1, 2),
+        (279, 4, 1, main_px.len() as u32),
+        (330, 13, 1, child_ifd_off), // SubIFDs, field type IFD (13)
+    ];
+    f.extend_from_slice(&(main_entries.len() as u16).to_le_bytes());
+    for (tag, typ, count, value) in main_entries {
+        f.extend_from_slice(&tag.to_le_bytes());
+        f.extend_from_slice(&typ.to_le_bytes());
+        f.extend_from_slice(&count.to_le_bytes());
+        if typ == 3 {
+            f.extend_from_slice(&(value as u16).to_le_bytes());
+            f.extend_from_slice(&0u16.to_le_bytes());
+        } else {
+            f.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    f.extend_from_slice(&0u32.to_le_bytes());
+    f[4..8].copy_from_slice(&main_ifd_off.to_le_bytes());
+
+    let main = decode_tiff(&f).unwrap();
+    assert_eq!(main.frame.planes[0].data, main_px.to_vec());
+    let hdr = parse_header(&f).unwrap();
+    let (entries, _) = parse_ifd(&f, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
+    let sub = find(&entries, TAG_SUB_IFDS).expect("tag 330 present");
+    assert_eq!(sub.field_type, 13, "field type IFD");
+    let offs = sub
+        .as_u64_vec(hdr.byte_order)
+        .expect("type 13 reads as offset");
+    assert_eq!(offs, vec![child_ifd_off as u64]);
+    let child = decode_tiff_at(&f, offs[0]).unwrap();
+    assert_eq!(child.frame.planes[0].data, child_px.to_vec());
+}
+
+#[test]
+fn bigtiff_two_sub_ifds_spill_out_of_line() {
+    // Two children × LONG8 = 16 bytes > the BigTIFF 8-byte value slot,
+    // so tag 330 must reference an out-of-line offsets array.
+    let main_px = ramp(16, 16);
+    let t1 = ramp(8, 8);
+    let t2: Vec<u8> = ramp(8, 8).iter().map(|b| b.wrapping_add(7)).collect();
+    let c1 = EncodePage {
+        bigtiff: true,
+        ..gray_page(&t1, 8, 8, PageExtras::default())
+    };
+    let c2 = EncodePage {
+        bigtiff: true,
+        compression: TiffCompression::Zstd,
+        ..gray_page(&t2, 8, 8, PageExtras::default())
+    };
+    let children = [c1, c2];
+    let main = EncodePage {
+        bigtiff: true,
+        ..gray_page(
+            &main_px,
+            16,
+            16,
+            PageExtras {
+                sub_ifds: &children,
+                ..Default::default()
+            },
+        )
+    };
+    let file = encode_tiff(&main).unwrap();
+    assert_eq!(decode_tiff(&file).unwrap().frame.planes[0].data, main_px);
+    let hdr = parse_header(&file).unwrap();
+    let (entries, _) = parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
+    let sub = find(&entries, TAG_SUB_IFDS).unwrap();
+    assert_eq!(sub.count, 2);
+    let offs = sub.as_u64_vec(hdr.byte_order).unwrap();
+    assert_eq!(offs.len(), 2);
+    assert_eq!(
+        decode_tiff_at(&file, offs[0]).unwrap().frame.planes[0].data,
+        t1
+    );
+    assert_eq!(
+        decode_tiff_at(&file, offs[1]).unwrap().frame.planes[0].data,
+        t2
+    );
+}
