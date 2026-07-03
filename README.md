@@ -9,9 +9,10 @@ Implements the *Aldus TIFF Revision 6.0 (June 1992)* baseline plus the
 universally-deployed Part 2 extensions (LZW + Deflate, tiles, YCbCr /
 CMYK photometrics, CCITT Modified Huffman + T.4 1-D), the multi-IFD
 chain (multi-page), the Adobe Pagemaker 6.0 *BigTIFF* design
-(8-byte offsets, magic 43), and the de-facto registry extension
-`Compression = 50000` (Zstandard). Spec-only clean-room: no external
-library source was consulted.
+(8-byte offsets, magic 43), and the de-facto registry extensions
+`Compression = 50000` (Zstandard) and `Compression = 50001`
+(WebP-in-TIFF, via the `oxideav-webp` sibling crate's public API).
+Spec-only clean-room: no external library source was consulted.
 
 ## Decode
 
@@ -29,6 +30,7 @@ library source was consulted.
 | Palette        | 4 / 8          | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` |
 | RGB (3 chan)   | 8              | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` |
 | RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb48Le` |
+| RGB (3 chan / 4 chan + §ExtraSamples) | 8 | **WebP-in-TIFF** (Compression=50001; VP8L lossless + VP8 lossy segments) | `Rgb24` |
 | CMYK (4 chan)  | 8              | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` |
 | YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **ZSTD** (incl. **§21 chroma subsampling** `[2,1]`/`[2,2]`/`[4,1]`/`[4,2]`) / **JPEG-in-TIFF** (Compression=7) | `Rgb24` |
 | RGB (3 chan)   | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
@@ -296,7 +298,66 @@ fixtures whose strips are hand-assembled RFC 8478 `Raw_Block` frames
 an independent reference transcoder (our `Compression = 50000` output
 transcoded to uncompressed, and independently-produced Zstandard files
 decoded by us — both compared pixel-exact). `Compression = 50001`
-(WebP) from the same registry page remains unimplemented.
+(WebP) from the same registry page is implemented too — see the next
+section.
+
+### WebP (Compression = 50001)
+
+`Compression = 50001` is the pixel-codec sibling of the 50000
+Zstandard registry extension, from the same de-facto registry page
+transcribed in
+[`docs/image/tiff/tiff-zstd-compression-50000.md`](docs/image/tiff/tiff-zstd-compression-50000.md)
+(§1 registers both values; §3 fixes the shared per-strip / per-tile
+discipline). Unlike the byte-stream schemes, WebP is a **pixel**
+codec, so the carriage is codec-in-container: every strip or tile
+payload is **one complete WebP still-image file** (RIFF `WEBP`
+container holding a `VP8L` lossless or `VP8 ` lossy bitstream) whose
+frame dimensions equal the segment geometry — the final strip of a
+multi-strip page carries only the remaining rows, while §15 edge
+tiles stay padded to the full `TileWidth` × `TileLength`. That exact
+framing was pinned against independently produced black-box reference
+samples committed under `tests/data/webp50001/` (generation formulas
+reproduced in `tests/webp50001.rs`).
+
+All WebP bitstream logic lives in the
+[`oxideav-webp`](https://crates.io/crates/oxideav-webp) sibling
+crate, consumed strictly through its public framework-free API
+(`decode_webp_image` / `encode_webp_lossless`) with
+`default-features = false` — so `Compression = 50001` works in this
+crate's standalone (`default-features = false`) build too, and no
+WebP parsing exists in this crate beyond handing the payload bytes
+across and validating the returned frame geometry against the IFD.
+
+Because the codec is pixel-aware, only the pixel shapes WebP can
+represent compose: `PhotometricInterpretation = 2`,
+`BitsPerSample = 8`, `SamplesPerPixel = 3` (RGB) or `4` (RGBA + one
+§ExtraSamples entry), chunky. `PlanarConfiguration = 2` is undefined
+for it, and a `Compression = 50001` IFD declaring any `Predictor` is
+rejected per the §14 reader rule — the §14 transforms are byte-stream
+constructs that never compose with a pixel codec. Decode returns
+`Rgb24` (the crate's §ExtraSamples policy renders the leading RGB
+triple of an RGBA page); RGBA payload alpha is preserved on the wire
+and reachable through the raw strip payload.
+
+On the encode side `TiffCompression::Webp` writes one **lossless**
+`VP8L` file per strip / tile for `EncodePixelFormat::Rgb24` /
+`::Rgba32` input, so a `Compression = 50001` page round-trips
+pixel-exact like every other scheme this encoder emits. Multi-strip
+(`PageExtras::rows_per_strip`), §15 tiling (edge tiles padded), BigTIFF
+and the multi-page chain all compose; `predictor` / `planar` /
+non-RGB(A) inputs are rejected at plan time with precise errors.
+WebP's own still-image ceiling (16384 per side) bounds a single
+segment; larger pages should be split into strips or tiles within
+that bound. Validation is three-layered (`tests/webp50001.rs`):
+independent-fixture cross-reads (single-strip, multi-strip with a
+short final strip, RGBA, partial-edge tiles, and a `VP8 ` lossy file
+asserted byte-exact against a direct `oxideav-webp` decode of the
+extracted payload — the YUV→RGB display conversion of a lossy frame
+is reader-defined, so cross-reader pixel values legitimately differ),
+webp-vs-none self-roundtrips across every layout axis (including
+alpha carriage verified by re-decoding our emitted RIFF payload), and
+hostile-IFD rejections (declared Predictor, frame/IFD geometry
+mismatch).
 
 ### Transparency Mask (PhotometricInterpretation = 4)
 
@@ -481,6 +542,7 @@ components.
 | **BlackIsZero signed** (SampleFormat = 2) | 8 / 16 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, **`Predictor = 2`**, BigTIFF, multi-page | `EncodePixelFormat::GrayI8` / `::GrayI16` (two's-complement samples + SampleFormat = 2 tag; decoder renders via the offset-binary map) |
 | **BlackIsZero float** (SampleFormat = 3) | **16** / 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`** | `EncodePixelFormat::GrayF16` / `::GrayF32` / `::GrayF64` (writes SampleFormat = 3; the §14 floating-point predictor; f16 = raw binary16 bit patterns + `f32_to_f16_bits` helper) |
 | RGB            | 8         | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Rgb24`     |
+| **RGB / RGBA** | 8         | **WebP-in-TIFF** (Compression=50001, lossless VP8L per segment), strip / multi-strip / **§15 tiled**, BigTIFF, multi-page | `EncodePixelFormat::Rgb24` / `::Rgba32` + `TiffCompression::Webp` (predictor / planar rejected — pixel codec) |
 | **RGB + alpha/extra (§ExtraSamples)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, **`PlanarConfiguration = 2`** / **`Predictor = 2`**, BigTIFF | `EncodePixelFormat::Rgba32` + `ExtraSampleKind` (writes SamplesPerPixel = 4 and ExtraSamples = 0/1/2, tag 338) |
 | **RGB**        | 16        | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, **`PlanarConfiguration = 2`** / **`Predictor = 2`**, BigTIFF | `EncodePixelFormat::Rgb48` (BitsPerSample = [16,16,16] little-endian — encode parity for the `Rgb48Le` decode path) |
 | **RGB float** (SampleFormat = 3) | **16** / 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`**, **`PlanarConfiguration = 2`** | `EncodePixelFormat::RgbF16` / `::RgbF32` / `::RgbF64` (writes SampleFormat = 3, SamplesPerPixel = 3) |
@@ -838,8 +900,6 @@ remaining gaps are:
   (SOF1 `P = 12`), arithmetic coding (SOF9 / SOF11), or
   `PlanarConfiguration = 2` JPEG segments (the same planar limit
   applies to `Compression = 6`).
-- **`Compression = 50001` (WebP)** from the de-facto registry — returns
-  the generic unsupported-compression error.
 - **CCITT uncompressed-mode *emission*** — the decoder reads the
   optional uncompressed-mode extension, but the encoder never emits it
   (it is a bit-rate control extension, not a compression win for

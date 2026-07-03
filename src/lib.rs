@@ -5,8 +5,11 @@
 //! horizontal-differencing predictor; Adobe Deflate; YCbCr / CMYK
 //! photometrics; tiles), the multi-IFD chain (multi-page), the
 //! Adobe Pagemaker 6.0 *BigTIFF* design (8-byte offsets, magic 43),
-//! and the de-facto registry extension Compression = 50000
-//! (Zstandard).
+//! and the de-facto registry extensions Compression = 50000
+//! (Zstandard) and Compression = 50001 (WebP-in-TIFF — each strip /
+//! tile payload is one complete WebP file, decoded / encoded through
+//! the `oxideav-webp` sibling crate's public API; see the README's
+//! "WebP (Compression = 50001)" section).
 //! Spec-only clean-room: no external library source was consulted at
 //! any point.
 //!
@@ -23,6 +26,9 @@
 //!   (1-D and 2-D) / 4 CCITT T.6 / 32773 PackBits / 5 LZW /
 //!   8 Deflate (zlib) / 50000 Zstandard (de-facto registry
 //!   extension; one RFC 8478 frame per strip or tile) /
+//!   50001 WebP-in-TIFF (one complete WebP file per strip or tile,
+//!   VP8L lossless or VP8 lossy, 8-bit chunky RGB / RGBA; routed
+//!   through `oxideav-webp`) /
 //!   7 JPEG-in-TIFF (TIFF Tech Note 2; routes each strip/tile through
 //!   `oxideav-mjpeg`)
 //! * Predictor: 1 (none) and 2 (horizontal differencing,
@@ -48,7 +54,9 @@
 //!   `YCbCrSubSampling = [1, 1]` chunky 4:4:4,
 //!   PhotometricInterpretation = 6 per TIFF 6.0 §21 "YCbCr Images")
 //! * Compression: None / PackBits / LZW / Deflate / Zstandard
-//!   (Compression=50000) / CCITT Modified Huffman (Compression=2) /
+//!   (Compression=50000) / WebP-in-TIFF (Compression=50001 — one
+//!   lossless VP8L file per strip / tile, Rgb24 / Rgba32 input only) /
+//!   CCITT Modified Huffman (Compression=2) /
 //!   CCITT T.4 1-D and 2-D (Compression=3, with optional T4Options
 //!   bit 2 byte-aligned EOLs) / CCITT T.6 (Compression=4)
 //! * Layout: strips (single or multi via
