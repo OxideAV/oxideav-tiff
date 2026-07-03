@@ -1672,3 +1672,45 @@ fn encoder_multi_strip_visible_to_tiffinfo_and_convert() {
         assert_eq!(im_bytes, pixels, "ImageMagick striped-file mismatch");
     }
 }
+
+#[test]
+fn encoder_resolution_and_ascii_metadata_visible_to_tiffinfo() {
+    let pixels = ramp_gray8(16, 16);
+    let page = EncodePage {
+        width: 16,
+        height: 16,
+        kind: EncodePixelFormat::Gray8 { pixels: &pixels },
+        compression: TiffCompression::None,
+        predictor: false,
+        planar: false,
+        tiling: None,
+        bigtiff: false,
+        extras: oxideav_tiff::PageExtras {
+            resolution: Some(oxideav_tiff::PageResolution {
+                x: (300, 1),
+                y: (300, 1),
+                unit: 2,
+            }),
+            software: Some("oxideav-tiff"),
+            date_time: Some("2026:07:04 00:00:00"),
+            ..Default::default()
+        },
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    if let Some(info) = run_tiffinfo(&bytes) {
+        assert!(
+            info.contains("Resolution: 300, 300"),
+            "tiffinfo missing resolution: {info}"
+        );
+        assert!(
+            info.contains("Software: \"oxideav-tiff\""),
+            "tiffinfo missing software string: {info}"
+        );
+        assert!(
+            info.contains("Date & Time: \"2026:07:04 00:00:00\""),
+            "tiffinfo missing datetime: {info}"
+        );
+    } else {
+        eprintln!("skipping: tiffinfo not available");
+    }
+}

@@ -774,6 +774,15 @@ byte-for-byte.
 `EncodePage::extras` (`PageExtras`, all fields default-off) adds the
 page-level metadata writes:
 
+* **Resolution (282 / 283 / 296)** — `PageResolution` writes the
+  §"Physical Dimensions" XResolution / YResolution RATIONALs plus
+  ResolutionUnit (1 none / 2 inch / 3 centimeter, validated).
+* **§8 ASCII fields** — ImageDescription (270), Software (305),
+  DateTime (306, the spec's exact `"YYYY:MM:DD HH:MM:SS"` shape
+  enforced), Artist (315), Copyright (33432). Written per §2 ASCII
+  rules: 7-bit, no embedded NUL, writer-appended terminating NUL,
+  `count = len + 1`.
+
 * **PageNumber (tag 297)** — TIFF 6.0 §"PageNumber", `SHORT × 2` as
   `(page, total)` ("If PageNumber[1] is 0, the total number of pages in
   the document is not available").

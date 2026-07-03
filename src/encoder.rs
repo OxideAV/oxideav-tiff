@@ -99,6 +99,22 @@ pub struct AuxIfdEntry<'a> {
     pub value: &'a [u8],
 }
 
+/// Physical-resolution metadata for one page (TIFF 6.0 §"Physical
+/// Dimensions": XResolution tag 282, YResolution tag 283 — RATIONALs
+/// in pixels per `unit` — and ResolutionUnit tag 296).
+#[derive(Debug, Clone, Copy)]
+pub struct PageResolution {
+    /// XResolution numerator / denominator ("The number of pixels per
+    /// ResolutionUnit in the ImageWidth direction").
+    pub x: (u32, u32),
+    /// YResolution numerator / denominator (ImageLength direction).
+    pub y: (u32, u32),
+    /// ResolutionUnit value: 1 = no absolute unit, 2 = inch (the
+    /// spec's default), 3 = centimeter. Values outside 1..=3 are
+    /// rejected, as are zero denominators.
+    pub unit: u16,
+}
+
 /// Optional per-page additions beyond the raster itself. All fields
 /// default to "absent" — `EncodePage { extras: PageExtras::default(),
 /// .. }` writes exactly the field set previous rounds wrote.
@@ -131,6 +147,28 @@ pub struct PageExtras<'a> {
     /// Write a GPS IFD pointer (tag 34853, LONG / LONG8) to a child
     /// IFD carrying exactly these entries, as for [`Self::exif_ifd`].
     pub gps_ifd: Option<&'a [AuxIfdEntry<'a>]>,
+    /// Write the §"Physical Dimensions" resolution triple:
+    /// XResolution (282) / YResolution (283) RATIONALs and
+    /// ResolutionUnit (296). See [`PageResolution`].
+    pub resolution: Option<PageResolution>,
+    /// Write ImageDescription (tag 270) — TIFF 6.0 §2 ASCII field: the
+    /// encoder appends the required terminating NUL and stores
+    /// `count = len + 1`. The input must be 7-bit ASCII with no
+    /// embedded NUL (rejected precisely otherwise); the same rules
+    /// apply to every ASCII field below.
+    pub description: Option<&'a str>,
+    /// Write Software (tag 305, ASCII): "Name and version number of
+    /// the software package(s) used to create the image."
+    pub software: Option<&'a str>,
+    /// Write DateTime (tag 306, ASCII): "Date and time of image
+    /// creation", in the spec's exact 20-byte format "YYYY:MM:DD
+    /// HH:MM:SS" (19 characters + NUL) — enforced precisely.
+    pub date_time: Option<&'a str>,
+    /// Write Artist (tag 315, ASCII): "Person who created the image."
+    pub artist: Option<&'a str>,
+    /// Write Copyright (tag 33432, ASCII): "Copyright notice of the
+    /// person or organization that claims the copyright to the image."
+    pub copyright: Option<&'a str>,
     /// Split the image into strips of this many rows (TIFF 6.0
     /// §"RowsPerStrip"; the spec recommends strips of about 8K bytes
     /// so readers can stream). `None` keeps the historical
@@ -990,7 +1028,8 @@ fn assign_page_addrs(plan: &PlannedPage, cursor: &mut u64, bigtiff: bool) -> Pla
             BlobId::BitsPerSample
             | BlobId::ColorMapWords
             | BlobId::SampleFormat
-            | BlobId::AuxValue(_) => 2,
+            | BlobId::AuxValue(_)
+            | BlobId::MetaValue(_) => 2,
         };
         if *cursor % align != 0 {
             *cursor += align - (*cursor % align);
@@ -1286,6 +1325,10 @@ enum BlobId {
     /// per-page sequence number so multiple aux values coexist in one
     /// planned page's blob list.
     AuxValue(u32),
+    /// Out-of-line value bytes of one page-level metadata entry
+    /// (resolution RATIONALs, §8 ASCII strings), keyed by its tag —
+    /// unique within a page by construction.
+    MetaValue(u16),
     /// `SampleFormat` (tag 339) SHORT array — one value per component.
     /// For RGB float (3 components = 6 bytes) it spills out of line on
     /// classic TIFF; grayscale (2 bytes) stays inline. SampleFormat = 3
@@ -2374,6 +2417,16 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         count: 1,
         value: IfdValue::Inline(photometric.to_le_bytes().to_vec()),
     });
+    // 270 ImageDescription (ASCII) — TIFF 6.0 §8. Caller-supplied,
+    // NUL-terminated by the writer. Sits between 262 and 273.
+    if let Some(text) = p.extras.description {
+        entries.push(ascii_entry(
+            TAG_IMAGE_DESCRIPTION,
+            text,
+            inline_threshold,
+            &mut externals,
+        )?);
+    }
     // 273 StripOffsets. Omitted entirely for tiled pages — §15: "When
     // the tiling fields … are used, they replace the StripOffsets,
     // StripByteCounts, and RowsPerStrip fields … Do not use both
@@ -2418,6 +2471,43 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
             count: strip_count,
             value: IfdValue::StripByteCounts,
         });
+    }
+    // 282 XResolution / 283 YResolution (RATIONAL) + validation —
+    // TIFF 6.0 §"Physical Dimensions". One RATIONAL is 8 bytes: it
+    // spills out-of-line on classic TIFF (8 > 4) and stays inline on
+    // BigTIFF (8 <= 8). ResolutionUnit (296) is emitted further down
+    // in ascending tag order.
+    if let Some(res) = &p.extras.resolution {
+        if !(1..=3).contains(&res.unit) {
+            return Err(Error::invalid(format!(
+                "TIFF encode: ResolutionUnit must be 1 (none) / 2 (inch) / 3 (centimeter); \
+                 got {}",
+                res.unit
+            )));
+        }
+        if res.x.1 == 0 || res.y.1 == 0 {
+            return Err(Error::invalid(
+                "TIFF encode: X/YResolution denominator must be non-zero",
+            ));
+        }
+        for (tag, (num, den)) in [(TAG_X_RESOLUTION, res.x), (TAG_Y_RESOLUTION, res.y)] {
+            let mut bytes = Vec::with_capacity(8);
+            bytes.extend_from_slice(&num.to_le_bytes());
+            bytes.extend_from_slice(&den.to_le_bytes());
+            let value = if bytes.len() <= inline_threshold {
+                IfdValue::Inline(bytes)
+            } else {
+                let id = BlobId::MetaValue(tag);
+                externals.push((id, bytes));
+                IfdValue::ExternalBlob(id)
+            };
+            entries.push(PageIfdEntry {
+                tag,
+                field_type: TYPE_RATIONAL,
+                count: 1,
+                value,
+            });
+        }
     }
     // 284 PlanarConfiguration (SHORT) — 1 (chunky) or 2 (separate
     // planes) per the page's `planar` flag.
@@ -2471,6 +2561,15 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         }
         _ => {}
     }
+    // 296 ResolutionUnit (SHORT) — companion of 282/283 above.
+    if let Some(res) = &p.extras.resolution {
+        entries.push(PageIfdEntry {
+            tag: TAG_RESOLUTION_UNIT,
+            field_type: TYPE_SHORT,
+            count: 1,
+            value: IfdValue::Inline(res.unit.to_le_bytes().to_vec()),
+        });
+    }
     // 297 PageNumber (SHORT × 2) — TIFF 6.0 §"PageNumber": "PageNumber[0]
     // is the page number" (0-based) and "PageNumber[1] is the total
     // number of pages in the document" (0 = unknown). Written only on
@@ -2486,6 +2585,48 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
             count: 2,
             value: IfdValue::Inline(pn.to_vec()),
         });
+    }
+    // 305 Software / 306 DateTime / 315 Artist (ASCII) — TIFF 6.0 §8.
+    // DateTime is fixed by the spec at exactly "YYYY:MM:DD HH:MM:SS"
+    // (19 characters + NUL, 24-hour clock, one space): enforce the
+    // shape so every written file is conformant.
+    if let Some(text) = p.extras.software {
+        entries.push(ascii_entry(
+            TAG_SOFTWARE,
+            text,
+            inline_threshold,
+            &mut externals,
+        )?);
+    }
+    if let Some(text) = p.extras.date_time {
+        let b = text.as_bytes();
+        let shape_ok = b.len() == 19
+            && b.iter().enumerate().all(|(i, &c)| match i {
+                4 | 7 => c == b':',
+                10 => c == b' ',
+                13 | 16 => c == b':',
+                _ => c.is_ascii_digit(),
+            });
+        if !shape_ok {
+            return Err(Error::invalid(
+                "TIFF encode: DateTime (tag 306) must be exactly \"YYYY:MM:DD HH:MM:SS\" \
+                 (TIFF 6.0 §8: 19 characters + NUL, 24-hour clock)",
+            ));
+        }
+        entries.push(ascii_entry(
+            TAG_DATE_TIME,
+            text,
+            inline_threshold,
+            &mut externals,
+        )?);
+    }
+    if let Some(text) = p.extras.artist {
+        entries.push(ascii_entry(
+            TAG_ARTIST,
+            text,
+            inline_threshold,
+            &mut externals,
+        )?);
     }
     // 317 Predictor (SHORT) — only when a predictor is on. Default
     // (Predictor=1, no prediction) is omitted; the decoder treats an
@@ -2719,6 +2860,16 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         });
     }
 
+    // 33432 Copyright (ASCII) — TIFF 6.0 §8; above every baseline tag,
+    // below the 34665/34853 pointer tags.
+    if let Some(text) = p.extras.copyright {
+        entries.push(ascii_entry(
+            TAG_COPYRIGHT,
+            text,
+            inline_threshold,
+            &mut externals,
+        )?);
+    }
     // 34665 Exif IFD pointer / 34853 GPS IFD pointer (LONG / LONG8) —
     // offsets of the auxiliary child IFDs planned below, resolved at
     // write time. Both sit above every baseline tag in ascending
@@ -2768,6 +2919,41 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         ifd: PageIfd { entries },
         externals,
         children,
+    })
+}
+
+/// Build a TIFF 6.0 §2 ASCII entry: "8-bit byte that contains a 7-bit
+/// ASCII code; the last byte must be NUL (binary zero)". The encoder
+/// appends the NUL (count = len + 1) and rejects non-ASCII bytes and
+/// embedded NULs precisely. Values that fit the variant's value slot
+/// stay inline; larger ones go out-of-line via a page-level blob.
+fn ascii_entry(
+    tag: u16,
+    text: &str,
+    inline_threshold: usize,
+    externals: &mut Vec<(BlobId, Vec<u8>)>,
+) -> Result<PageIfdEntry> {
+    if text.bytes().any(|b| b == 0 || !b.is_ascii()) {
+        return Err(Error::invalid(format!(
+            "TIFF encode: ASCII field (tag {tag}) must be 7-bit ASCII with no embedded NUL \
+             (TIFF 6.0 §2 ASCII type)"
+        )));
+    }
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.push(0);
+    let count = bytes.len() as u64;
+    let value = if bytes.len() <= inline_threshold {
+        IfdValue::Inline(bytes)
+    } else {
+        let id = BlobId::MetaValue(tag);
+        externals.push((id, bytes));
+        IfdValue::ExternalBlob(id)
+    };
+    Ok(PageIfdEntry {
+        tag,
+        field_type: TYPE_ASCII,
+        count,
+        value,
     })
 }
 

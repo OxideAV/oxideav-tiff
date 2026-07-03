@@ -626,3 +626,112 @@ fn bigtiff_two_sub_ifds_spill_out_of_line() {
         t2
     );
 }
+
+// ---------------------------------------------------------------------------
+// Resolution + §8 ASCII metadata
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolution_and_ascii_metadata_roundtrip() {
+    use oxideav_tiff::PageResolution;
+    let px = ramp(8, 8);
+    let extras = PageExtras {
+        resolution: Some(PageResolution {
+            x: (300, 1),
+            y: (600, 2),
+            unit: 2,
+        }),
+        description: Some("An eight by eight ramp"),
+        software: Some("oxideav-tiff test"),
+        date_time: Some("2026:07:04 12:34:56"),
+        artist: Some("OxideAV"),
+        copyright: Some("Copyright test notice"),
+        ..Default::default()
+    };
+    for bigtiff in [false, true] {
+        let page = EncodePage {
+            bigtiff,
+            ..gray_page(&px, 8, 8, extras.clone())
+        };
+        let file = encode_tiff(&page).unwrap();
+        assert_eq!(decode_tiff(&file).unwrap().frame.planes[0].data, px);
+        let hdr = parse_header(&file).unwrap();
+        let (entries, _) =
+            parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
+        let bo = hdr.byte_order;
+        // Ascending tag order held with the new insertions.
+        assert!(entries.windows(2).all(|w| w[0].tag < w[1].tag));
+        let xr = find(&entries, 282).unwrap();
+        assert_eq!((xr.field_type, xr.count), (5, 1));
+        assert_eq!(xr.as_f64_vec(bo).unwrap(), vec![300.0]);
+        let yr = find(&entries, 283).unwrap();
+        assert_eq!(yr.as_f64_vec(bo).unwrap(), vec![300.0], "600/2 = 300");
+        assert_eq!(find(&entries, 296).unwrap().as_u32(bo).unwrap(), 2);
+        for (tag, text) in [
+            (270u16, "An eight by eight ramp"),
+            (305, "oxideav-tiff test"),
+            (306, "2026:07:04 12:34:56"),
+            (315, "OxideAV"),
+            (33432, "Copyright test notice"),
+        ] {
+            let e = find(&entries, tag).unwrap_or_else(|| panic!("tag {tag} missing"));
+            assert_eq!(e.field_type, 2, "tag {tag} is ASCII");
+            assert_eq!(
+                e.count as usize,
+                text.len() + 1,
+                "tag {tag} count = len + NUL"
+            );
+            let mut want = text.as_bytes().to_vec();
+            want.push(0);
+            assert_eq!(e.data, want, "tag {tag} NUL-terminated value");
+        }
+    }
+}
+
+#[test]
+fn metadata_validation_rejects_bad_values() {
+    use oxideav_tiff::PageResolution;
+    let px = ramp(4, 4);
+    // Bad resolution unit.
+    let bad_unit = PageExtras {
+        resolution: Some(PageResolution {
+            x: (72, 1),
+            y: (72, 1),
+            unit: 4,
+        }),
+        ..Default::default()
+    };
+    assert!(encode_tiff(&gray_page(&px, 4, 4, bad_unit)).is_err());
+    // Zero denominator.
+    let bad_den = PageExtras {
+        resolution: Some(PageResolution {
+            x: (72, 0),
+            y: (72, 1),
+            unit: 2,
+        }),
+        ..Default::default()
+    };
+    assert!(encode_tiff(&gray_page(&px, 4, 4, bad_den)).is_err());
+    // Malformed DateTime shapes.
+    for dt in ["2026-07-04 12:34:56", "2026:07:04", "2026:07:04 12:34:5"] {
+        let bad_dt = PageExtras {
+            date_time: Some(dt),
+            ..Default::default()
+        };
+        assert!(
+            encode_tiff(&gray_page(&px, 4, 4, bad_dt)).is_err(),
+            "DateTime {dt:?} must reject"
+        );
+    }
+    // Non-ASCII and embedded-NUL strings.
+    let non_ascii = PageExtras {
+        artist: Some("Karpelès"),
+        ..Default::default()
+    };
+    assert!(encode_tiff(&gray_page(&px, 4, 4, non_ascii)).is_err());
+    let embedded_nul = PageExtras {
+        software: Some("abc\0def"),
+        ..Default::default()
+    };
+    assert!(encode_tiff(&gray_page(&px, 4, 4, embedded_nul)).is_err());
+}

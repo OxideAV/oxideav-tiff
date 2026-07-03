@@ -71,8 +71,15 @@ pub const TAG_RESOLUTION_UNIT: u16 = 296;
 /// PageNumber (TIFF 6.0 §"PageNumber", page 40): SHORT × 2 — the
 /// 0-based page number and the total page count (0 = unknown total).
 pub const TAG_PAGE_NUMBER: u16 = 297;
+/// ImageDescription (TIFF 6.0 §8, page 34): ASCII "string that
+/// describes the subject of the image".
+pub const TAG_IMAGE_DESCRIPTION: u16 = 270;
 pub const TAG_SOFTWARE: u16 = 305;
 pub const TAG_DATE_TIME: u16 = 306;
+/// Artist (TIFF 6.0 §8, page 28): ASCII "person who created the image".
+pub const TAG_ARTIST: u16 = 315;
+/// Copyright (TIFF 6.0 §8, page 31): ASCII copyright notice.
+pub const TAG_COPYRIGHT: u16 = 33432;
 pub const TAG_PREDICTOR: u16 = 317;
 pub const TAG_COLOR_MAP: u16 = 320;
 pub const TAG_EXTRA_SAMPLES: u16 = 338;

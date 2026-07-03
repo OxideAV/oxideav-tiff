@@ -116,7 +116,7 @@ pub const CODEC_ID_STR: &str = "tiff";
 pub use decoder::{decode_tiff, decode_tiff_all, decode_tiff_at, DecodedTiff};
 pub use encoder::{
     encode_tiff, encode_tiff_multi, f16_bits_to_f32, f32_to_f16_bits, AuxIfdEntry, EncodePage,
-    EncodePixelFormat, ExtraSampleKind, PageExtras, RgbColor, TiffCompression,
+    EncodePixelFormat, ExtraSampleKind, PageExtras, PageResolution, RgbColor, TiffCompression,
 };
 pub use error::{Result, TiffError};
 pub use image::{TiffImage, TiffPixelFormat, TiffPlane};
