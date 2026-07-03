@@ -18,7 +18,8 @@
 //!      via a byte-level IFD walker independent of our decoder.
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, TiffCompression, TiffPixelFormat,
+    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    TiffPixelFormat,
 };
 
 /// Pack a logical (L%, a, b) where L is the perceptual 0..100 scale
@@ -142,6 +143,7 @@ fn encoder_cielab8_neutral_gradient_matches_handbuilt() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -177,6 +179,7 @@ fn encoder_cielab8_chromatic_primaries_match_handbuilt() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -210,6 +213,7 @@ fn encoder_cielab8_compressors_lossless() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         decode_tiff(&encode_tiff(&page).unwrap())
             .unwrap()
@@ -235,6 +239,7 @@ fn encoder_cielab8_compressors_lossless() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
         assert_eq!(d.frame.planes[0].data, baseline, "compressor {:?}", c);
@@ -269,6 +274,7 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         decode_tiff(&encode_tiff(&page).unwrap())
             .unwrap()
@@ -291,6 +297,7 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
         assert_eq!(d.frame.planes[0].data, baseline, "predictor only");
@@ -309,6 +316,7 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
             planar: true,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
         assert_eq!(d.frame.planes[0].data, baseline, "planar only");
@@ -327,6 +335,7 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
             planar: false,
             tiling: Some((16, 16)),
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
         assert_eq!(d.frame.planes[0].data, baseline, "tiled chunky");
@@ -345,6 +354,7 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
             planar: true,
             tiling: Some((16, 16)),
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
         assert_eq!(d.frame.planes[0].data, baseline, "tiled planar");
@@ -363,6 +373,7 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
             planar: true,
             tiling: Some((16, 16)),
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
         assert_eq!(d.frame.planes[0].data, baseline, "predictor+planar+tiled");
@@ -395,6 +406,7 @@ fn encoder_cielab_l8_neutral_ramp_matches_handbuilt() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -419,6 +431,7 @@ fn encoder_cielab_l8_predictor_and_compressors() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         decode_tiff(&encode_tiff(&page).unwrap())
             .unwrap()
@@ -444,6 +457,7 @@ fn encoder_cielab_l8_predictor_and_compressors() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
         assert_eq!(
@@ -470,6 +484,7 @@ fn encoder_cielab_l8_tiled_composes() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         decode_tiff(&encode_tiff(&page).unwrap())
             .unwrap()
@@ -488,6 +503,7 @@ fn encoder_cielab_l8_tiled_composes() {
             planar: false,
             tiling: Some((16, 16)),
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         decode_tiff(&encode_tiff(&page).unwrap())
             .unwrap()
@@ -529,6 +545,7 @@ fn encoder_cielab_writes_photometric_and_samples() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let b3 = encode_tiff(&p3).unwrap();
     assert_eq!(read_ifd_entry_value_short(&b3, 262), Some(8));
@@ -545,6 +562,7 @@ fn encoder_cielab_writes_photometric_and_samples() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let b1 = encode_tiff(&p1).unwrap();
     assert_eq!(read_ifd_entry_value_short(&b1, 262), Some(8));
@@ -569,6 +587,7 @@ fn encoder_cielab_multi_page_chain() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
         EncodePage {
             width: 4,
@@ -579,6 +598,7 @@ fn encoder_cielab_multi_page_chain() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
         EncodePage {
             width: 4,
@@ -589,6 +609,7 @@ fn encoder_cielab_multi_page_chain() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
     ];
     let bytes = encode_tiff_multi(&pages).unwrap();

@@ -28,7 +28,8 @@
 
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, TiffCompression, TiffPixelFormat,
+    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    TiffPixelFormat,
 };
 
 /// Full-resolution interleaved (Y, Cb, Cr) with chroma constant over
@@ -67,6 +68,7 @@ fn planar_page<'a>(
         planar: true,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     }
 }
 

@@ -14,8 +14,8 @@
 
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, ExtraSampleKind, TiffCompression,
-    TiffPixelFormat,
+    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, ExtraSampleKind, PageExtras,
+    TiffCompression, TiffPixelFormat,
 };
 
 /// Deterministic RGBA raster; alpha varies independently of color.
@@ -56,6 +56,7 @@ fn page<'a>(
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     }
 }
 
@@ -162,6 +163,7 @@ fn rgba_bigtiff_roundtrip() {
     let rgba = pixels_rgba(w, h);
     let p = EncodePage {
         bigtiff: true,
+        extras: PageExtras::default(),
         ..page(
             w,
             h,

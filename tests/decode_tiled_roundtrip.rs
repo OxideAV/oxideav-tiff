@@ -19,7 +19,7 @@
 //! independent of any external reference.
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, RgbColor, TiffCompression,
+    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, RgbColor, TiffCompression,
 };
 
 // ---- Source-pixel generators (deterministic, layout-independent) ----
@@ -119,6 +119,7 @@ fn gray8_page<'a>(
         planar: false,
         tiling,
         bigtiff: false,
+        extras: PageExtras::default(),
     }
 }
 
@@ -197,10 +198,12 @@ fn tiled_gray16le_partial_edges_match_strip() {
         planar: false,
         tiling: Some((16, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let page_s = EncodePage {
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
         ..page_t.clone()
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
@@ -221,10 +224,12 @@ fn tiled_gray16le_predictor_match_strip() {
         planar: false,
         tiling: Some((16, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let page_s = EncodePage {
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
         ..page_t.clone()
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
@@ -245,10 +250,12 @@ fn tiled_rgb24_partial_edges_match_strip() {
         planar: false,
         tiling: Some((16, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let page_s = EncodePage {
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
         ..page_t.clone()
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
@@ -270,10 +277,12 @@ fn tiled_rgb24_predictor_match_strip() {
         planar: false,
         tiling: Some((16, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let page_s = EncodePage {
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
         ..page_t.clone()
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
@@ -295,10 +304,12 @@ fn tiled_rgb24_nonsquare_tiles_match_strip() {
         planar: false,
         tiling: Some((32, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let page_s = EncodePage {
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
         ..page_t.clone()
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
@@ -327,10 +338,12 @@ fn tiled_palette8_match_strip() {
         planar: false,
         tiling: Some((16, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let page_s = EncodePage {
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
         ..page_t.clone()
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
@@ -372,6 +385,7 @@ fn rgb_planar_tiled_page<'a>(
         planar: true,
         tiling: Some(tile),
         bigtiff: false,
+        extras: PageExtras::default(),
     }
 }
 
@@ -507,6 +521,7 @@ fn tiled_planar_rejected_on_single_sample_formats() {
         planar: true,
         tiling: Some((16, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     });
     assert!(r.is_err(), "planar tiling on Gray8 must be rejected");
 }

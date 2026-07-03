@@ -15,7 +15,7 @@
 
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, RgbColor, TiffCompression,
+    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, RgbColor, TiffCompression,
     TiffPixelFormat,
 };
 
@@ -66,6 +66,7 @@ fn gray_page<'a>(w: u32, h: u32, packed: &'a [u8], compression: TiffCompression)
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     }
 }
 
@@ -180,6 +181,7 @@ fn gray4_bigtiff_roundtrip() {
     let packed = pack4(&nibs, w, h);
     let p = EncodePage {
         bigtiff: true,
+        extras: PageExtras::default(),
         predictor: true,
         ..gray_page(w, h, &packed, TiffCompression::Deflate)
     };
@@ -216,6 +218,7 @@ fn palette4_roundtrip() {
                 planar: false,
                 tiling,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let tiff = encode_tiff(&p).expect("encode failed");
             let got = decode_plane(&tiff, TiffPixelFormat::Rgb24, 3);
@@ -246,6 +249,7 @@ fn subbyte4_ifd_tags() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let tiff = encode_tiff(&p).expect("encode failed");
     let hd = parse_header(&tiff).unwrap();
@@ -287,6 +291,7 @@ fn subbyte4_rejections() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let e = encode_tiff(&p).unwrap_err();
     assert!(format!("{e:?}").contains("1..=16"), "{e:?}");

@@ -31,7 +31,8 @@
 //!      writer remain rejected with a precise error.
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, TiffCompression, TiffPixelFormat,
+    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    TiffPixelFormat,
 };
 
 /// Build a hand-rolled classic-II TIFF for a 3-sample 8-bit chunky
@@ -171,6 +172,7 @@ fn encoder_ycbcr24_neutral_gradient_matches_handbuilt() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -207,6 +209,7 @@ fn encoder_ycbcr24_chromatic_primaries_match_handbuilt() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -238,6 +241,7 @@ fn encoder_ycbcr24_compressors_lossless() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         decode_tiff(&encode_tiff(&page).unwrap())
             .unwrap()
@@ -261,6 +265,7 @@ fn encoder_ycbcr24_compressors_lossless() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
         assert_eq!(d.frame.planes[0].data, baseline, "compressor {:?}", c);
@@ -287,6 +292,7 @@ fn encoder_ycbcr24_444_rejects_ccitt_only() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(encode_tiff(&page).is_err(), "CCITT must reject");
 }
@@ -316,6 +322,7 @@ fn encoder_ycbcr_subsampled_rejects_chunky_predictor_and_tiled_planar() {
             planar: true,
             tiling: Some((16, 16)),
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         assert!(
             encode_tiff(&tiled_planar_page).is_err(),
@@ -334,6 +341,7 @@ fn encoder_ycbcr_subsampled_rejects_chunky_predictor_and_tiled_planar() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         assert!(
             encode_tiff(&pred_page).is_err(),
@@ -389,6 +397,7 @@ fn encoder_ycbcr24_tiled_444_roundtrips_against_strip() {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let tiled = EncodePage {
                 width: w,
@@ -399,6 +408,7 @@ fn encoder_ycbcr24_tiled_444_roundtrips_against_strip() {
                 planar: false,
                 tiling: Some(tile),
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let ds = decode_tiff(&encode_tiff(&strip).unwrap()).unwrap();
             let dt = decode_tiff(&encode_tiff(&tiled).unwrap()).unwrap();
@@ -449,6 +459,7 @@ fn encoder_ycbcr24_planar_444_roundtrips_against_chunky() {
                 planar: false,
                 tiling: tile,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let planar = EncodePage {
                 width: w,
@@ -459,6 +470,7 @@ fn encoder_ycbcr24_planar_444_roundtrips_against_chunky() {
                 planar: true,
                 tiling: tile,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let dc = decode_tiff(&encode_tiff(&chunky).unwrap()).unwrap();
             let dp = decode_tiff(&encode_tiff(&planar).unwrap()).unwrap();
@@ -509,6 +521,7 @@ fn encoder_ycbcr24_predictor_444_roundtrips_against_unpredicted() {
                 planar,
                 tiling: tile,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let predicted = EncodePage {
                 width: w,
@@ -519,6 +532,7 @@ fn encoder_ycbcr24_predictor_444_roundtrips_against_unpredicted() {
                 planar,
                 tiling: tile,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let d0 = decode_tiff(&encode_tiff(&plain).unwrap()).unwrap();
             let d1 = decode_tiff(&encode_tiff(&predicted).unwrap()).unwrap();
@@ -551,6 +565,7 @@ fn encoder_ycbcr24_planar_predictor_compose() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         decode_tiff(&encode_tiff(&page).unwrap())
             .unwrap()
@@ -574,6 +589,7 @@ fn encoder_ycbcr24_planar_predictor_compose() {
                 planar: true,
                 tiling: tile,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
             assert_eq!(
@@ -602,6 +618,7 @@ fn encoder_ycbcr24_subsampled_111_planar_predictor_compose() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         decode_tiff(&encode_tiff(&page).unwrap())
             .unwrap()
@@ -622,6 +639,7 @@ fn encoder_ycbcr24_subsampled_111_planar_predictor_compose() {
         planar: true,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
     assert_eq!(
@@ -649,6 +667,7 @@ fn encoder_ycbcr_subsampled_tiled_rejects_non_multiple_tile() {
         planar: false,
         tiling: Some((16, 18)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(
         encode_tiff(&page).is_err(),
@@ -670,6 +689,7 @@ fn encoder_ycbcr24_rejects_size_mismatch() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(encode_tiff(&page).is_err());
 }
@@ -698,6 +718,7 @@ fn encoder_ycbcr24_bigtiff_composes() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         decode_tiff(&encode_tiff(&page).unwrap())
             .unwrap()
@@ -716,6 +737,7 @@ fn encoder_ycbcr24_bigtiff_composes() {
             planar: false,
             tiling: None,
             bigtiff: true,
+            extras: PageExtras::default(),
         };
         decode_tiff(&encode_tiff(&page).unwrap())
             .unwrap()
@@ -823,6 +845,7 @@ fn encoder_ycbcr24_writes_photometric_samples_subsampling_positioning_rbw() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
 
@@ -860,6 +883,7 @@ fn encoder_ycbcr24_multi_page_chain() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
         EncodePage {
             width: 4,
@@ -870,6 +894,7 @@ fn encoder_ycbcr24_multi_page_chain() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
     ];
     let bytes = encode_tiff_multi(&pages).unwrap();

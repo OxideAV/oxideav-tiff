@@ -26,7 +26,9 @@
 //! input mask and the round-tripped `Gray8` plane the decoder hands
 //! back.
 
-use oxideav_tiff::{decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, TiffCompression};
+use oxideav_tiff::{
+    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+};
 
 /// Build a `(width, height, packed_msb_first_bytes)` triplet for a
 /// width-`w` × height-`h` bilevel image whose pixel at (x, y) is
@@ -72,6 +74,7 @@ fn build_page<'a>(w: u32, h: u32, bytes: &'a [u8], compression: TiffCompression)
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     }
 }
 
@@ -262,6 +265,7 @@ fn t4_2d_rejects_non_bilevel_input() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(encode_tiff(&page).is_err());
 }
@@ -277,6 +281,7 @@ fn t6_rejects_non_bilevel_input() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(encode_tiff(&page).is_err());
 }

@@ -52,6 +52,26 @@ pub fn decode_tiff(input: &[u8]) -> Result<DecodedTiff> {
     })
 }
 
+/// Decode the image IFD at an explicit file offset — for IFDs that are
+/// *not* on the next-IFD chain, e.g. a `SubIFDs` (tag 330) child image
+/// referenced from a parent page. The offset comes from the parent
+/// entry (`find(&entries, TAG_SUB_IFDS)` -> `as_u64_vec`); the file
+/// header still provides the byte order and classic/BigTIFF variant.
+pub fn decode_tiff_at(input: &[u8], ifd_offset: u64) -> Result<DecodedTiff> {
+    let header = parse_header(input)?;
+    let bo = header.byte_order;
+    let variant = header.variant;
+    let (entries, _next_ifd) = parse_ifd(input, bo, variant, ifd_offset)?;
+    let frame = decode_ifd(input, bo, &entries)?;
+    let pf = frame.pixel_format;
+    Ok(DecodedTiff {
+        width: frame.width,
+        height: frame.height,
+        pixel_format: pf,
+        frame,
+    })
+}
+
 /// Decode every IFD in the file (all pages of a multi-page TIFF /
 /// BigTIFF). Returns one [`TiffImage`] per IFD in file order.
 pub fn decode_tiff_all(input: &[u8]) -> Result<Vec<TiffImage>> {

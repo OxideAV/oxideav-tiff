@@ -27,7 +27,7 @@
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::{
     decode_tiff, encode_tiff, f16_bits_to_f32, f32_to_f16_bits, EncodePage, EncodePixelFormat,
-    TiffCompression, TiffPixelFormat,
+    PageExtras, TiffCompression, TiffPixelFormat,
 };
 
 // ---------------------------------------------------------------------------
@@ -182,6 +182,7 @@ fn encode_gray_f16_matrix_decodes_to_display_map() {
                         planar: false,
                         tiling,
                         bigtiff,
+                        extras: PageExtras::default(),
                     };
                     let file = encode_tiff(&page).expect("encode GrayF16");
                     let img = decode_tiff(&file).expect("decode GrayF16");
@@ -217,6 +218,7 @@ fn encode_rgb_f16_matrix_decodes_to_display_map() {
                         planar,
                         tiling,
                         bigtiff: false,
+                        extras: PageExtras::default(),
                     };
                     let file = encode_tiff(&page).expect("encode RgbF16");
                     let img = decode_tiff(&file).expect("decode RgbF16");
@@ -259,6 +261,7 @@ fn encode_f16_nonfinite_samples_render_at_display_floor() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let img = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
     assert_eq!(img.frame.planes[0].data, want);
@@ -281,6 +284,7 @@ fn encode_f16_ifd_fields_and_verbatim_strip() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let file = encode_tiff(&page).unwrap();
     let hdr = parse_header(&file).unwrap();
@@ -337,6 +341,7 @@ fn encode_f16_rejects_ccitt() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(encode_tiff(&page).is_err(), "CCITT is bilevel-only");
 }
@@ -353,6 +358,7 @@ fn encode_gray_f16_rejects_planar() {
         planar: true,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(
         encode_tiff(&page).is_err(),
@@ -372,6 +378,7 @@ fn encode_f16_wrong_buffer_length_rejected() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(encode_tiff(&page).is_err());
 }

@@ -16,7 +16,7 @@
 
 use oxideav_tiff::{
     decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    RgbColor, TiffCompression,
+    PageExtras, RgbColor, TiffCompression,
 };
 
 fn ramp_gray8(w: u32, h: u32) -> Vec<u8> {
@@ -66,6 +66,7 @@ fn bigtiff_header_is_16_bytes_with_magic_43_off_size_8_reserved_0() {
         planar: false,
         tiling: None,
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     // II + 43 + off_size + reserved + first-IFD u64
@@ -95,6 +96,7 @@ fn classic_header_unchanged_when_bigtiff_false() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     assert_eq!(&bytes[0..2], b"II");
@@ -144,6 +146,7 @@ fn bigtiff_strip_fields_use_long8_type_16() {
         planar: false,
         tiling: None,
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let (entries, next) = parse_bigtiff_ifd0(&bytes);
@@ -181,6 +184,7 @@ fn bigtiff_bitspersample_rgb_inlines_into_8byte_slot() {
         planar: false,
         tiling: None,
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let (entries, _next) = parse_bigtiff_ifd0(&bytes);
@@ -209,6 +213,7 @@ fn bigtiff_gray8_roundtrip_uncompressed() {
         planar: false,
         tiling: None,
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -228,6 +233,7 @@ fn bigtiff_gray8_roundtrip_lzw_with_predictor() {
         planar: false,
         tiling: None,
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -247,6 +253,7 @@ fn bigtiff_gray16_roundtrip_deflate() {
         planar: false,
         tiling: None,
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -266,6 +273,7 @@ fn bigtiff_rgb24_roundtrip_packbits() {
         planar: false,
         tiling: None,
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -288,6 +296,7 @@ fn bigtiff_rgb24_planar_lzw_roundtrip() {
         planar: true,
         tiling: None,
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -329,6 +338,7 @@ fn bigtiff_palette8_roundtrip() {
         planar: false,
         tiling: None,
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -359,6 +369,7 @@ fn bigtiff_rgb24_tiled_roundtrip() {
         planar: false,
         tiling: Some((16, 16)),
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -387,6 +398,7 @@ fn bigtiff_multipage_chain() {
             planar: false,
             tiling: None,
             bigtiff: true,
+            extras: PageExtras::default(),
         },
         EncodePage {
             width: 8,
@@ -397,6 +409,7 @@ fn bigtiff_multipage_chain() {
             planar: false,
             tiling: None,
             bigtiff: true,
+            extras: PageExtras::default(),
         },
     ];
     let bytes = encode_tiff_multi(&pages).unwrap();
@@ -427,6 +440,7 @@ fn bigtiff_multipage_must_agree_on_variant() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
         EncodePage {
             width: 8,
@@ -437,6 +451,7 @@ fn bigtiff_multipage_must_agree_on_variant() {
             planar: false,
             tiling: None,
             bigtiff: true,
+            extras: PageExtras::default(),
         },
     ];
     let err = encode_tiff_multi(&pages).unwrap_err();
@@ -468,6 +483,7 @@ fn bigtiff_bilevel_ccitt_mh_roundtrip() {
         planar: false,
         tiling: None,
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();

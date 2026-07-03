@@ -27,7 +27,8 @@
 //!      combinations are rejected with a precise error.
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, TiffCompression, TiffPixelFormat,
+    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    TiffPixelFormat,
 };
 
 // ---------------------------------------------------------------------------
@@ -112,6 +113,7 @@ fn encoded_strip_matches_reference_data_unit_order() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
 
@@ -162,6 +164,7 @@ fn block_uniform_chroma_roundtrips_all_pairs_and_compressors() {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let bytes = encode_tiff(&page).unwrap();
             let d = decode_tiff(&bytes).unwrap();
@@ -198,6 +201,7 @@ fn subsampled_roundtrip_equals_full_resolution_splat() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let full = EncodePage {
         width: w as u32,
@@ -208,6 +212,7 @@ fn subsampled_roundtrip_equals_full_resolution_splat() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let dsub = decode_tiff(&encode_tiff(&sub).unwrap()).unwrap();
     let dfull = decode_tiff(&encode_tiff(&full).unwrap()).unwrap();
@@ -230,6 +235,7 @@ fn bigtiff_subsampled_roundtrips() {
         planar: false,
         tiling: None,
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     // BigTIFF magic 43.
@@ -260,6 +266,7 @@ fn writes_actual_subsampling_factors_in_tag_530() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         assert_eq!(read_short(&bytes, 262), Some(6), "photometric YCbCr");
@@ -300,6 +307,7 @@ fn decoder_reads_handbuilt_subsampled_strip() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let enc = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
     assert_eq!(d.frame.planes[0].data, enc.frame.planes[0].data);
@@ -325,6 +333,7 @@ fn rejects_illegal_subsampling_pair() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(encode_tiff(&page).is_err());
 }
@@ -345,6 +354,7 @@ fn rejects_non_multiple_dimensions() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(encode_tiff(&page).is_err());
 }
@@ -364,6 +374,7 @@ fn rejects_wrong_buffer_length() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(encode_tiff(&page).is_err());
 }
@@ -389,6 +400,7 @@ fn rejects_chunky_predictor_tiled_planar_and_ccitt() {
         planar,
         tiling,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(encode_tiff(&base(TiffCompression::None, true, false, None)).is_err());
     assert!(encode_tiff(&base(TiffCompression::None, false, true, Some((16, 16)))).is_err());
@@ -445,6 +457,7 @@ fn subsampled_tiled_matches_strip() {
                     planar: false,
                     tiling: None,
                     bigtiff: false,
+                    extras: PageExtras::default(),
                 };
                 let tiled = EncodePage {
                     tiling: Some(tile),

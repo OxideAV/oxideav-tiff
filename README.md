@@ -751,6 +751,45 @@ unchanged, and the multi-IFD chain ([`encode_tiff_multi`]) is supported
 as long as every page agrees on the variant (a mixed-variant chain
 errors out — classic and BigTIFF IFD layouts are wire-incompatible).
 
+### Page extras: PageNumber, NewSubfileType, Exif/GPS child IFDs, SubIFDs tree
+
+`EncodePage::extras` (`PageExtras`, all fields default-off) adds the
+page-level metadata writes:
+
+* **PageNumber (tag 297)** — TIFF 6.0 §"PageNumber", `SHORT × 2` as
+  `(page, total)` ("If PageNumber[1] is 0, the total number of pages in
+  the document is not available").
+* **NewSubfileType (254) bits 0–1** — bit 0 "reduced-resolution version
+  of another image", bit 1 "single page of a multi-page image" (bit 2,
+  transparency mask, stays implied by the TransparencyMask pixel
+  format).
+* **Exif (34665) / GPS (34853) child IFDs** — `AuxIfdEntry` lists
+  transported **verbatim** (tag / §2 field type / count / raw
+  little-endian value bytes). The child IFD is plain TIFF 6.0 §2
+  structure: ascending-tag entries, values inline when they fit the
+  variant's slot (4 B classic / 8 B BigTIFF) or out-of-line on a §2
+  word boundary, next-IFD = 0. The writer sorts entries and precisely
+  rejects duplicates, unknown type codes, `value.len() != count ×
+  type_size`, and BigTIFF-only widths on classic pages. No Exif/GPS
+  *semantics* are interpreted on either side — the tag numbers are
+  registered-identifier facts; callers own the entry meanings and can
+  read them back with `parse_header` / `parse_ifd` at the pointer
+  offset (`Entry::data` carries the raw value bytes).
+* **SubIFDs (330) child image tree** — each element is a complete
+  `EncodePage` (full compressor / predictor / planar / tiling matrix)
+  whose IFD hangs off the parent's tag-330 LONG / LONG8 offset array
+  instead of the next-IFD chain; children nest (depth-capped at 8) and
+  the offsets array spills out-of-line exactly like the strip arrays
+  when it outgrows the value slot. `decode_tiff_at(file, offset)`
+  decodes a child image from its tag-330 offset; `decode_tiff_all`
+  ignores children by construction (they are not chained pages).
+
+Round-trips are byte-inspected with the crate's own public
+`parse_ifd` (verbatim aux values, sorted tags, zero child next-IFD,
+inline-vs-spilled tag-330 array on classic + BigTIFF), and `tiffinfo`
+(black-box) confirms the Page Number / multi-page / SubIFD-pointer
+lines.
+
 ## Backlog (not yet implemented)
 
 The compression schemes, photometrics, and layout features described
@@ -773,7 +812,11 @@ remaining gaps are:
   optional uncompressed-mode extension, but the encoder never emits it
   (it is a bit-rate control extension, not a compression win for
   facsimile content).
-- **DNG / GeoTIFF / EXIF blob extraction.**
+- **DNG / GeoTIFF / Exif tag semantics.** The child-IFD *mechanics* are
+  in (write side via `PageExtras::exif_ifd` / `gps_ifd` / `sub_ifds`;
+  read side via `parse_ifd` at the pointer offset + `decode_tiff_at`
+  for SubIFD images), but the crate interprets no Exif/GPS/DNG/GeoTIFF
+  tag meanings.
 - **Subsampled-YCbCr residual combinations** — chunky subsampled YCbCr
   encodes and decodes in both strip and tiled layouts (TIFF 6.0 §21),
   4:4:4 composes with `PlanarConfiguration = 2` and `Predictor = 2`,

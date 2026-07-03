@@ -16,7 +16,9 @@
 //! sub-byte tile path reads (None / PackBits / LZW / Deflate / ZSTD) are
 //! all driven so the round-trip is independent of the per-tile codec.
 
-use oxideav_tiff::{decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, TiffCompression};
+use oxideav_tiff::{
+    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+};
 
 /// Pack an MSB-first 1-bit bilevel raster with a deterministic pseudo-random
 /// pattern (a cheap hash of x, y so runs are uneven and tile boundaries fall
@@ -51,6 +53,7 @@ fn encode_bilevel(
         planar: false,
         tiling,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     encode_tiff(&page).expect("encode bilevel")
 }
@@ -71,6 +74,7 @@ fn encode_mask(
         planar: false,
         tiling,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     encode_tiff(&page).expect("encode mask")
 }
@@ -183,6 +187,7 @@ fn bigtiff_tiled_bilevel_matches_strip() {
         planar: false,
         tiling: None,
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let page_tiled = EncodePage {
         tiling: Some(tile),
@@ -208,6 +213,7 @@ fn tile_dims_must_be_multiple_of_16() {
         planar: false,
         tiling: Some((8, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(encode_tiff(&page).is_err(), "tile_w=8 must be rejected");
 }
@@ -225,6 +231,7 @@ fn ccitt_tiling_still_rejected() {
         planar: false,
         tiling: Some((16, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(
         encode_tiff(&page).is_err(),

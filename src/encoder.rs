@@ -74,6 +74,77 @@ impl ExtraSampleKind {
     }
 }
 
+/// One raw entry of a caller-supplied auxiliary child IFD (Exif / GPS
+/// pointer targets — see [`PageExtras::exif_ifd`] /
+/// [`PageExtras::gps_ifd`]).
+///
+/// The encoder transports the entry verbatim: `tag`, `field_type`
+/// (a TIFF 6.0 §2 type code — BYTE 1 / ASCII 2 / SHORT 3 / LONG 4 /
+/// RATIONAL 5 / SBYTE 6 / UNDEFINED 7 / SSHORT 8 / SLONG 9 /
+/// SRATIONAL 10 / FLOAT 11 / DOUBLE 12, plus the BigTIFF LONG8 16 /
+/// SLONG8 17 / IFD8 18 widths on a BigTIFF page), `count`, and the
+/// raw **little-endian** `value` bytes (the encoder always writes II
+/// files). `value.len()` must equal `count × type_size(field_type)`;
+/// values that fit the variant's inline threshold (4 bytes classic /
+/// 8 bytes BigTIFF) are packed into the entry's value slot, larger
+/// ones are placed out-of-line at an even offset per §2 ("The value
+/// is expected to begin on a word boundary"). No tag semantics are
+/// interpreted — the caller owns the meaning of the child IFD's
+/// entries; the crate owns only the §2 IFD structure.
+#[derive(Debug, Clone)]
+pub struct AuxIfdEntry<'a> {
+    pub tag: u16,
+    pub field_type: u16,
+    pub count: u64,
+    pub value: &'a [u8],
+}
+
+/// Optional per-page additions beyond the raster itself. All fields
+/// default to "absent" — `EncodePage { extras: PageExtras::default(),
+/// .. }` writes exactly the field set previous rounds wrote.
+#[derive(Debug, Clone, Default)]
+pub struct PageExtras<'a> {
+    /// Write the `PageNumber` field (tag 297, TIFF 6.0 §"PageNumber",
+    /// SHORT × 2) as `(page, total)`: "PageNumber[0] is the page
+    /// number" (0-based) and "PageNumber[1] is the total number of
+    /// pages in the document. If PageNumber[1] is 0, the total number
+    /// of pages in the document is not available."
+    pub page_number: Option<(u16, u16)>,
+    /// Set bit 0 of `NewSubfileType` (tag 254, TIFF 6.0 page 36):
+    /// "the image is a reduced-resolution version of another image in
+    /// this TIFF file" — the natural marker for a thumbnail page
+    /// (either a page of the main chain or a [`Self::sub_ifds`]
+    /// child).
+    pub reduced_resolution: bool,
+    /// Set bit 1 of `NewSubfileType` (tag 254): "the image is a
+    /// single page of a multi-page image (see the PageNumber field
+    /// description)."
+    pub multi_page: bool,
+    /// Write an Exif IFD pointer (tag 34665, LONG / LONG8) to a child
+    /// IFD carrying exactly these entries. The child IFD is a plain
+    /// TIFF 6.0 §2 IFD (entry count + ascending-tag entries +
+    /// next-IFD = 0) whose entries are transported verbatim — the
+    /// crate does not interpret Exif semantics. Entries are sorted by
+    /// tag; duplicate tags, unknown type codes, and value/count size
+    /// mismatches are rejected precisely.
+    pub exif_ifd: Option<&'a [AuxIfdEntry<'a>]>,
+    /// Write a GPS IFD pointer (tag 34853, LONG / LONG8) to a child
+    /// IFD carrying exactly these entries, as for [`Self::exif_ifd`].
+    pub gps_ifd: Option<&'a [AuxIfdEntry<'a>]>,
+    /// Write a `SubIFDs` tree (tag 330, LONG / LONG8 × N): each
+    /// element is a complete child *image* page — strips / tiles,
+    /// compression, predictor, planar and BigTIFF-variant handling
+    /// identical to a main-chain page — whose IFD is referenced from
+    /// the parent's tag-330 offset array instead of the next-IFD
+    /// chain (child next-IFD pointers are 0). The child-IFD mechanism
+    /// is plain §2 IFD structure; children may nest their own
+    /// `sub_ifds` (depth-capped). A child's `bigtiff` flag is ignored
+    /// — the variant is fixed by the root page. Use
+    /// [`crate::decoder::decode_tiff_at`] to decode a child image
+    /// from its tag-330 offset.
+    pub sub_ifds: &'a [EncodePage<'a>],
+}
+
 /// Description of one image page being written.
 ///
 /// `pixels` is row-major, packed (no padding between rows). For
@@ -169,6 +240,11 @@ pub struct EncodePage<'a> {
     /// (all classic or all BigTIFF); mixing is rejected with a precise
     /// error.
     pub bigtiff: bool,
+    /// Optional page additions: `PageNumber` (297) / `NewSubfileType`
+    /// bits 0–1, an Exif (34665) and/or GPS (34853) child IFD carrying
+    /// caller-supplied entries verbatim, and a `SubIFDs` (330) child
+    /// image tree. `PageExtras::default()` writes none of them.
+    pub extras: PageExtras<'a>,
 }
 
 /// Pixel layouts the encoder knows how to write.
@@ -708,6 +784,23 @@ struct PlannedPage {
     strips: Vec<Vec<u8>>,
     ifd: PageIfd,
     externals: Vec<(BlobId, Vec<u8>)>,
+    /// Child IFDs referenced from this page's IFD instead of the
+    /// next-IFD chain: tag-330 SubIFD image pages and the tag-34665 /
+    /// tag-34853 auxiliary metadata IFDs (which carry no strips). Laid
+    /// out in file order after the page's own payload, before its IFD,
+    /// so every child offset is known when the parent entry resolves.
+    children: Vec<(ChildLink, PlannedPage)>,
+}
+
+/// Which parent entry references a planned child IFD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildLink {
+    /// Tag 330 SubIFDs — child image page (one of possibly several).
+    SubIfd,
+    /// Tag 34665 — auxiliary metadata IFD (entries only, no image).
+    Exif,
+    /// Tag 34853 — auxiliary metadata IFD (entries only, no image).
+    Gps,
 }
 
 /// Encode a single-page TIFF file. Produces the complete byte
@@ -753,20 +846,16 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
     // pass. The IFD offset of page N+1 is the next-IFD field of
     // page N's IFD.
 
-    // Variant-dependent constants. All addresses go through these so the
-    // classic / BigTIFF write paths share one set of loops.
+    // Variant-dependent header size; the remaining per-variant
+    // constants (entry / count / next-IFD sizes, inline threshold,
+    // array alignment) live in `assign_page_addrs` / `write_page`,
+    // which handle each page and its child-IFD tree recursively.
     let header_size: u64 = if bigtiff { 16 } else { 8 };
-    let entry_size: u64 = if bigtiff { 20 } else { 12 }; // u16+u16+count+value-or-offset
-    let count_size: u64 = if bigtiff { 8 } else { 2 }; // IFD entry-count field
-    let next_ifd_size: u64 = if bigtiff { 8 } else { 4 }; // next-IFD slot
-    let inline_threshold: usize = if bigtiff { 8 } else { 4 };
-    let offset_bytes: usize = if bigtiff { 8 } else { 4 }; // value-or-offset slot width
-    let array_align: u64 = if bigtiff { 8 } else { 4 }; // LONG8 vs LONG alignment
 
     // ---- Sizing pass: per-page, derive the on-disk layout ----
     let mut planned: Vec<PlannedPage> = Vec::with_capacity(pages.len());
     for p in pages {
-        let plan = plan_page_full(p, bigtiff)?;
+        let plan = plan_page_full(p, bigtiff, 0)?;
         planned.push(plan);
     }
 
@@ -776,87 +865,26 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
     // For each page we lay out:
     // [compressed strip(s) / tile(s)][external blobs][StripOffsets /
     // ByteCounts LONG (classic) or LONG8 (BigTIFF) arrays, only when
-    // count > 1][IFD].
+    // count > 1][child IFDs, recursively][SubIFDs offsets array, when
+    // out-of-line][IFD].
     //
     // We need to know the IFD offset *before* writing it (it goes in
     // the previous IFD's next-IFD slot or in the header for the
-    // first page), so we walk pages once to assign byte ranges. The
-    // StripOffsets / StripByteCounts arrays are written out-of-line
-    // only when there are multiple strips/tiles; a single-strip chunky
-    // page keeps both inline in the IFD value slot.
+    // first page), so we walk pages once to assign byte ranges. Child
+    // IFDs (tag-330 SubIFD image pages, tag-34665/34853 auxiliary
+    // IFDs) are laid out before their parent's IFD so the parent
+    // entry's offset(s) are known at write time; the recursion mirrors
+    // the child tree.
     let mut cursor: u64 = header_size;
-    struct PlannedPageAddr {
-        // One (offset, size) per strip / tile, in storage order.
-        strips: Vec<(u64, u64)>,
-        externals: Vec<(BlobId, u64, u64)>, // (id, offset, size)
-        // File offsets of the out-of-line StripOffsets / StripByteCounts
-        // arrays (only Some when there is more than one strip/tile).
-        strip_offsets_array: Option<u64>,
-        strip_byte_counts_array: Option<u64>,
-        ifd_offset: u64,
-    }
     let mut addrs: Vec<PlannedPageAddr> = Vec::with_capacity(planned.len());
     for plan in &planned {
-        // Strip / tile payloads, laid out contiguously in storage order.
-        let mut strip_addrs = Vec::with_capacity(plan.strips.len());
-        for strip in &plan.strips {
-            strip_addrs.push((cursor, strip.len() as u64));
-            cursor += strip.len() as u64;
-        }
-        let mut ext_addrs = Vec::with_capacity(plan.externals.len());
-        for (id, blob) in &plan.externals {
-            // SHORT arrays are 2-byte aligned; RATIONAL arrays are
-            // 4-byte aligned (each value is a 4-byte LONG numerator
-            // followed by a 4-byte LONG denominator, so a 4-byte
-            // alignment is the natural one). The 4-byte choice is
-            // a safe superset for the SHORT blobs too.
-            let align: u64 = match id {
-                BlobId::ReferenceBlackWhite => 4,
-                BlobId::BitsPerSample | BlobId::ColorMapWords | BlobId::SampleFormat => 2,
-            };
-            if cursor % align != 0 {
-                cursor += align - (cursor % align);
-            }
-            ext_addrs.push((*id, cursor, blob.len() as u64));
-            cursor += blob.len() as u64;
-        }
-        // Out-of-line StripOffsets / StripByteCounts arrays for
-        // multi-strip / multi-tile pages. Classic TIFF uses LONG
-        // (4 bytes per value); BigTIFF uses LONG8 (8 bytes per value),
-        // so the alignment + per-entry stride both follow the variant.
-        let (strip_offsets_array, strip_byte_counts_array) = if plan.strips.len() > 1 {
-            if cursor % array_align != 0 {
-                cursor += array_align - (cursor % array_align);
-            }
-            let so = cursor;
-            cursor += array_align * plan.strips.len() as u64;
-            let sbc = cursor;
-            cursor += array_align * plan.strips.len() as u64;
-            (Some(so), Some(sbc))
-        } else {
-            (None, None)
-        };
-        // IFD must be 2-byte aligned (entries start with u16 fields).
-        if cursor % 2 != 0 {
-            cursor += 1;
-        }
-        let ifd_offset = cursor;
-        // count(2 or 8) + entries × (12 or 20) + next_ifd(4 or 8)
-        let ifd_size = count_size + (plan.ifd.entries.len() as u64) * entry_size + next_ifd_size;
-        cursor += ifd_size;
-        addrs.push(PlannedPageAddr {
-            strips: strip_addrs,
-            externals: ext_addrs,
-            strip_offsets_array,
-            strip_byte_counts_array,
-            ifd_offset,
-        });
+        addrs.push(assign_page_addrs(plan, &mut cursor, bigtiff));
         // Classic TIFF caps every offset (and therefore the total file
         // size if the IFD is at the end of the file) at u32::MAX.
         // BigTIFF lifts the cap to the full u64 range — there is no
         // documented BigTIFF size ceiling in the Adobe Pagemaker 6.0
         // design beyond what u64 can express.
-        if !bigtiff && (ifd_offset > u32::MAX as u64 || cursor > u32::MAX as u64) {
+        if !bigtiff && cursor > u32::MAX as u64 {
             return Err(Error::invalid(
                 "TIFF encode: classic-TIFF 32-bit offset overflow (would need BigTIFF — set \
                  EncodePage::bigtiff = true)",
@@ -887,6 +915,149 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
     }
 
     for (i, (plan, addr)) in planned.iter().zip(addrs.iter()).enumerate() {
+        // Next-IFD pointer target: the following top-level page (child
+        // IFDs never join the next-IFD chain).
+        let next_offset: u64 = if i + 1 < addrs.len() {
+            addrs[i + 1].ifd_offset
+        } else {
+            0
+        };
+        write_page(&mut out, plan, addr, bigtiff, next_offset)?;
+    }
+    Ok(out)
+}
+
+/// Per-page/per-child on-disk address plan. One instance per
+/// [`PlannedPage`], mirroring its child tree.
+struct PlannedPageAddr {
+    // One (offset, size) per strip / tile, in storage order.
+    strips: Vec<(u64, u64)>,
+    externals: Vec<(BlobId, u64, u64)>, // (id, offset, size)
+    // File offsets of the out-of-line StripOffsets / StripByteCounts
+    // arrays (only Some when there is more than one strip/tile).
+    strip_offsets_array: Option<u64>,
+    strip_byte_counts_array: Option<u64>,
+    /// File offset of the out-of-line SubIFDs (tag 330) offsets array —
+    /// only Some when the child count doesn't fit the value slot.
+    sub_ifd_array: Option<u64>,
+    ifd_offset: u64,
+    children: Vec<(ChildLink, PlannedPageAddr)>,
+}
+
+/// Assign file addresses for one planned page (and, recursively, its
+/// child IFDs), advancing `cursor`. Layout order: strip payloads,
+/// external blobs, out-of-line strip arrays, child pages (recursively),
+/// out-of-line SubIFDs offset array, then the page's own IFD.
+fn assign_page_addrs(plan: &PlannedPage, cursor: &mut u64, bigtiff: bool) -> PlannedPageAddr {
+    let entry_size: u64 = if bigtiff { 20 } else { 12 };
+    let count_size: u64 = if bigtiff { 8 } else { 2 };
+    let next_ifd_size: u64 = if bigtiff { 8 } else { 4 };
+    let inline_threshold: u64 = if bigtiff { 8 } else { 4 };
+    let array_align: u64 = if bigtiff { 8 } else { 4 };
+
+    // Strip / tile payloads, laid out contiguously in storage order.
+    let mut strip_addrs = Vec::with_capacity(plan.strips.len());
+    for strip in &plan.strips {
+        strip_addrs.push((*cursor, strip.len() as u64));
+        *cursor += strip.len() as u64;
+    }
+    let mut ext_addrs = Vec::with_capacity(plan.externals.len());
+    for (id, blob) in &plan.externals {
+        // SHORT arrays are 2-byte aligned; RATIONAL arrays are
+        // 4-byte aligned (each value is a 4-byte LONG numerator
+        // followed by a 4-byte LONG denominator, so a 4-byte
+        // alignment is the natural one). The 4-byte choice is
+        // a safe superset for the SHORT blobs too. Auxiliary child-IFD
+        // values only need the §2 word boundary (even offset).
+        let align: u64 = match id {
+            BlobId::ReferenceBlackWhite => 4,
+            BlobId::BitsPerSample
+            | BlobId::ColorMapWords
+            | BlobId::SampleFormat
+            | BlobId::AuxValue(_) => 2,
+        };
+        if *cursor % align != 0 {
+            *cursor += align - (*cursor % align);
+        }
+        ext_addrs.push((*id, *cursor, blob.len() as u64));
+        *cursor += blob.len() as u64;
+    }
+    // Out-of-line StripOffsets / StripByteCounts arrays for
+    // multi-strip / multi-tile pages. Classic TIFF uses LONG
+    // (4 bytes per value); BigTIFF uses LONG8 (8 bytes per value),
+    // so the alignment + per-entry stride both follow the variant.
+    let (strip_offsets_array, strip_byte_counts_array) = if plan.strips.len() > 1 {
+        if *cursor % array_align != 0 {
+            *cursor += array_align - (*cursor % array_align);
+        }
+        let so = *cursor;
+        *cursor += array_align * plan.strips.len() as u64;
+        let sbc = *cursor;
+        *cursor += array_align * plan.strips.len() as u64;
+        (Some(so), Some(sbc))
+    } else {
+        (None, None)
+    };
+    // Child IFDs (SubIFD image pages + Exif / GPS auxiliary IFDs),
+    // recursively, before the parent IFD so their offsets are known
+    // when the parent entry resolves.
+    let children: Vec<(ChildLink, PlannedPageAddr)> = plan
+        .children
+        .iter()
+        .map(|(link, child)| (*link, assign_page_addrs(child, cursor, bigtiff)))
+        .collect();
+    // Out-of-line SubIFDs offsets array, when the tag-330 count
+    // doesn't fit the value slot (same LONG / LONG8 shape as the
+    // strip arrays).
+    let n_subs = children
+        .iter()
+        .filter(|(l, _)| *l == ChildLink::SubIfd)
+        .count() as u64;
+    let sub_ifd_array = if n_subs * array_align > inline_threshold {
+        if *cursor % array_align != 0 {
+            *cursor += array_align - (*cursor % array_align);
+        }
+        let at = *cursor;
+        *cursor += array_align * n_subs;
+        Some(at)
+    } else {
+        None
+    };
+    // IFD must be 2-byte aligned (entries start with u16 fields).
+    if *cursor % 2 != 0 {
+        *cursor += 1;
+    }
+    let ifd_offset = *cursor;
+    // count(2 or 8) + entries × (12 or 20) + next_ifd(4 or 8)
+    *cursor += count_size + (plan.ifd.entries.len() as u64) * entry_size + next_ifd_size;
+    PlannedPageAddr {
+        strips: strip_addrs,
+        externals: ext_addrs,
+        strip_offsets_array,
+        strip_byte_counts_array,
+        sub_ifd_array,
+        ifd_offset,
+        children,
+    }
+}
+
+/// Write one planned page (and, recursively, its child IFDs) into the
+/// output buffer at its assigned addresses. `next_ifd` is the value of
+/// this page's next-IFD slot (0 for the last page of the chain and for
+/// every child IFD).
+fn write_page(
+    out: &mut [u8],
+    plan: &PlannedPage,
+    addr: &PlannedPageAddr,
+    bigtiff: bool,
+    next_ifd: u64,
+) -> Result<()> {
+    let entry_size: usize = if bigtiff { 20 } else { 12 };
+    let count_size: usize = if bigtiff { 8 } else { 2 };
+    let inline_threshold: usize = if bigtiff { 8 } else { 4 };
+    let offset_bytes: usize = if bigtiff { 8 } else { 4 };
+    let array_align: usize = if bigtiff { 8 } else { 4 };
+    {
         // Strip / tile payload(s).
         for (strip, (off, size)) in plan.strips.iter().zip(addr.strips.iter()) {
             assert_eq!(strip.len() as u64, *size);
@@ -899,12 +1070,33 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
             assert_eq!(blob.len() as u64, *size);
             out[*off as usize..(*off + *size) as usize].copy_from_slice(blob);
         }
+        // Child IFDs — never part of the next-IFD chain.
+        for ((_, child_plan), (_, child_addr)) in plan.children.iter().zip(addr.children.iter()) {
+            write_page(out, child_plan, child_addr, bigtiff, 0)?;
+        }
+        // Out-of-line SubIFDs (tag 330) offsets array.
+        if let Some(at) = addr.sub_ifd_array {
+            let subs: Vec<u64> = addr
+                .children
+                .iter()
+                .filter(|(l, _)| *l == ChildLink::SubIfd)
+                .map(|(_, a)| a.ifd_offset)
+                .collect();
+            for (k, off) in subs.iter().enumerate() {
+                let slot = at as usize + k * array_align;
+                if bigtiff {
+                    out[slot..slot + 8].copy_from_slice(&off.to_le_bytes());
+                } else {
+                    out[slot..slot + 4].copy_from_slice(&(*off as u32).to_le_bytes());
+                }
+            }
+        }
         // Out-of-line StripOffsets / StripByteCounts arrays (only present
         // for multi-strip / multi-tile pages). Classic TIFF writes
         // 4 bytes per entry (LONG); BigTIFF writes 8 bytes (LONG8).
         if let Some(so) = addr.strip_offsets_array {
             for (k, (off, _)) in addr.strips.iter().enumerate() {
-                let slot = so as usize + k * (array_align as usize);
+                let slot = so as usize + k * array_align;
                 if bigtiff {
                     out[slot..slot + 8].copy_from_slice(&off.to_le_bytes());
                 } else {
@@ -914,7 +1106,7 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
         }
         if let Some(sbc) = addr.strip_byte_counts_array {
             for (k, (_, size)) in addr.strips.iter().enumerate() {
-                let slot = sbc as usize + k * (array_align as usize);
+                let slot = sbc as usize + k * array_align;
                 if bigtiff {
                     out[slot..slot + 8].copy_from_slice(&size.to_le_bytes());
                 } else {
@@ -932,14 +1124,14 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
             out[ifd_off..ifd_off + 2]
                 .copy_from_slice(&(plan.ifd.entries.len() as u16).to_le_bytes());
         }
-        let entries_start = ifd_off + count_size as usize;
-        let next_ifd_off = entries_start + plan.ifd.entries.len() * (entry_size as usize);
+        let entries_start = ifd_off + count_size;
+        let next_ifd_off = entries_start + plan.ifd.entries.len() * entry_size;
         // Resolve each entry's value-or-offset slot. The entry layout
         // differs between variants:
         //   classic: tag(2) + type(2) + count(4)  + value/offset(4)   = 12 bytes
         //   BigTIFF: tag(2) + type(2) + count(8)  + value/offset(8)   = 20 bytes
         for (k, e) in plan.ifd.entries.iter().enumerate() {
-            let entry_off = entries_start + k * (entry_size as usize);
+            let entry_off = entries_start + k * entry_size;
             out[entry_off..entry_off + 2].copy_from_slice(&e.tag.to_le_bytes());
             out[entry_off + 2..entry_off + 4].copy_from_slice(&e.field_type.to_le_bytes());
             if bigtiff {
@@ -1011,28 +1203,73 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
                         slot.copy_from_slice(&(*off as u32).to_le_bytes());
                     }
                 }
+                IfdValue::ChildIfds(link) => {
+                    // Offsets of this page's planned children carrying
+                    // the entry's link, in planning order.
+                    let offs: Vec<u64> = addr
+                        .children
+                        .iter()
+                        .filter(|(l, _)| *l == *link)
+                        .map(|(_, a)| a.ifd_offset)
+                        .collect();
+                    if offs.is_empty() {
+                        return Err(Error::invalid(
+                            "TIFF encode: child-IFD entry with no planned child",
+                        ));
+                    }
+                    if *link == ChildLink::SubIfd {
+                        if let Some(at) = addr.sub_ifd_array {
+                            // Out-of-line LONG / LONG8 offsets array
+                            // (written above); value slot holds its
+                            // file offset.
+                            if bigtiff {
+                                slot.copy_from_slice(&at.to_le_bytes());
+                            } else {
+                                slot.copy_from_slice(&(at as u32).to_le_bytes());
+                            }
+                        } else {
+                            // The child offsets fit the value slot
+                            // (single child; a lone LONG8 exactly
+                            // fills the BigTIFF slot).
+                            for (k, off) in offs.iter().enumerate() {
+                                let at = k * offset_bytes;
+                                if bigtiff {
+                                    slot[at..at + 8].copy_from_slice(&off.to_le_bytes());
+                                } else {
+                                    slot[at..at + 4].copy_from_slice(&(*off as u32).to_le_bytes());
+                                }
+                            }
+                        }
+                    } else {
+                        // Exif / GPS: exactly one child IFD offset.
+                        if bigtiff {
+                            slot.copy_from_slice(&offs[0].to_le_bytes());
+                        } else {
+                            slot.copy_from_slice(&(offs[0] as u32).to_le_bytes());
+                        }
+                    }
+                }
             }
         }
         // Next-IFD pointer.
-        let next_offset: u64 = if i + 1 < addrs.len() {
-            addrs[i + 1].ifd_offset
-        } else {
-            0
-        };
         if bigtiff {
-            out[next_ifd_off..next_ifd_off + 8].copy_from_slice(&next_offset.to_le_bytes());
+            out[next_ifd_off..next_ifd_off + 8].copy_from_slice(&next_ifd.to_le_bytes());
         } else {
-            out[next_ifd_off..next_ifd_off + 4]
-                .copy_from_slice(&(next_offset as u32).to_le_bytes());
+            out[next_ifd_off..next_ifd_off + 4].copy_from_slice(&(next_ifd as u32).to_le_bytes());
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BlobId {
     BitsPerSample,
     ColorMapWords,
+    /// Out-of-line value bytes of one auxiliary child-IFD entry
+    /// (Exif / GPS — see [`AuxIfdEntry`]). The payload carries a
+    /// per-page sequence number so multiple aux values coexist in one
+    /// planned page's blob list.
+    AuxValue(u32),
     /// `SampleFormat` (tag 339) SHORT array — one value per component.
     /// For RGB float (3 components = 6 bytes) it spills out of line on
     /// classic TIFF; grayscale (2 bytes) stays inline. SampleFormat = 3
@@ -1060,6 +1297,13 @@ enum IfdValue {
     StripByteCounts,
     /// Reference to an external blob attached to this page.
     ExternalBlob(BlobId),
+    /// Resolved at write time: the file offset(s) of this page's
+    /// planned child IFD(s) with the given link. `Exif` / `Gps` are a
+    /// single LONG / LONG8 offset (inline); `SubIfd` is an offset per
+    /// child — inline when it fits the variant's value slot, otherwise
+    /// an out-of-line LONG / LONG8 array exactly like the strip
+    /// arrays.
+    ChildIfds(ChildLink),
 }
 
 #[derive(Debug, Clone)]
@@ -1078,7 +1322,17 @@ struct PageIfd {
     entries: Vec<PageIfdEntry>,
 }
 
-fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
+/// Depth cap for the tag-330 SubIFDs tree — nested `sub_ifds` beyond
+/// this bound are rejected (defends the recursive planner against a
+/// pathologically deep caller-constructed tree).
+const MAX_SUB_IFD_DEPTH: usize = 8;
+
+fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<PlannedPage> {
+    if depth > MAX_SUB_IFD_DEPTH {
+        return Err(Error::invalid(format!(
+            "TIFF encode: SubIFDs (tag 330) tree deeper than {MAX_SUB_IFD_DEPTH} levels"
+        )));
+    }
     // CCITT schemes are bilevel-only per TIFF 6.0 §10 / §11. Both the
     // generic Bilevel input and the TransparencyMask variant carry 1-bit
     // data with identical on-disk packing and so satisfy that gate.
@@ -1963,11 +2217,21 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     // multi-page reader can spot the mask IFD without consulting
     // PhotometricInterpretation. Other bits stay clear; we never
     // emit reduced-resolution or generic multi-page-numbering hints.
-    let new_subfile_type: u32 = if matches!(p.kind, EncodePixelFormat::TransparencyMask { .. }) {
+    // Bits 0 (reduced-resolution) and 1 (single page of a multi-page
+    // image) are caller-driven via `PageExtras`; bit 2 is implied by
+    // the TransparencyMask pixel format.
+    let mut new_subfile_type: u32 = if matches!(p.kind, EncodePixelFormat::TransparencyMask { .. })
+    {
         1 << 2
     } else {
         0
     };
+    if p.extras.reduced_resolution {
+        new_subfile_type |= 1 << 0;
+    }
+    if p.extras.multi_page {
+        new_subfile_type |= 1 << 1;
+    }
     entries.push(PageIfdEntry {
         tag: TAG_NEW_SUBFILE_TYPE,
         field_type: TYPE_LONG,
@@ -2124,6 +2388,22 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         }
         _ => {}
     }
+    // 297 PageNumber (SHORT × 2) — TIFF 6.0 §"PageNumber": "PageNumber[0]
+    // is the page number" (0-based) and "PageNumber[1] is the total
+    // number of pages in the document" (0 = unknown). Written only on
+    // caller request; two SHORTs = 4 bytes, always inline. Sits between
+    // 293 (T6Options) and 317 (Predictor) in ascending tag order.
+    if let Some((page_no, total)) = p.extras.page_number {
+        let mut pn = [0u8; 4];
+        pn[..2].copy_from_slice(&page_no.to_le_bytes());
+        pn[2..].copy_from_slice(&total.to_le_bytes());
+        entries.push(PageIfdEntry {
+            tag: TAG_PAGE_NUMBER,
+            field_type: TYPE_SHORT,
+            count: 2,
+            value: IfdValue::Inline(pn.to_vec()),
+        });
+    }
     // 317 Predictor (SHORT) — only when a predictor is on. Default
     // (Predictor=1, no prediction) is omitted; the decoder treats an
     // absent tag as 1. Float formats (SampleFormat=3) write Predictor=3
@@ -2192,6 +2472,19 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         });
     }
 
+    // 330 SubIFDs (LONG / LONG8 × N) — child image IFDs referenced
+    // from this page instead of the next-IFD chain. The child-IFD
+    // mechanism is plain TIFF 6.0 §2 IFD structure; the offsets are
+    // resolved at write time from the planned children. Sits between
+    // 325 (TileByteCounts) and 332 (InkSet) in ascending tag order.
+    if !p.extras.sub_ifds.is_empty() {
+        entries.push(PageIfdEntry {
+            tag: TAG_SUB_IFDS,
+            field_type: offset_field_type,
+            count: p.extras.sub_ifds.len() as u64,
+            value: IfdValue::ChildIfds(ChildLink::SubIfd),
+        });
+    }
     // 332 InkSet (SHORT) and 334 NumberOfInks (SHORT) — TIFF 6.0 §16
     // pages 70 / 70. Both are optional in §16 (defaults: `InkSet = 1`,
     // CMYK; `NumberOfInks = 4`), but the encoder emits them on every
@@ -2343,16 +2636,151 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         });
     }
 
+    // 34665 Exif IFD pointer / 34853 GPS IFD pointer (LONG / LONG8) —
+    // offsets of the auxiliary child IFDs planned below, resolved at
+    // write time. Both sit above every baseline tag in ascending
+    // order.
+    let mut children: Vec<(ChildLink, PlannedPage)> = Vec::new();
+    for child in p.extras.sub_ifds {
+        children.push((
+            ChildLink::SubIfd,
+            plan_page_full(child, bigtiff, depth + 1)?,
+        ));
+    }
+    let mut aux_seq: u32 = 0;
+    if let Some(tags) = p.extras.exif_ifd {
+        entries.push(PageIfdEntry {
+            tag: TAG_EXIF_IFD,
+            field_type: offset_field_type,
+            count: 1,
+            value: IfdValue::ChildIfds(ChildLink::Exif),
+        });
+        children.push((
+            ChildLink::Exif,
+            plan_aux_ifd(tags, bigtiff, "Exif", &mut aux_seq)?,
+        ));
+    }
+    if let Some(tags) = p.extras.gps_ifd {
+        entries.push(PageIfdEntry {
+            tag: TAG_GPS_IFD,
+            field_type: offset_field_type,
+            count: 1,
+            value: IfdValue::ChildIfds(ChildLink::Gps),
+        });
+        children.push((
+            ChildLink::Gps,
+            plan_aux_ifd(tags, bigtiff, "GPS", &mut aux_seq)?,
+        ));
+    }
+
     // Spec: entries must be in ascending tag order. The pushes
     // above are already sorted (254/256/257/258/259/262/273?/277/
-    // 278?/279?/284/292?/317?/320?/322?/323?/324?/325?/332?/334?/
-    // 530?/531?/532?), but assert defensively.
+    // 278?/279?/284/292?/293?/297?/317?/320?/322?/323?/324?/325?/
+    // 330?/332?/334?/338?/339?/530?/531?/532?/34665?/34853?), but
+    // assert defensively.
     debug_assert!(entries.windows(2).all(|w| w[0].tag <= w[1].tag));
 
     Ok(PlannedPage {
         strips,
         ifd: PageIfd { entries },
         externals,
+        children,
+    })
+}
+
+/// Plan an auxiliary child IFD (Exif / GPS pointer target) from
+/// caller-supplied raw entries. The result is a strip-less
+/// [`PlannedPage`]: entry values that fit the variant's inline
+/// threshold pack into the value slot; larger values become external
+/// blobs placed at even offsets per TIFF 6.0 §2 ("The value is
+/// expected to begin on a word boundary"). Entries are sorted into the
+/// §2-required ascending tag order; duplicate tags, type codes the §2
+/// table (plus the BigTIFF 64-bit additions) cannot size, and
+/// `value.len() != count × type_size` are rejected precisely. BigTIFF
+/// widths (LONG8 / SLONG8 / IFD8) are rejected on a classic page —
+/// classic readers have no 8-byte value semantics for them.
+fn plan_aux_ifd(
+    tags: &[AuxIfdEntry<'_>],
+    bigtiff: bool,
+    which: &str,
+    aux_seq: &mut u32,
+) -> Result<PlannedPage> {
+    if tags.is_empty() {
+        return Err(Error::invalid(format!(
+            "TIFF encode: {which} IFD must carry at least one entry (omit the field instead \
+             of writing an empty child IFD)"
+        )));
+    }
+    let mut sorted: Vec<&AuxIfdEntry<'_>> = tags.iter().collect();
+    sorted.sort_by_key(|e| e.tag);
+    let inline_threshold: usize = if bigtiff { 8 } else { 4 };
+    let mut entries: Vec<PageIfdEntry> = Vec::with_capacity(sorted.len());
+    let mut externals: Vec<(BlobId, Vec<u8>)> = Vec::new();
+    for pair in sorted.windows(2) {
+        if pair[0].tag == pair[1].tag {
+            return Err(Error::invalid(format!(
+                "TIFF encode: {which} IFD has duplicate tag {}",
+                pair[0].tag
+            )));
+        }
+    }
+    for e in sorted {
+        let unit = type_size(e.field_type);
+        if unit == 0 {
+            return Err(Error::invalid(format!(
+                "TIFF encode: {which} IFD tag {} has unknown field type {} (TIFF 6.0 §2 \
+                 types 1-12, or 16-18 on BigTIFF)",
+                e.tag, e.field_type
+            )));
+        }
+        if !bigtiff && matches!(e.field_type, TYPE_LONG8 | TYPE_SLONG8 | TYPE_IFD8) {
+            return Err(Error::invalid(format!(
+                "TIFF encode: {which} IFD tag {} uses BigTIFF-only field type {} on a \
+                 classic-TIFF page",
+                e.tag, e.field_type
+            )));
+        }
+        if !bigtiff && e.count > u32::MAX as u64 {
+            return Err(Error::invalid(format!(
+                "TIFF encode: {which} IFD tag {} count exceeds the classic-TIFF u32 range",
+                e.tag
+            )));
+        }
+        let want = (unit as u64).checked_mul(e.count).ok_or_else(|| {
+            Error::invalid(format!(
+                "TIFF encode: {which} IFD tag {} count overflow",
+                e.tag
+            ))
+        })?;
+        if e.value.len() as u64 != want {
+            return Err(Error::invalid(format!(
+                "TIFF encode: {which} IFD tag {} value is {} bytes, expected {want} \
+                 (count {} × type-size {unit})",
+                e.tag,
+                e.value.len(),
+                e.count
+            )));
+        }
+        let value = if e.value.len() <= inline_threshold {
+            IfdValue::Inline(e.value.to_vec())
+        } else {
+            let id = BlobId::AuxValue(*aux_seq);
+            *aux_seq += 1;
+            externals.push((id, e.value.to_vec()));
+            IfdValue::ExternalBlob(id)
+        };
+        entries.push(PageIfdEntry {
+            tag: e.tag,
+            field_type: e.field_type,
+            count: e.count,
+            value,
+        });
+    }
+    Ok(PlannedPage {
+        strips: Vec::new(),
+        ifd: PageIfd { entries },
+        externals,
+        children: Vec::new(),
     })
 }
 
@@ -3194,6 +3622,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -3219,6 +3648,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -3238,6 +3668,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -3257,6 +3688,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -3286,6 +3718,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -3359,6 +3792,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -3379,6 +3813,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -3401,6 +3836,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -3422,6 +3858,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -3445,6 +3882,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -3466,6 +3904,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let r = encode_tiff(&page);
         assert!(r.is_err());
@@ -3485,6 +3924,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             },
             EncodePage {
                 width: 8,
@@ -3495,6 +3935,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             },
         ];
         let bytes = encode_tiff_multi(&pages).unwrap();
@@ -3540,6 +3981,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -3673,6 +4115,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -3698,6 +4141,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let b = encode_tiff(&page).unwrap();
         let ifd_off = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
@@ -3725,6 +4169,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let b2 = encode_tiff(&page2).unwrap();
         let ifd2 = u32::from_le_bytes([b2[4], b2[5], b2[6], b2[7]]) as usize;
@@ -3748,6 +4193,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -3764,6 +4210,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -3799,6 +4246,7 @@ mod tests {
             planar: true,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -3856,6 +4304,7 @@ mod tests {
             planar: true,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
 
@@ -3900,6 +4349,7 @@ mod tests {
             planar: true,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         assert!(encode_tiff(&page).is_err());
 
@@ -3917,6 +4367,7 @@ mod tests {
             planar: true,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -3936,6 +4387,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let ifd_off = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
@@ -3978,6 +4430,7 @@ mod tests {
             planar: false,
             tiling: Some(tiling),
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -4131,6 +4584,7 @@ mod tests {
             planar: false,
             tiling: Some((16, 16)),
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -4157,6 +4611,7 @@ mod tests {
             planar: false,
             tiling: Some((16, 16)),
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let b = encode_tiff(&page).unwrap();
         let ifd_off = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
@@ -4199,6 +4654,7 @@ mod tests {
             planar: false,
             tiling: Some((20, 16)),
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -4219,6 +4675,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let tiled = EncodePage {
             tiling: Some((16, 16)),
@@ -4241,6 +4698,7 @@ mod tests {
             planar: false,
             tiling: Some((16, 16)),
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         assert!(encode_tiff(&page).is_err());
     }
@@ -4260,6 +4718,7 @@ mod tests {
             planar: true,
             tiling: Some((16, 16)),
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).expect("planar tiled encode");
         let d = decode_tiff(&bytes).expect("planar tiled decode");
@@ -4283,6 +4742,7 @@ mod tests {
                 planar: false,
                 tiling: Some((16, 16)),
                 bigtiff: false,
+                extras: PageExtras::default(),
             },
             EncodePage {
                 width: 16,
@@ -4293,6 +4753,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             },
         ];
         let bytes = encode_tiff_multi(&pages).unwrap();
@@ -4459,6 +4920,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -4484,6 +4946,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -4506,6 +4969,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
             assert_eq!(d.frame.planes[0].data, baseline, "compressor {:?}", c);
@@ -4528,6 +4992,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -4546,6 +5011,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -4573,6 +5039,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -4591,6 +5058,7 @@ mod tests {
                 planar: true,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -4617,6 +5085,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -4635,6 +5104,7 @@ mod tests {
                 planar: false,
                 tiling: Some((16, 16)),
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -4661,6 +5131,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: true,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         // BigTIFF magic 43.
@@ -4685,6 +5156,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let err = encode_tiff(&page).unwrap_err();
         assert!(format!("{err}").contains("CCITT"));
@@ -4704,6 +5176,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let err = encode_tiff(&page).unwrap_err();
         assert!(format!("{err}").contains("CieLab8"));
@@ -4724,6 +5197,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -4747,6 +5221,7 @@ mod tests {
             planar: true,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let err = encode_tiff(&page).unwrap_err();
         assert!(format!("{err}").contains("PlanarConfiguration"));
@@ -4767,6 +5242,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let ifd_off = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
@@ -4901,6 +5377,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();
@@ -4926,6 +5403,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -4948,6 +5426,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
             assert_eq!(d.frame.planes[0].data, baseline, "compressor {:?}", c);
@@ -4971,6 +5450,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -4989,6 +5469,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -5016,6 +5497,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -5034,6 +5516,7 @@ mod tests {
                 planar: true,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -5061,6 +5544,7 @@ mod tests {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -5079,6 +5563,7 @@ mod tests {
                 planar: false,
                 tiling: Some((16, 16)),
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             decode_tiff(&encode_tiff(&page).unwrap())
                 .unwrap()
@@ -5105,6 +5590,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: true,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         assert_eq!(&bytes[..2], b"II");
@@ -5128,6 +5614,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let err = encode_tiff(&page).unwrap_err();
         assert!(format!("{err}").contains("CCITT"));
@@ -5147,6 +5634,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let err = encode_tiff(&page).unwrap_err();
         assert!(format!("{err}").contains("Cmyk32"));
@@ -5168,6 +5656,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let ifd_off = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
@@ -5217,6 +5706,7 @@ mod tests {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let d = decode_tiff(&bytes).unwrap();

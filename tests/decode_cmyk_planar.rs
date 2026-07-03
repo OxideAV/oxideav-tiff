@@ -20,7 +20,9 @@
 //!     / `EncodePage::predictor` must decode to the same Rgb24 as the
 //!     plain chunky encode of the same source.
 
-use oxideav_tiff::{decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, TiffCompression};
+use oxideav_tiff::{
+    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+};
 
 /// Hand-build a classic-II chunky CMYK TIFF (`PlanarConfiguration = 1`):
 /// one `(C, M, Y, K)` quad per pixel, `PhotometricInterpretation = 5`,
@@ -223,6 +225,7 @@ fn encoder_cmyk32_planar_predictor_roundtrips_against_chunky() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         decode_tiff(&encode_tiff(&page).unwrap())
             .unwrap()
@@ -249,6 +252,7 @@ fn encoder_cmyk32_planar_predictor_roundtrips_against_chunky() {
                     planar: true,
                     tiling,
                     bigtiff: false,
+                    extras: PageExtras::default(),
                 };
                 let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
                 assert_eq!(

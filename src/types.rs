@@ -63,6 +63,9 @@ pub const TAG_X_RESOLUTION: u16 = 282;
 pub const TAG_Y_RESOLUTION: u16 = 283;
 pub const TAG_PLANAR_CONFIGURATION: u16 = 284;
 pub const TAG_RESOLUTION_UNIT: u16 = 296;
+/// PageNumber (TIFF 6.0 §"PageNumber", page 40): SHORT × 2 — the
+/// 0-based page number and the total page count (0 = unknown total).
+pub const TAG_PAGE_NUMBER: u16 = 297;
 pub const TAG_SOFTWARE: u16 = 305;
 pub const TAG_DATE_TIME: u16 = 306;
 pub const TAG_PREDICTOR: u16 = 317;
@@ -152,6 +155,22 @@ pub const TAG_YCBCR_COEFFICIENTS: u16 = 529;
 pub const TAG_YCBCR_SUBSAMPLING: u16 = 530;
 pub const TAG_YCBCR_POSITIONING: u16 = 531;
 pub const TAG_REFERENCE_BLACK_WHITE: u16 = 532;
+
+// --- Child-IFD pointer tags ----------------------------------------------
+// The child-IFD *mechanism* is plain TIFF 6.0 §2 IFD structure (an IFD
+// at a file offset, reached through a LONG-typed entry). The tag
+// numbers below are registered-identifier facts:
+/// SubIFDs — array of child-IFD file offsets (one per child image,
+/// e.g. reduced-resolution versions of the main image).
+pub const TAG_SUB_IFDS: u16 = 330;
+/// Exif IFD pointer — offset of a private IFD carrying Exif metadata
+/// entries. This crate transports the child IFD's entries verbatim
+/// (tag / type / count / value bytes); it does not interpret Exif
+/// semantics.
+pub const TAG_EXIF_IFD: u16 = 34665;
+/// GPS IFD pointer — offset of a private IFD carrying GPS metadata
+/// entries; transported verbatim exactly as for [`TAG_EXIF_IFD`].
+pub const TAG_GPS_IFD: u16 = 34853;
 
 // --- Compression schemes (Section 3 + Section 13) -----------------------
 pub const COMPRESSION_NONE: u16 = 1;

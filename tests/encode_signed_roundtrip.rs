@@ -14,7 +14,7 @@
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
     decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    TiffCompression, TiffPixelFormat,
+    PageExtras, TiffCompression, TiffPixelFormat,
 };
 
 /// Deterministic signed 8-bit raster spanning the full i8 range.
@@ -62,6 +62,7 @@ fn page_i8<'a>(w: u32, h: u32, pixels: &'a [i8], compression: TiffCompression) -
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     }
 }
 
@@ -75,6 +76,7 @@ fn page_i16<'a>(w: u32, h: u32, pixels: &'a [i16], compression: TiffCompression)
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     }
 }
 
@@ -183,6 +185,7 @@ fn gray_signed_bigtiff_roundtrip() {
     let px = pixels_i16(w, h);
     let p = EncodePage {
         bigtiff: true,
+        extras: PageExtras::default(),
         predictor: true,
         ..page_i16(w, h, &px, TiffCompression::Zstd)
     };
@@ -210,6 +213,7 @@ fn gray_signed_multipage_chain() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
     ];
     let tiff = encode_tiff_multi(&pages).expect("multi-page encode failed");

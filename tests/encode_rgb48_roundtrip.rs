@@ -17,7 +17,7 @@
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
     decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    TiffCompression, TiffPixelFormat,
+    PageExtras, TiffCompression, TiffPixelFormat,
 };
 
 /// Deterministic 16-bit RGB test raster exercising the full sample
@@ -49,6 +49,7 @@ fn page<'a>(w: u32, h: u32, pixels: &'a [u8], compression: TiffCompression) -> E
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     }
 }
 
@@ -176,6 +177,7 @@ fn rgb48_bigtiff_roundtrip() {
     for tiling in [None, Some((16u32, 16u32))] {
         let p = EncodePage {
             bigtiff: true,
+            extras: PageExtras::default(),
             tiling,
             predictor: true,
             ..page(w, h, &pixels, TiffCompression::Deflate)
@@ -206,6 +208,7 @@ fn rgb48_multipage_chain() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
     ];
     let tiff = encode_tiff_multi(&pages).expect("multi-page encode failed");

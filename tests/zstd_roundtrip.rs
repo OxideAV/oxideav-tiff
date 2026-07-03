@@ -36,7 +36,7 @@ use std::process::{Command, Stdio};
 
 use oxideav_tiff::{
     decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    RgbColor, TiffCompression,
+    PageExtras, RgbColor, TiffCompression,
 };
 
 // ---- Source-pixel generators (deterministic, layout-independent) ----
@@ -155,6 +155,7 @@ fn page<'a>(
         planar,
         tiling,
         bigtiff,
+        extras: PageExtras::default(),
     }
 }
 

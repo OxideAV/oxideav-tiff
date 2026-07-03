@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 
 use oxideav_tiff::{
     decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    TiffCompression,
+    PageExtras, TiffCompression,
 };
 
 fn binary_available(name: &str) -> bool {
@@ -152,6 +152,7 @@ fn encoder_gray8_lzw_roundtrips_through_convert() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     // Round-trip through our own decoder first.
@@ -177,6 +178,7 @@ fn encoder_rgb24_packbits_roundtrips_through_convert() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -200,6 +202,7 @@ fn encoder_rgb24_deflate_roundtrips_through_convert() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -228,6 +231,7 @@ fn encoder_palette_roundtrips_through_convert() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -253,6 +257,7 @@ fn encoder_tiffinfo_reports_expected_metadata() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -297,6 +302,7 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
         EncodePage {
             width: 16,
@@ -307,6 +313,7 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
         EncodePage {
             width: 16,
@@ -317,6 +324,7 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
     ];
     let bytes = encode_tiff_multi(&pages).unwrap();
@@ -541,6 +549,7 @@ fn encoder_ccitt_rle_visible_to_tiffinfo() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     // Self-roundtrip first.
@@ -589,6 +598,7 @@ fn encoder_ccitt_t4_1d_decodes_via_tiffcp_to_uncompressed() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -647,6 +657,7 @@ fn encoder_ccitt_t4_1d_byte_aligned_decodes_via_tiffcp() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -775,6 +786,7 @@ fn encoder_predictor_tiffinfo_reports_horizontal_differencing() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -803,6 +815,7 @@ fn encoder_gray8_predictor_lzw_transcodes_via_tiffcp() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_predictor_matches(&bytes, 50, 30, &pixels);
@@ -827,6 +840,7 @@ fn encoder_rgb24_predictor_deflate_transcodes_via_tiffcp() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_predictor_matches(&bytes, 40, 24, &pixels);
@@ -844,6 +858,7 @@ fn encoder_gray8_predictor_lzw_roundtrips_through_convert() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     // Our own decoder first.
@@ -870,6 +885,7 @@ fn encoder_rgb24_predictor_lzw_roundtrips_through_convert() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -901,6 +917,7 @@ fn encoder_planar_rgb_transcodes_via_tiffcp() {
         planar: true,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -954,6 +971,7 @@ fn encoder_planar_predictor_lzw_transcodes_via_tiffcp() {
         planar: true,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -1001,6 +1019,7 @@ fn encoder_planar_rgb_roundtrips_through_convert() {
         planar: true,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -1024,6 +1043,7 @@ fn encoder_planar_tiffinfo_reports_separate_planes() {
         planar: true,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -1096,6 +1116,7 @@ fn encoder_tiled_gray8_transcodes_via_tiffcp() {
         planar: false,
         tiling: Some((16, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 50, 30, &pixels);
@@ -1119,6 +1140,7 @@ fn encoder_tiled_rgb24_predictor_transcodes_via_tiffcp() {
         planar: false,
         tiling: Some((16, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 48, 32, &pixels);
@@ -1137,6 +1159,7 @@ fn encoder_tiled_rgb24_roundtrips_through_convert() {
         planar: false,
         tiling: Some((32, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -1156,6 +1179,7 @@ fn encoder_tiled_tiffinfo_reports_tile_geometry() {
         planar: false,
         tiling: Some((16, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -1197,6 +1221,7 @@ fn encoder_tiled_planar_rgb24_transcodes_via_tiffcp() {
         planar: true,
         tiling: Some((16, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 50, 30, &pixels);
@@ -1221,6 +1246,7 @@ fn encoder_tiled_planar_rgb24_predictor_transcodes_via_tiffcp() {
         planar: true,
         tiling: Some((16, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 48, 32, &pixels);
@@ -1240,6 +1266,7 @@ fn encoder_tiled_planar_rgb24_roundtrips_through_convert() {
         planar: true,
         tiling: Some((32, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
@@ -1259,6 +1286,7 @@ fn encoder_tiled_planar_tiffinfo_reports_tiles_and_separate_planes() {
         planar: true,
         tiling: Some((16, 16)),
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -1298,6 +1326,7 @@ fn encoder_ccitt_t4_2d_decodes_via_tiffcp_to_uncompressed() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -1351,6 +1380,7 @@ fn encoder_ccitt_t6_decodes_via_tiffcp_to_uncompressed() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let dir = tmp_dir();
@@ -1401,6 +1431,7 @@ fn encoder_ccitt_t4_2d_tiffinfo_reports_2d_coding() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -1431,6 +1462,7 @@ fn encoder_ccitt_t6_tiffinfo_reports_group4() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -1472,6 +1504,7 @@ fn encoder_planar_subsampled_ycbcr_tiffinfo_reports_geometry() {
         planar: true,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     // Our own decoder first.
@@ -1515,6 +1548,7 @@ fn encoder_f16_tiffinfo_reports_ieee_float_16() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let d = decode_tiff(&bytes).unwrap();
@@ -1532,6 +1566,72 @@ fn encoder_f16_tiffinfo_reports_ieee_float_16() {
         assert!(
             lc.contains("horizontal differencing") || lc.contains("floating point predictor"),
             "tiffinfo missing predictor line: {info}"
+        );
+    } else {
+        eprintln!("skipping: tiffinfo not available");
+    }
+}
+
+#[test]
+fn encoder_extras_page_number_and_subifd_visible_to_tiffinfo() {
+    // PageNumber (297), NewSubfileType bits, an Exif child IFD, and a
+    // SubIFDs (330) thumbnail tree: libtiff's `tiffinfo` must read the
+    // parent IFD (printing the page number and subfile-type lines)
+    // without erroring on the child-IFD pointers.
+    let px = ramp_gray8(24, 24);
+    let thumb = ramp_gray8(8, 8);
+    static EXIF: [oxideav_tiff::AuxIfdEntry<'static>; 1] = [oxideav_tiff::AuxIfdEntry {
+        tag: 40961,
+        field_type: 3,
+        count: 1,
+        value: &[1, 0],
+    }];
+    let child = EncodePage {
+        width: 8,
+        height: 8,
+        kind: EncodePixelFormat::Gray8 { pixels: &thumb },
+        compression: TiffCompression::None,
+        predictor: false,
+        planar: false,
+        tiling: None,
+        bigtiff: false,
+        extras: oxideav_tiff::PageExtras {
+            reduced_resolution: true,
+            ..Default::default()
+        },
+    };
+    let children = [child];
+    let page = EncodePage {
+        width: 24,
+        height: 24,
+        kind: EncodePixelFormat::Gray8 { pixels: &px },
+        compression: TiffCompression::Lzw,
+        predictor: false,
+        planar: false,
+        tiling: None,
+        bigtiff: false,
+        extras: oxideav_tiff::PageExtras {
+            page_number: Some((0, 1)),
+            multi_page: true,
+            exif_ifd: Some(&EXIF),
+            sub_ifds: &children,
+            ..Default::default()
+        },
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    assert_eq!(decode_tiff(&bytes).unwrap().frame.planes[0].data, px);
+    if let Some(info) = run_tiffinfo(&bytes) {
+        assert!(
+            info.contains("Page Number: 0-1"),
+            "tiffinfo missing page number: {info}"
+        );
+        assert!(
+            info.to_lowercase().contains("multi-page"),
+            "tiffinfo missing multi-page subfile bit: {info}"
+        );
+        assert!(
+            info.contains("SubIFD Offsets") || info.contains("EXIF IFD"),
+            "tiffinfo did not surface the child-IFD pointers: {info}"
         );
     } else {
         eprintln!("skipping: tiffinfo not available");

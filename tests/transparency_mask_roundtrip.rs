@@ -20,7 +20,7 @@
 
 use oxideav_tiff::{
     decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    TiffCompression, TiffPixelFormat,
+    PageExtras, TiffCompression, TiffPixelFormat,
 };
 
 // A small 16x8 mask: top half = exterior (all 0-bits), bottom half =
@@ -82,6 +82,7 @@ fn encode_mask(w: u32, h: u32, bytes: &[u8], compression: TiffCompression) -> Ve
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     encode_tiff(&page).expect("encode_tiff TransparencyMask")
 }
@@ -231,6 +232,7 @@ fn multipage_main_image_plus_mask() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
         EncodePage {
             width: w,
@@ -243,6 +245,7 @@ fn multipage_main_image_plus_mask() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
     ];
     let buf = encode_tiff_multi(&pages).expect("multipage encode");
@@ -325,6 +328,7 @@ fn gray8_page_does_not_set_mask_bit() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let buf = encode_tiff(&page).expect("encode Gray8");
     let header = parse_header(&buf).expect("parse_header");
@@ -363,6 +367,7 @@ fn transparency_mask_tiled_matches_strip() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let tiled = EncodePage {
         tiling: Some((16, 16)),
@@ -389,6 +394,7 @@ fn transparency_mask_planar_rejected() {
         planar: true,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let err = encode_tiff(&page).expect_err("planar TransparencyMask must fail");
     let msg = format!("{err}");
@@ -412,6 +418,7 @@ fn transparency_mask_predictor_rejected() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let err = encode_tiff(&page).expect_err("predictor + TransparencyMask must fail");
     let msg = format!("{err}");
@@ -436,6 +443,7 @@ fn transparency_mask_wrong_buffer_size_rejected() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let err = encode_tiff(&page).expect_err("size-mismatch TransparencyMask must fail");
     let msg = format!("{err}");

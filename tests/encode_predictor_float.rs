@@ -32,7 +32,7 @@
 
 use oxideav_tiff::{
     decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    TiffCompression, TiffPixelFormat,
+    PageExtras, TiffCompression, TiffPixelFormat,
 };
 
 // ---------------------------------------------------------------------------
@@ -175,6 +175,7 @@ fn grayf32_predictor_roundtrip_matches_unpredicted() {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let bytes = encode_tiff(&page).expect("encode GrayF32");
             let dec = decode_tiff(&bytes).expect("decode GrayF32");
@@ -201,6 +202,7 @@ fn grayf32_emits_sampleformat_and_predictor_tags() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let t1 = encode_tiff(&p1).unwrap();
     let (sf_type, sf_count, sf_val) = find_tag(&t1, 339).expect("SampleFormat tag present");
@@ -235,6 +237,7 @@ fn grayf32_raw_predictor_reverses_to_input() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let tiff = encode_tiff(&page).unwrap();
     let mut strip = single_strip(&tiff);
@@ -262,6 +265,7 @@ fn grayf64_predictor_roundtrip_matches_unpredicted() {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let bytes = encode_tiff(&page).unwrap();
             let dec = decode_tiff(&bytes).unwrap();
@@ -308,6 +312,7 @@ fn rgbf32_predictor_roundtrip_matches_unpredicted() {
                 planar: false,
                 tiling: None,
                 bigtiff: false,
+                extras: PageExtras::default(),
             };
             let bytes = encode_tiff(&page).unwrap();
             let dec = decode_tiff(&bytes).unwrap();
@@ -332,6 +337,7 @@ fn rgbf32_sampleformat_is_three_values() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let tiff = encode_tiff(&page).unwrap();
     let (sf_type, sf_count, _off) = find_tag(&tiff, 339).expect("SampleFormat present");
@@ -361,6 +367,7 @@ fn rgbf32_raw_predictor_reverses_to_input() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let tiff = encode_tiff(&page).unwrap();
     let mut strip = single_strip(&tiff);
@@ -384,6 +391,7 @@ fn rgbf64_predictor_roundtrip_matches_unpredicted() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let dec = decode_tiff(&bytes).unwrap();
@@ -413,6 +421,7 @@ fn grayf32_tiled_matches_strip() {
             planar: false,
             tiling: Some((16, 16)),
             bigtiff: false,
+            extras: PageExtras::default(),
         };
         let bytes = encode_tiff(&page).unwrap();
         let dec = decode_tiff(&bytes).unwrap();
@@ -437,6 +446,7 @@ fn rgbf32_bigtiff_roundtrip() {
         planar: false,
         tiling: None,
         bigtiff: true,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     assert_eq!(&bytes[0..2], b"II");
@@ -477,6 +487,7 @@ fn rgbf32_planar_matches_chunky() {
                     planar: true,
                     tiling,
                     bigtiff: false,
+                    extras: PageExtras::default(),
                 };
                 let bytes = encode_tiff(&page).unwrap();
                 let dec = decode_tiff(&bytes).unwrap();
@@ -504,6 +515,7 @@ fn rgbf64_planar_predictor_matches_chunky() {
         planar: true,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     let bytes = encode_tiff(&page).unwrap();
     let dec = decode_tiff(&bytes).unwrap();
@@ -523,6 +535,7 @@ fn float_rejects_grayscale_planar_and_ccitt() {
         planar: true,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(
         encode_tiff(&planar).is_err(),
@@ -539,6 +552,7 @@ fn float_rejects_grayscale_planar_and_ccitt() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(encode_tiff(&ccitt).is_err(), "CCITT float must be rejected");
 }
@@ -569,6 +583,7 @@ fn float_multipage_chain_roundtrips() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
         EncodePage {
             width: rw,
@@ -579,6 +594,7 @@ fn float_multipage_chain_roundtrips() {
             planar: false,
             tiling: None,
             bigtiff: false,
+            extras: PageExtras::default(),
         },
         EncodePage {
             width: tw,
@@ -589,6 +605,7 @@ fn float_multipage_chain_roundtrips() {
             planar: false,
             tiling: Some((16, 16)),
             bigtiff: false,
+            extras: PageExtras::default(),
         },
     ];
     let bytes = encode_tiff_multi(&pages).unwrap();
@@ -611,6 +628,7 @@ fn float_wrong_buffer_size_rejected() {
         planar: false,
         tiling: None,
         bigtiff: false,
+        extras: PageExtras::default(),
     };
     assert!(encode_tiff(&page).is_err());
 }
