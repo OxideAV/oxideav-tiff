@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.4...v0.0.5) - 2026-07-03
+
+### Fixed
+
+- anchor .gitignore Cargo.lock to crate root so tracked fuzz/Cargo.lock is not ignored (release-plz guard)
+
+### Other
+
+- refresh crate-doc encode-coverage list (4-bit, Rgb48, signed, RGBA)
+- §ExtraSamples RGBA writer (EncodePixelFormat::Rgba32 + ExtraSampleKind)
+- SampleFormat=2 signed grayscale (EncodePixelFormat::GrayI8/GrayI16)
+- 4-bit Gray4/Palette4 write — sub-byte tile writer + §14 predictor at 4 bits
+- 16-bit RGB (EncodePixelFormat::Rgb48) — encode parity for the Rgb48Le decode path
+- document §22 old-style JPEG (Compression=6) decode coverage
+- §22 old-style JPEG fixture suite + rejection matrix
+- TIFF 6.0 §22 old-style JPEG (Compression=6) interchange-format decode
+- float multi-page chain (encode_tiff_multi) round-trip
+- PlanarConfiguration=2 for float RGB (SampleFormat=3)
+- floating-point (SampleFormat=3) encode + Predictor=3 writer
+- binary-independent planar CMYK decode + round-trip coverage (TIFF 6.0 §16 / §"PlanarConfiguration")
+- 4:4:4 YCbCr PlanarConfiguration=2 + Predictor=2 (TIFF 6.0 §"PlanarConfiguration" / §14 / §21)
+- tiled chroma-subsampled YCbCr write (TIFF 6.0 §15 / §21)
+- tiled 4:4:4 YCbCr write (TIFF 6.0 §15 / §21)
+- tiled chroma-subsampled YCbCr decode (TIFF 6.0 §21)
+- cover float Predictor=3 over ZSTD and multi-strip layouts
+- cover tiled JPEG-in-TIFF (Compression=7) decode
+- decode Predictor=3 (IEEE floating-point predictor)
+- ExtraSamples=1 (associated/pre-multiplied alpha) RGB decode (TIFF 6.0 §18)
+- 1-bit sub-byte tile writing for Bilevel / TransparencyMask (TIFF 6.0 §15)
+- SampleFormat=3 (IEEE float) 3-channel RGB decode (TIFF 6.0 §SampleFormat)
+- decode non-canonical Orientation (tag 274, values 2..=8)
+- SampleFormat=3 (IEEE float) 16-/32-/64-bit grayscale decode (TIFF 6.0 §SampleFormat)
+- refresh to current status, drop per-round changelog cruft
+
 ### Added
 
 - **Old-style JPEG (`Compression = 6`, TIFF 6.0 §22): interchange-format
