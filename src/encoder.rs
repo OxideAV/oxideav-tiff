@@ -46,6 +46,34 @@ use crate::types::*;
 /// component is a 16-bit value, top-byte is the 8-bit colour).
 pub type RgbColor = [u8; 3];
 
+/// Interpretation of the fourth (extra) component of an
+/// [`EncodePixelFormat::Rgba32`] page — the on-disk `ExtraSamples`
+/// (tag 338) value per TIFF 6.0 §ExtraSamples (pages 31–32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtraSampleKind {
+    /// `0` — "Unspecified data": the extra channel carries
+    /// application-defined data logically unrelated to alpha.
+    Unspecified,
+    /// `1` — "Associated alpha data (with pre-multiplied color)":
+    /// the caller's R, G, B values are already multiplied by the
+    /// alpha ("the color information … is stored pre-multiplied by
+    /// the associated transparency data", §ExtraSamples / §18).
+    AssociatedAlpha,
+    /// `2` — "Unassociated alpha data": a soft matte logically
+    /// independent of the straight-stored color.
+    UnassociatedAlpha,
+}
+
+impl ExtraSampleKind {
+    fn tag_value(self) -> u16 {
+        match self {
+            ExtraSampleKind::Unspecified => EXTRA_SAMPLE_UNSPECIFIED,
+            ExtraSampleKind::AssociatedAlpha => EXTRA_SAMPLE_ASSOCIATED_ALPHA,
+            ExtraSampleKind::UnassociatedAlpha => EXTRA_SAMPLE_UNASSOCIATED_ALPHA,
+        }
+    }
+}
+
 /// Description of one image page being written.
 ///
 /// `pixels` is row-major, packed (no padding between rows). For
@@ -219,6 +247,29 @@ pub enum EncodePixelFormat<'a> {
     /// Rgb24 plane split at two bytes per sample); §15 tiling and
     /// BigTIFF compose.
     Rgb48 { pixels: &'a [u8] },
+    /// 8-bit RGBA — RGB plus one extra component, TIFF 6.0
+    /// §ExtraSamples (tag 338, pages 31–32): "the SamplesPerPixel
+    /// field has a value greater than the PhotometricInterpretation
+    /// field suggests", with the extra stored "as the 'last
+    /// components' in each pixel". `pixels` is row-major interleaved
+    /// `(R, G, B, extra)` quadruples — `pixels.len() == width *
+    /// height * 4` — written verbatim with `PhotometricInterpretation
+    /// = 2`, `SamplesPerPixel = 4`, `BitsPerSample = [8, 8, 8, 8]`,
+    /// and `ExtraSamples = [kind]` ("This field must be present if
+    /// there are extra samples"). `kind` selects the §ExtraSamples
+    /// value 0 / 1 / 2 (see [`ExtraSampleKind`]); for associated
+    /// alpha the caller supplies pre-multiplied color per §18. The
+    /// crate's decoder renders the leading `R G B` triple and drops
+    /// the extra, per its §ExtraSamples policy. Compressors: None /
+    /// PackBits / LZW / Deflate / Zstd; CCITT rejected. `Predictor =
+    /// 2` composes (offset `SamplesPerPixel = 4` chunky, offset 1 per
+    /// plane); `PlanarConfiguration = 2` composes (four component
+    /// planes — §ExtraSamples data channels follow the same layout
+    /// rules as color components); §15 tiling and BigTIFF compose.
+    Rgba32 {
+        pixels: &'a [u8],
+        kind: ExtraSampleKind,
+    },
     /// 8-bit indexed palette. `indices.len() == width * height`,
     /// `palette.len() <= 256` (any extras are ignored).
     Palette8 {
@@ -1046,6 +1097,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
             p.kind,
             EncodePixelFormat::Rgb24 { .. }
                 | EncodePixelFormat::Rgb48 { .. }
+                | EncodePixelFormat::Rgba32 { .. }
                 | EncodePixelFormat::CieLab8 { .. }
                 | EncodePixelFormat::Cmyk32 { .. }
                 | EncodePixelFormat::YCbCr24 { .. }
@@ -1318,6 +1370,20 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                     )));
                 }
                 (3u16, vec![16u16, 16, 16], PHOTO_RGB, pixels.to_vec(), None)
+            }
+            EncodePixelFormat::Rgba32 { pixels, .. } => {
+                // §ExtraSamples: SamplesPerPixel = 4 with photometric
+                // RGB; the extra channel rides as the last component
+                // of each pixel. The tag-338 value is emitted further
+                // down (it depends only on `kind`).
+                let want = (p.width as usize) * (p.height as usize) * 4;
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/Rgba32: pixel buffer is {} bytes, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                (4u16, vec![8u16, 8, 8, 8], PHOTO_RGB, pixels.to_vec(), None)
             }
             EncodePixelFormat::Palette8 { indices, palette } => {
                 let want = (p.width as usize) * (p.height as usize);
@@ -2083,6 +2149,23 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
             field_type: TYPE_SHORT,
             count: 1,
             value: IfdValue::Inline(4u16.to_le_bytes().to_vec()),
+        });
+    }
+
+    // 338 ExtraSamples (SHORT × number-of-extras) — TIFF 6.0
+    // §ExtraSamples (pages 31-32): "This field must be present if
+    // there are extra samples." The encoder's only extra-sample
+    // format is Rgba32 (one extra on an RGB photometric), so the
+    // field is a single SHORT carrying the caller's kind (0
+    // unspecified / 1 associated alpha / 2 unassociated alpha),
+    // inline. Sits between 334 (NumberOfInks) and 339 (SampleFormat)
+    // in ascending tag order.
+    if let EncodePixelFormat::Rgba32 { kind, .. } = &p.kind {
+        entries.push(PageIfdEntry {
+            tag: TAG_EXTRA_SAMPLES,
+            field_type: TYPE_SHORT,
+            count: 1,
+            value: IfdValue::Inline(kind.tag_value().to_le_bytes().to_vec()),
         });
     }
 

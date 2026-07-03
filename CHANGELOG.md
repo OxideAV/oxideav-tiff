@@ -116,6 +116,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   predictor × strip / tiled × BigTIFF × multi-page matrix,
   SampleFormat-tag + raw-strip-byte inspection, and negative paths.
 
+- **§ExtraSamples RGBA writer (`EncodePixelFormat::Rgba32` +
+  `ExtraSampleKind`).** Writes RGB-plus-one-extra pages per TIFF 6.0
+  §ExtraSamples (tag 338, pages 31–32): `PhotometricInterpretation =
+  2`, `SamplesPerPixel = 4`, `BitsPerSample = [8, 8, 8, 8]`, the extra
+  channel stored as "the 'last components' in each pixel", and
+  `ExtraSamples = [kind]` ("This field must be present if there are
+  extra samples") with the caller-selected kind — `0` unspecified /
+  `1` associated (pre-multiplied) alpha / `2` unassociated alpha via
+  the new public `ExtraSampleKind` enum. Compressors, `Predictor = 2`
+  (offset 4 chunky / offset 1 per plane), `PlanarConfiguration = 2`
+  (four component planes), §15 tiling, and BigTIFF (the 8-byte
+  BitsPerSample array fits the widened inline slot exactly) all
+  compose. New `tests/encode_rgba_extrasamples.rs` (6 tests): decode
+  round-trips across kind × compressor × predictor × tiled / planar /
+  BigTIFF (the crate's decoder renders the leading RGB verbatim per
+  its §ExtraSamples policy, validated in
+  `tests/decode_extra_samples.rs`), IFD tag + raw-strip inspection
+  (all four channels survive on disk), negative paths, and an
+  ImageMagick PAM cross-read that checks **all four channels**
+  byte-exact against an independent reader.
+
 - **Floating-point (`SampleFormat = 3`) encode + `Predictor = 3` writer
   (TIFF 6.0 §SampleFormat / §14 floating-point predictor).** Four new
   `EncodePixelFormat` variants — `GrayF32` / `GrayF64` (BlackIsZero
