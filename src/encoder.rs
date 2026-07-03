@@ -739,6 +739,31 @@ pub enum TiffCompression {
     /// parameter (never stored in the file); the writer uses the
     /// compression backend's default.
     Zstd,
+    /// Compression=50001 — WebP, the pixel-codec sibling of the 50000
+    /// Zstandard registry extension (trace doc
+    /// `docs/image/tiff/tiff-zstd-compression-50000.md` §1/§3). Each
+    /// strip / tile becomes one complete **lossless** (`VP8L`) WebP
+    /// file produced through the `oxideav-webp` sibling crate, so a
+    /// Compression=50001 page round-trips pixel-exact like every
+    /// other scheme this encoder writes (the segment framing — whole
+    /// WebP file per segment, short final strip, edge tiles padded to
+    /// the full §15 tile geometry — matches the independently
+    /// produced black-box reference samples pinned in
+    /// `tests/webp50001.rs`). Because WebP is pixel-aware rather than
+    /// a byte-stream coder, it only accepts the pixel shapes WebP can
+    /// represent: [`EncodePixelFormat::Rgb24`] or
+    /// [`EncodePixelFormat::Rgba32`] (8-bit chunky RGB / RGBA), and
+    /// it composes with multi-strip
+    /// ([`crate::encoder::PageExtras::rows_per_strip`]), §15 tiling,
+    /// and BigTIFF — but never with `predictor` (the §14 transforms
+    /// are byte-stream constructs; a Compression=50001 reader must
+    /// reject a declared Predictor per the §14 reader rule) or
+    /// `planar` (each WebP segment is inherently a chunky RGB(A)
+    /// frame). WebP's own still-image ceiling (16384 per side) bounds
+    /// a segment's dimensions; oversized strips surface the
+    /// `oxideav-webp` error verbatim — split the page into strips /
+    /// tiles within that bound.
+    Webp,
     /// Compression=2 — CCITT Modified Huffman (TIFF 6.0 §10). Bilevel
     /// only. Encoded as a sequence of white/black run-length codes
     /// from Tables 1/T.4 and 2/T.4. No EOL codes; rows align to byte
@@ -777,6 +802,7 @@ impl TiffCompression {
             TiffCompression::Lzw => COMPRESSION_LZW,
             TiffCompression::Deflate => COMPRESSION_DEFLATE_ADOBE,
             TiffCompression::Zstd => COMPRESSION_ZSTD,
+            TiffCompression::Webp => COMPRESSION_WEBP,
             TiffCompression::CcittRle => COMPRESSION_CCITT_HUFFMAN,
             // Compression=3 covers both T.4 1-D and T.4 2-D; the
             // T4Options tag (292) distinguishes them on the wire.
@@ -797,6 +823,13 @@ impl TiffCompression {
             TiffCompression::Lzw => Ok(pack_lzw(raw)),
             TiffCompression::Deflate => pack_deflate(raw),
             TiffCompression::Zstd => pack_zstd(raw),
+            // WebP is pixel-aware: the geometry the CCITT schemes
+            // already receive is exactly what the per-segment WebP
+            // encode needs too (the sample count 3 vs 4 is recovered
+            // from the byte count — the plan-stage gate restricts
+            // Compression=50001 to the Rgb24 / Rgba32 inputs, so the
+            // division is always exact).
+            TiffCompression::Webp => crate::webp::pack_webp(raw, width, rows),
             TiffCompression::CcittRle => encode_ccitt(
                 raw,
                 width,
@@ -1416,6 +1449,37 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
             "TIFF encode: CCITT compression (Compression=2/3) requires Bilevel or \
              TransparencyMask input",
         ));
+    }
+
+    // Compression=50001 (WebP) is a pixel codec: each strip / tile
+    // becomes one lossless WebP file, so it only accepts the pixel
+    // shapes WebP itself represents — 8-bit chunky RGB / RGBA — and
+    // never composes with the §14 byte-stream predictors or the
+    // `PlanarConfiguration = 2` plane split (a WebP segment is
+    // inherently a chunky RGB(A) frame). Multi-strip, §15 tiling and
+    // BigTIFF all compose through the generic segment planner.
+    if matches!(p.compression, TiffCompression::Webp) {
+        if !matches!(
+            p.kind,
+            EncodePixelFormat::Rgb24 { .. } | EncodePixelFormat::Rgba32 { .. }
+        ) {
+            return Err(Error::invalid(
+                "TIFF encode: Compression=50001 (WebP) requires Rgb24 or Rgba32 input \
+                 (8-bit chunky RGB / RGBA — the only pixel shapes a WebP segment can carry)",
+            ));
+        }
+        if p.predictor {
+            return Err(Error::invalid(
+                "TIFF encode: Predictor cannot combine with Compression=50001 (WebP); \
+                 the §14 predictors are byte-stream transforms and WebP is pixel-aware",
+            ));
+        }
+        if p.planar {
+            return Err(Error::invalid(
+                "TIFF encode: PlanarConfiguration=2 cannot combine with Compression=50001 \
+                 (WebP); each WebP segment is a chunky RGB(A) frame",
+            ));
+        }
     }
 
     // Float formats (SampleFormat = 3) take the §14 *floating-point*

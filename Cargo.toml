@@ -38,6 +38,18 @@ compcol = { version = "0.6", default-features = false, features = [
     "zlib",
     "zstd",
 ] }
+# `oxideav-webp` is the workspace's WebP codec and the only way to
+# decode / encode Compression=50001 (WebP-in-TIFF, the de-facto
+# registry extension paired with Compression=50000 — see
+# `docs/image/tiff/tiff-zstd-compression-50000.md` §1), where each
+# strip / tile payload is one complete WebP file. Pulled in with
+# `default-features = false` so it does NOT drag `oxideav-core` into
+# the standalone (`default-features = false`) build of this crate:
+# the WebP lossless (VP8L) encode + both-flavour (VP8 / VP8L) decode
+# entry points we consume are part of its framework-free surface.
+# Not optional — Compression=50001 works in every build configuration,
+# exactly like Compression=50000 (Zstandard) does.
+oxideav-webp = { version = "0.2", default-features = false }
 
 [features]
 default = ["registry"]

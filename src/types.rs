@@ -203,6 +203,24 @@ pub const COMPRESSION_PACKBITS: u16 = 32773;
 /// planar configuration, and bit depth. The encoder compression level
 /// is an out-of-band runtime parameter, never stored in the file.
 pub const COMPRESSION_ZSTD: u16 = 50000;
+/// WebP carried per strip / tile. De-facto registry extension value
+/// from the same self-assigned family as 50000 — see the OxideAV
+/// trace doc `docs/image/tiff/tiff-zstd-compression-50000.md` §1.
+/// Unlike the byte-stream schemes, WebP is a *pixel* codec: each
+/// strip / tile payload is one complete WebP still-image **file**
+/// (RIFF `WEBP` container holding a `VP8 ` lossy or `VP8L` lossless
+/// bitstream) whose frame dimensions equal the strip / tile geometry
+/// — the final strip of a multi-strip page is short (the remaining
+/// rows) while edge tiles stay padded to the full `TileWidth` ×
+/// `TileLength`, exactly as for every other TIFF codec. The
+/// per-segment framing was pinned against independently produced
+/// black-box reference samples (see `tests/webp50001.rs`). Only the
+/// pixel shapes WebP itself can represent apply: 8-bit chunky RGB
+/// (`SamplesPerPixel = 3`) or RGBA (`SamplesPerPixel = 4` with one
+/// §ExtraSamples entry), `PhotometricInterpretation = 2`,
+/// `Predictor = 1` (the §14 predictor is a byte-stream transform the
+/// pixel-aware codec never composes with).
+pub const COMPRESSION_WEBP: u16 = 50001;
 
 // --- Photometric interpretations (Section 3..6) -------------------------
 pub const PHOTO_WHITE_IS_ZERO: u16 = 0;

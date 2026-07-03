@@ -99,6 +99,13 @@ pub mod ifd;
 pub mod image;
 pub mod types;
 
+// Compression = 50001 (WebP-in-TIFF) codec-in-container carriage.
+// Not registry-gated: the `oxideav-webp` sibling is consumed through
+// its framework-free public surface (`default-features = false`), so
+// Compression=50001 decodes and encodes in every build configuration,
+// exactly like Compression=50000 (Zstandard).
+mod webp;
+
 #[cfg(feature = "registry")]
 pub mod container;
 

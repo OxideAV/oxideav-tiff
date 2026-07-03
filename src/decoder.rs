@@ -556,6 +556,57 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         );
     }
 
+    // Compression=50001 (WebP-in-TIFF, de-facto registry extension —
+    // trace doc `docs/image/tiff/tiff-zstd-compression-50000.md` §1/§3)
+    // is a *pixel* codec, so unlike the byte-stream schemes it only
+    // composes with the pixel shapes WebP itself can represent: 8-bit
+    // chunky RGB (SamplesPerPixel = 3) or RGBA (SamplesPerPixel = 4).
+    // Everything else is rejected up front with a precise error —
+    // including any declared Predictor, per the TIFF 6.0 §14 reader
+    // rule ("the reader must give up" on a prediction scheme it cannot
+    // reverse): the §14 byte-stream transforms are never applied on
+    // top of a pixel-aware codec, so a Compression=50001 IFD declaring
+    // one is malformed rather than merely unsupported.
+    if compression == COMPRESSION_WEBP {
+        if photometric != PHOTO_RGB {
+            return Err(Error::Unsupported(format!(
+                "TIFF/WebP: Compression=50001 requires PhotometricInterpretation=2 (RGB); \
+                 got {photometric}"
+            )));
+        }
+        if bps_first != 8 {
+            return Err(Error::Unsupported(format!(
+                "TIFF/WebP: Compression=50001 requires BitsPerSample=8; got {bps_first}"
+            )));
+        }
+        if samples_per_pixel != 3 && samples_per_pixel != 4 {
+            return Err(Error::Unsupported(format!(
+                "TIFF/WebP: Compression=50001 requires SamplesPerPixel=3 (RGB) or 4 (RGBA); \
+                 got {samples_per_pixel}"
+            )));
+        }
+        if planar == PLANAR_SEPARATE {
+            return Err(Error::Unsupported(
+                "TIFF/WebP: Compression=50001 with PlanarConfiguration=2 (separate planes) \
+                 is not defined — each WebP segment is a chunky RGB(A) frame"
+                    .into(),
+            ));
+        }
+        if predictor != PREDICTOR_NONE {
+            return Err(Error::invalid(format!(
+                "TIFF/WebP: Compression=50001 declares Predictor={predictor}; the §14 \
+                 predictors are byte-stream transforms that never compose with the \
+                 pixel-aware WebP codec (§14 reader rule: give up rather than emit garbage)"
+            )));
+        }
+        if sample_format != SAMPLE_FORMAT_UINT {
+            return Err(Error::Unsupported(format!(
+                "TIFF/WebP: Compression=50001 requires unsigned-integer samples \
+                 (SampleFormat=1); got SampleFormat={sample_format}"
+            )));
+        }
+    }
+
     let pixel_buf = if find(entries, TAG_TILE_WIDTH).is_some() {
         if planar == PLANAR_SEPARATE {
             decode_tiles_planar(
@@ -1219,7 +1270,16 @@ fn decode_strips(
         } else {
             None
         };
-        let decompressed = decompress_block(raw, expected, compression, ccitt)?;
+        let webp = if compression == COMPRESSION_WEBP {
+            Some(WebpParams {
+                width,
+                rows: rows_this_strip,
+                samples_per_pixel,
+            })
+        } else {
+            None
+        };
+        let decompressed = decompress_block(raw, expected, compression, ccitt, webp)?;
         if decompressed.len() < expected {
             return Err(Error::invalid(format!(
                 "TIFF: strip {i} short after decompress: got {} bytes, expected {}",
@@ -1404,7 +1464,20 @@ fn decode_tiles(
             } else {
                 None
             };
-            let mut tile = decompress_block(raw, tile_size_bytes, compression, ccitt)?;
+            // Compression=50001: an edge tile stays padded to the full
+            // §15 tile geometry, so the embedded WebP frame is always
+            // exactly `TileWidth` × `TileLength` (pinned against the
+            // independently produced tiled reference sample).
+            let webp = if compression == COMPRESSION_WEBP {
+                Some(WebpParams {
+                    width: tile_w,
+                    rows: tile_h,
+                    samples_per_pixel,
+                })
+            } else {
+                None
+            };
+            let mut tile = decompress_block(raw, tile_size_bytes, compression, ccitt, webp)?;
             if tile.len() < tile_size_bytes {
                 return Err(Error::invalid("TIFF: tile short after decompress"));
             }
@@ -1573,7 +1646,7 @@ fn decode_tiles_ycbcr_subsampled(
                 return Err(Error::invalid("TIFF: tile extends past EOF"));
             }
             let raw = &input[off..end];
-            let mut tile = decompress_block(raw, tile_byte_budget, compression, None)?;
+            let mut tile = decompress_block(raw, tile_byte_budget, compression, None, None)?;
             if tile.len() < tile_byte_budget {
                 return Err(Error::invalid(
                     "TIFF: subsampled-YCbCr tile short after decompress",
@@ -1761,7 +1834,7 @@ fn decode_strips_planar(
             } else {
                 None
             };
-            let decompressed = decompress_block(raw, expected, compression, ccitt)?;
+            let decompressed = decompress_block(raw, expected, compression, ccitt, None)?;
             if decompressed.len() < expected {
                 return Err(Error::invalid(format!(
                     "TIFF: plane-{plane} strip {s} short after decompress: got {}, expected {expected}",
@@ -1951,7 +2024,8 @@ fn decode_strips_planar_ycbcr_subsampled(
                 luma_rows_this as usize / sv
             };
             let expected = plane_w * plane_rows_this;
-            let decompressed = decompress_block(&input[start..end], expected, compression, None)?;
+            let decompressed =
+                decompress_block(&input[start..end], expected, compression, None, None)?;
             if decompressed.len() < expected {
                 return Err(Error::invalid(format!(
                     "TIFF: plane-{plane} strip {s} short after decompress: got {}, \
@@ -2110,7 +2184,7 @@ fn decode_tiles_planar(
                 } else {
                     None
                 };
-                let mut tile = decompress_block(raw, tile_size_bytes, compression, ccitt)?;
+                let mut tile = decompress_block(raw, tile_size_bytes, compression, ccitt, None)?;
                 if tile.len() < tile_size_bytes {
                     return Err(Error::invalid(format!(
                         "TIFF: plane-{plane} tile short after decompress"
@@ -2212,11 +2286,28 @@ struct CcittParams {
     t6_options: u32,
 }
 
+/// Parameters needed for Compression=50001 (WebP). Like CCITT, WebP
+/// is a pixel-aware codec, so decoding a segment needs the strip /
+/// tile geometry (to validate the embedded frame dimensions against
+/// the IFD) plus the page's `SamplesPerPixel` (to re-pack the decoded
+/// RGBA surface to the strip's chunky 3- or 4-sample layout). Only
+/// the chunky strip / tile walkers construct this — the planar and
+/// §21 subsampled-YCbCr walkers never see Compression=50001 (the
+/// photometric / planar gate in `decode_ifd` rejects those combos up
+/// front).
+#[derive(Debug, Clone, Copy)]
+struct WebpParams {
+    width: u32,
+    rows: u32,
+    samples_per_pixel: u16,
+}
+
 fn decompress_block(
     raw: &[u8],
     expected: usize,
     compression: u16,
     ccitt: Option<CcittParams>,
+    webp: Option<WebpParams>,
 ) -> Result<Vec<u8>> {
     match compression {
         COMPRESSION_NONE => Ok(raw.to_vec()),
@@ -2230,6 +2321,23 @@ fn decompress_block(
         // the predictor reversal and photometric assembly downstream
         // of this dispatch apply unchanged.
         COMPRESSION_ZSTD => unpack_zstd(raw, expected),
+        // Compression=50001 (WebP, de-facto registry extension — trace
+        // doc `docs/image/tiff/tiff-zstd-compression-50000.md` §1/§3).
+        // Unlike the byte-stream schemes above, each segment is one
+        // complete WebP still-image file whose frame must match the
+        // strip / tile geometry; `crate::webp::unpack_webp` decodes it
+        // through the `oxideav-webp` sibling crate's public API and
+        // re-packs the RGBA surface to the page's chunky sample
+        // layout.
+        COMPRESSION_WEBP => {
+            let p = webp.ok_or_else(|| {
+                Error::invalid(
+                    "TIFF: Compression=50001 (WebP) is only defined for chunky RGB/RGBA \
+                     strips or tiles",
+                )
+            })?;
+            crate::webp::unpack_webp(raw, p.width, p.rows, p.samples_per_pixel)
+        }
         COMPRESSION_CCITT_HUFFMAN => {
             let p = ccitt
                 .ok_or_else(|| Error::invalid("TIFF: CCITT compression requires CcittParams"))?;
