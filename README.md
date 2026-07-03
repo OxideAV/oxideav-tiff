@@ -472,11 +472,13 @@ components.
 | WhiteIsZero    | 1         | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `EncodePixelFormat::Bilevel` |
 | **Transparency Mask** | 1  | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate / **ZSTD** | `EncodePixelFormat::TransparencyMask` (sets PhotometricInterpretation = 4 and NewSubfileType bit 2) |
 | BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Gray8` / `::Gray16Le` |
+| **BlackIsZero** | 4        | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled** (nibble-granularity edge replication), **`Predictor = 2`** (§14 nibble differencing mod 16), BigTIFF | `EncodePixelFormat::Gray4` (packed high-nibble-first raster, rows byte-padded) |
 | **BlackIsZero float** (SampleFormat = 3) | 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`** | `EncodePixelFormat::GrayF32` / `::GrayF64` (writes SampleFormat = 3; the §14 floating-point predictor) |
 | RGB            | 8         | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Rgb24`     |
 | **RGB**        | 16        | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, **`PlanarConfiguration = 2`** / **`Predictor = 2`**, BigTIFF | `EncodePixelFormat::Rgb48` (BitsPerSample = [16,16,16] little-endian — encode parity for the `Rgb48Le` decode path) |
 | **RGB float** (SampleFormat = 3) | 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`**, **`PlanarConfiguration = 2`** | `EncodePixelFormat::RgbF32` / `::RgbF64` (writes SampleFormat = 3, SamplesPerPixel = 3) |
 | Palette        | 8         | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Palette8`  |
+| **Palette**    | 4         | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, **`Predictor = 2`**, BigTIFF | `EncodePixelFormat::Palette4` (48-SHORT §"Palette Color Images" ColorMap) |
 | **CIELab (3 chan)** | 8    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::CieLab8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 3, BitsPerSample = [8,8,8]) |
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**             | `EncodePixelFormat::CieLabL8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 1) |
 | **CMYK (4 chan)** | 8     | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Cmyk32` (writes PhotometricInterpretation = 5, SamplesPerPixel = 4, BitsPerSample = [8,8,8,8], plus optional `InkSet = 1` / `NumberOfInks = 4`) |
@@ -618,11 +620,16 @@ encodes the same 1-bit pixels both tiled and strip-based, decodes both,
 and asserts the rendered `Gray8` planes are byte-identical across the
 full compressor set and the exact-fit / partial-edge / non-square /
 odd-width / oversized-single-tile / 1-pixel-overhang geometries — the
-strip decode is the independent oracle. The 4-bit sub-byte tile
-*writer* (which would need 4-bit tile-row nibble packing) remains a
-separate increment; only the byte-aligned `Gray8` / `Gray16Le` /
-`Rgb24` / `Palette8` and the 1-bit `Bilevel` / `TransparencyMask`
-formats currently write tiles.
+strip decode is the independent oracle. The **4-bit sub-byte tile
+writer now exists too** (`build_tiles_sub4`): each tile row is an
+independent byte-padded `tile_w / 2`-byte scanline (`TileWidth` a
+multiple of 16 keeps every tile-column boundary byte-aligned at 4
+bits), boundary tiles replicate the last visible column / row at
+nibble granularity (§15 "Padding"), and the §14 4-bit predictor
+(nibble differencing modulo 16) applies per tile — so the
+byte-aligned `Gray8` / `Gray16Le` / `Rgb24` / `Rgb48` / `Palette8`,
+the 4-bit `Gray4` / `Palette4`, and the 1-bit `Bilevel` /
+`TransparencyMask` formats all write tiles.
 
 Output is classic II little-endian TIFF, single-IFD via
 [`encode_tiff`] or multi-page via [`encode_tiff_multi`]. Files

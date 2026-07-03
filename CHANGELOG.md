@@ -67,6 +67,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent-reader cross-check (our LZW+predictor output transcoded
   to a 16-bit PPM by ImageMagick matches the input sample-exact).
 
+- **4-bit encode (`EncodePixelFormat::Gray4` / `Palette4`) incl. the
+  previously-backlogged 4-bit tile writer and the §14 predictor at 4
+  bits.** Both variants take the packed on-disk raster (two samples
+  per byte, high nibble first, rows byte-padded per TIFF 6.0
+  §"Compression" "row-starts on byte boundaries") and write
+  `BitsPerSample = 4` with `PhotometricInterpretation = 1`
+  (BlackIsZero) or `3` (palette, with the §"Palette Color Images"
+  `3 × 2^4` = 48-SHORT `ColorMap`). `Predictor = 2` now composes at 4
+  bits on the encode side: a new `forward_horizontal_predictor` arm
+  expands each row's nibbles, differences modulo 16, and repacks — the
+  exact inverse of the decoder's §14 4-bit expand / cumulative-add /
+  repack arm — and the chunky strip stride computation moved to the
+  bit-exact `ceil(width · spp · bps / 8)` so packed sub-byte rows
+  difference on their §"Compression" byte-aligned row starts. §15
+  tiling composes via the new `build_tiles_sub4` packer: `TileWidth`
+  being a multiple of 16 keeps every tile-column boundary
+  byte-aligned at 4 bits, each tile row is an independent
+  byte-padded `tile_w / 2`-byte scanline, boundary tiles replicate
+  the last visible column / row at nibble granularity (§15
+  "Padding"), and the predictor applies per tile, matching the
+  decoder's per-tile reversal. BigTIFF composes; CCITT (1-bit
+  facsimile coding) and planar (irrelevant at `SamplesPerPixel = 1`)
+  are rejected. New `tests/encode_subbyte4_roundtrip.rs` (8 tests):
+  byte-exact decode round-trips across the compressor × predictor ×
+  strip / tiled matrix on odd-width rasters (row-padding nibble
+  exercised), tiled-vs-strip equivalence, oversized-single-tile edge
+  replication, BigTIFF, IFD/ColorMap tag inspection, negative paths,
+  and an ImageMagick cross-read of the tiled LZW+predictor output
+  (4-bit `n` scales to 8-bit as `n · 17` exactly, so the independent
+  reader must agree byte-for-byte — and does).
+
 - **Floating-point (`SampleFormat = 3`) encode + `Predictor = 3` writer
   (TIFF 6.0 §SampleFormat / §14 floating-point predictor).** Four new
   `EncodePixelFormat` variants — `GrayF32` / `GrayF64` (BlackIsZero

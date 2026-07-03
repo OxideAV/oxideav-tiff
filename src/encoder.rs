@@ -171,6 +171,26 @@ pub enum EncodePixelFormat<'a> {
     /// Deflate / Zstd / CCITT-MH / CCITT-T.4-1D, the same compressor
     /// set [`Self::Bilevel`] accepts.
     TransparencyMask { pixels: &'a [u8] },
+    /// 4-bit greyscale (BlackIsZero, 1 sample per pixel, two pixels
+    /// per byte, **high nibble first**, each row padded to a byte
+    /// boundary). `pixels` is the packed raster:
+    /// `ceil(width / 2) * height` bytes — TIFF 6.0 §"Compression"
+    /// (page 30): "If the number of bits per row is not a multiple of
+    /// 8, pack as many bits as possible into each byte, with
+    /// row-starts on byte boundaries" (the same convention the 4-bit
+    /// decode path reads). The decoder renders each nibble `n` as the
+    /// 8-bit value `(n << 4) | n`. Compressors accepted: None /
+    /// PackBits / LZW / Deflate / Zstd; CCITT is 1-bit facsimile
+    /// coding per §10 / §11 and rejected. `Predictor = 2` composes —
+    /// the §14 predictor at 4 bits differences the nibble values
+    /// modulo 16, matching the decoder's 4-bit
+    /// expand-difference-repack reversal. `PlanarConfiguration = 2`
+    /// is irrelevant at `SamplesPerPixel = 1` and rejected. §15
+    /// tiling composes: `TileWidth` being a multiple of 16 keeps
+    /// every tile-column boundary byte-aligned at 4 bits, and the
+    /// tile packer replicates the last visible column / row into the
+    /// §15 edge padding at nibble granularity.
+    Gray4 { pixels: &'a [u8] },
     /// 8-bit greyscale (BlackIsZero, 1 sample per pixel).
     /// `pixels.len() == width * height`.
     Gray8 { pixels: &'a [u8] },
@@ -202,6 +222,20 @@ pub enum EncodePixelFormat<'a> {
     /// 8-bit indexed palette. `indices.len() == width * height`,
     /// `palette.len() <= 256` (any extras are ignored).
     Palette8 {
+        indices: &'a [u8],
+        palette: &'a [RgbColor],
+    },
+    /// 4-bit indexed palette (`PhotometricInterpretation = 3`,
+    /// `BitsPerSample = 4`): two indices per byte, high nibble first,
+    /// each row padded to a byte boundary exactly as for
+    /// [`Self::Gray4`] — `indices.len() == ceil(width / 2) * height`.
+    /// `palette` supplies 1..=16 entries; the on-disk `ColorMap`
+    /// (tag 320) is the §"Palette Color Images" `3 * 2^BitsPerSample`
+    /// = 48-SHORT array (16 red words, then 16 green, then 16 blue),
+    /// each 8-bit channel replicated into both bytes of its 16-bit
+    /// word (`0xFF → 0xFFFF`) as for [`Self::Palette8`]. Compressors,
+    /// predictor, tiling, and planar rules match [`Self::Gray4`].
+    Palette4 {
         indices: &'a [u8],
         palette: &'a [RgbColor],
     },
@@ -1187,6 +1221,24 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                     None,
                 )
             }
+            EncodePixelFormat::Gray4 { pixels } => {
+                // TIFF 6.0 §"Compression" (page 30): sub-byte samples
+                // pack MSB-first with row starts on byte boundaries,
+                // so the packed raster is ceil(width / 2) bytes per
+                // row. The caller supplies the packed form (as for
+                // Bilevel) and the encoder writes it through.
+                let row_bytes = (p.width as usize).div_ceil(2);
+                let want = row_bytes * (p.height as usize);
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/Gray4: pixel buffer is {} bytes, expected {want} \
+                         (row_bytes={row_bytes}, height={})",
+                        pixels.len(),
+                        p.height
+                    )));
+                }
+                (1u16, vec![4u16], PHOTO_BLACK_IS_ZERO, pixels.to_vec(), None)
+            }
             EncodePixelFormat::Gray8 { pixels } => {
                 let want = (p.width as usize) * (p.height as usize);
                 if pixels.len() != want {
@@ -1266,6 +1318,34 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                     cm[512 + i] = ((c[2] as u16) << 8) | c[2] as u16;
                 }
                 (1u16, vec![8u16], PHOTO_PALETTE, indices.to_vec(), Some(cm))
+            }
+            EncodePixelFormat::Palette4 { indices, palette } => {
+                // 4-bit indexed palette: packed nibble indices as for
+                // Gray4, plus the §"Palette Color Images" ColorMap of
+                // 3 * 2^4 = 48 SHORTs (16 red, 16 green, 16 blue).
+                let row_bytes = (p.width as usize).div_ceil(2);
+                let want = row_bytes * (p.height as usize);
+                if indices.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/Palette4: index buffer is {} bytes, expected {want} \
+                         (row_bytes={row_bytes}, height={})",
+                        indices.len(),
+                        p.height
+                    )));
+                }
+                if palette.is_empty() || palette.len() > 16 {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/Palette4: palette must have 1..=16 entries (got {})",
+                        palette.len()
+                    )));
+                }
+                let mut cm = vec![0u16; 16 * 3];
+                for (i, c) in palette.iter().enumerate() {
+                    cm[i] = ((c[0] as u16) << 8) | c[0] as u16;
+                    cm[16 + i] = ((c[1] as u16) << 8) | c[1] as u16;
+                    cm[32 + i] = ((c[2] as u16) << 8) | c[2] as u16;
+                }
+                (1u16, vec![4u16], PHOTO_PALETTE, indices.to_vec(), Some(cm))
             }
             EncodePixelFormat::GrayF32 { pixels } => {
                 // TIFF 6.0 §SampleFormat (tag 339): SampleFormat = 3 IEEE
@@ -1528,6 +1608,25 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                 p.predictor && is_float,
                 p.compression,
             )?
+        } else if bps == 4 {
+            // Tiled 4-bit sub-byte layout (TIFF 6.0 §15). `TileWidth`
+            // being a multiple of 16 keeps every tile-column boundary
+            // byte-aligned at 4 bits, and each tile row is an
+            // independent byte-padded scanline of tile_w / 2 bytes.
+            // `build_tiles_sub4` slices the packed nibble raster with
+            // §15 edge replication (last visible column / row) at
+            // nibble granularity and applies the §14 4-bit predictor
+            // per tile when requested — matching the decoder's
+            // per-tile `apply_horizontal_predictor` reversal.
+            build_tiles_sub4(
+                &raw_pixels,
+                p.width as usize,
+                p.height as usize,
+                tile_w as usize,
+                tile_h as usize,
+                p.predictor,
+                p.compression,
+            )?
         } else if bps == 1 {
             // Tiled 1-bit bilevel layout (TIFF 6.0 §15). The bilevel /
             // mask raster is MSB-first packed at ceil(width/8) bytes per
@@ -1624,7 +1723,11 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         // `undo_float_predictor`; integer formats take the §14
         // horizontal-differencing predictor reversed by the cumulative add.
         if p.predictor {
-            let row_bytes = (p.width as usize) * (samples_per_pixel as usize) * (bps / 8);
+            // Packed-bit row stride: TIFF 6.0 §"Compression" rows start
+            // on byte boundaries, so at 4 bits the stride is
+            // ceil(width * spp * bps / 8) — the byte-aligned depths
+            // reduce to width * spp * (bps / 8) unchanged.
+            let row_bytes = ((p.width as usize) * (samples_per_pixel as usize) * bps).div_ceil(8);
             if is_float {
                 forward_float_predictor(
                     &mut raw_pixels,
@@ -2273,6 +2376,70 @@ fn build_tiles(
 /// compressor (§15: "Tiles are compressed individually, just as strips
 /// are compressed"). Only `BitsPerSample = 1`, `SamplesPerPixel = 1`
 /// reaches here.
+/// Slice a packed 4-bit raster (two samples per byte, high nibble
+/// first, `ceil(width / 2)` bytes per row per TIFF 6.0 §"Compression")
+/// into a §15 row-major tile grid.
+///
+/// Each tile row is an independent byte-padded scanline of
+/// `tile_w / 2` bytes (`tile_w` is a multiple of 16, so this is exact
+/// and every tile-column boundary lands on a byte boundary at
+/// `BitsPerSample = 4` — the same argument the decoder's sub-byte tile
+/// reassembly relies on). Boundary tiles are padded by replicating the
+/// last visible column / row (§15 "Padding") at nibble granularity.
+/// When `predictor` is set, the §14 4-bit horizontal difference is
+/// applied per tile before compression, matching the decoder's
+/// per-tile reversal.
+fn build_tiles_sub4(
+    packed: &[u8],
+    width: usize,
+    height: usize,
+    tile_w: usize,
+    tile_h: usize,
+    predictor: bool,
+    compression: TiffCompression,
+) -> Result<Vec<Vec<u8>>> {
+    let src_row_bytes = width.div_ceil(2);
+    let tile_row_bytes = tile_w / 2; // tile_w is a validated multiple of 16
+    let tiles_across = width.div_ceil(tile_w);
+    let tiles_down = height.div_ceil(tile_h);
+
+    // Fetch the nibble at (x, y), clamping out-of-range coordinates to
+    // the last visible column / row (§15 edge replication).
+    let nib = |x: usize, y: usize| -> u8 {
+        let xx = x.min(width - 1);
+        let yy = y.min(height - 1);
+        let b = packed[yy * src_row_bytes + xx / 2];
+        if xx & 1 == 0 {
+            b >> 4
+        } else {
+            b & 0x0F
+        }
+    };
+
+    let mut out = Vec::with_capacity(tiles_across * tiles_down);
+    for ty in 0..tiles_down {
+        for tx in 0..tiles_across {
+            let mut tile = vec![0u8; tile_row_bytes * tile_h];
+            for r in 0..tile_h {
+                for c in 0..tile_w {
+                    let v = nib(tx * tile_w + c, ty * tile_h + r);
+                    let off = r * tile_row_bytes + c / 2;
+                    if c & 1 == 0 {
+                        tile[off] |= v << 4;
+                    } else {
+                        tile[off] |= v;
+                    }
+                }
+            }
+            if predictor {
+                forward_horizontal_predictor(&mut tile, tile_w, tile_h, 1, 4, tile_row_bytes)?;
+            }
+            out.push(compression.pack(&tile, tile_w as u32, tile_h as u32)?);
+        }
+    }
+    Ok(out)
+}
+
 fn build_tiles_bilevel(
     pixels: &[u8],
     width: usize,
@@ -2449,10 +2616,37 @@ fn forward_horizontal_predictor(
                 }
             }
         }
+        4 => {
+            // §14 at 4 bits: expand each row's nibbles, difference
+            // modulo 16, repack — the exact inverse of the decoder's
+            // 4-bit expand / cumulative-add / repack arm ("Spec
+            // Section 14: expand to 8-bit, difference, repack").
+            for r in 0..rows {
+                let row_off = r * row_bytes;
+                let n = width * samples;
+                let mut tmp: Vec<u8> = Vec::with_capacity(n);
+                for x in 0..n {
+                    let byte = buf[row_off + x / 2];
+                    tmp.push(if x & 1 == 0 { byte >> 4 } else { byte & 0x0F });
+                }
+                for x in (samples..n).rev() {
+                    tmp[x] = tmp[x].wrapping_sub(tmp[x - samples]) & 0x0F;
+                }
+                for (x, v) in tmp.iter().enumerate() {
+                    let off = row_off + x / 2;
+                    if x & 1 == 0 {
+                        buf[off] = (buf[off] & 0x0F) | ((v & 0x0F) << 4);
+                    } else {
+                        buf[off] = (buf[off] & 0xF0) | (v & 0x0F);
+                    }
+                }
+            }
+        }
         _ => {
-            // The encoder only emits 8- and 16-bit components, so this
-            // is unreachable from the public API; keep the precise
-            // error for defensiveness / future bit depths.
+            // The encoder only emits 4-, 8- and 16-bit integer
+            // components, so this is unreachable from the public API;
+            // keep the precise error for defensiveness / future bit
+            // depths.
             return Err(Error::invalid(format!(
                 "TIFF encode: Predictor=2 at bits_per_sample={bps} unsupported"
             )));
