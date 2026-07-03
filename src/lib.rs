@@ -51,11 +51,18 @@
 //!   (Compression=50000) / CCITT Modified Huffman (Compression=2) /
 //!   CCITT T.4 1-D and 2-D (Compression=3, with optional T4Options
 //!   bit 2 byte-aligned EOLs) / CCITT T.6 (Compression=4)
-//! * Layout: single strip, `PlanarConfiguration = 2` (separate planes,
-//!   chunky-source), or tiled (TIFF 6.0 §15, chunky) — see
-//!   [`EncodePage::planar`] / [`EncodePage::tiling`]
-//! * Predictor: 2 (horizontal differencing) via [`EncodePage::predictor`]
-//! * Multi-page chain via [`encode_tiff_multi`]
+//! * Layout: strips (single or multi via
+//!   [`encoder::PageExtras::rows_per_strip`], TIFF 6.0 §"RowsPerStrip"),
+//!   `PlanarConfiguration = 2` (separate planes, chunky-source), or
+//!   tiled (TIFF 6.0 §15, chunky) — see [`EncodePage::planar`] /
+//!   [`EncodePage::tiling`]
+//! * Predictor: 2 (horizontal differencing) and 3 (floating-point)
+//!   via [`EncodePage::predictor`]
+//! * Multi-page chain via [`encode_tiff_multi`]; SubIFDs (330) child
+//!   image trees, Exif (34665) / GPS (34853) verbatim child IFDs,
+//!   PageNumber / NewSubfileType bits, resolution + §8 ASCII metadata
+//!   via [`encoder::PageExtras`] (children decode through
+//!   [`decode_tiff_at`])
 //!
 //! The deprecated TIFF 6.0 §22 old-style JPEG (Compression=6) decodes
 //! in its interchange-format layout (`JPEGInterchangeFormat`, tag 513,

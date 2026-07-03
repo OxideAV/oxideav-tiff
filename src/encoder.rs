@@ -121,9 +121,9 @@ pub struct PageResolution {
 #[derive(Debug, Clone, Default)]
 pub struct PageExtras<'a> {
     /// Write the `PageNumber` field (tag 297, TIFF 6.0 §"PageNumber",
-    /// SHORT × 2) as `(page, total)`: "PageNumber[0] is the page
-    /// number" (0-based) and "PageNumber[1] is the total number of
-    /// pages in the document. If PageNumber[1] is 0, the total number
+    /// SHORT × 2) as `(page, total)`: "`PageNumber[0]` is the page
+    /// number" (0-based) and "`PageNumber[1]` is the total number of
+    /// pages in the document. If `PageNumber[1]` is 0, the total number
     /// of pages in the document is not available."
     pub page_number: Option<(u16, u16)>,
     /// Set bit 0 of `NewSubfileType` (tag 254, TIFF 6.0 page 36):
