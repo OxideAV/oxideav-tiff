@@ -735,3 +735,68 @@ fn metadata_validation_rejects_bad_values() {
     };
     assert!(encode_tiff(&gray_page(&px, 4, 4, embedded_nul)).is_err());
 }
+
+#[test]
+fn orientation_write_roundtrips_through_decoder_reorientation() {
+    // Orientation 6 (0th row -> visual right): the decoder re-orients
+    // the stored raster into display order, so the written file must
+    // decode to the 90°-rotated geometry — swapped dimensions with
+    // stored (row, col) appearing at display (col, h-1-row).
+    let (w, h) = (4u32, 2u32);
+    let px: Vec<u8> = (0..w * h).map(|i| (i * 10) as u8).collect();
+    let file = encode_tiff(&gray_page(
+        &px,
+        w,
+        h,
+        PageExtras {
+            orientation: Some(6),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let hdr = parse_header(&file).unwrap();
+    let (entries, _) = parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
+    assert_eq!(
+        find(&entries, 274).unwrap().as_u32(hdr.byte_order).unwrap(),
+        6
+    );
+    let d = decode_tiff(&file).unwrap();
+    assert_eq!((d.width, d.height), (h, w), "transpose-family swap");
+    let disp = &d.frame.planes[0].data;
+    for row in 0..h as usize {
+        for col in 0..w as usize {
+            let stored = px[row * w as usize + col];
+            // Orientation 6: display(x, y) with x = h-1-row, y = col.
+            let x = (h as usize) - 1 - row;
+            let y = col;
+            assert_eq!(
+                disp[y * h as usize + x],
+                stored,
+                "stored ({row},{col}) must display at ({x},{y})"
+            );
+        }
+    }
+    // Out-of-range rejected; orientation 1 written explicitly decodes
+    // identically to the untagged default.
+    assert!(encode_tiff(&gray_page(
+        &px,
+        w,
+        h,
+        PageExtras {
+            orientation: Some(9),
+            ..Default::default()
+        }
+    ))
+    .is_err());
+    let f1 = encode_tiff(&gray_page(
+        &px,
+        w,
+        h,
+        PageExtras {
+            orientation: Some(1),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(decode_tiff(&f1).unwrap().frame.planes[0].data, px);
+}

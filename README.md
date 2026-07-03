@@ -774,6 +774,9 @@ byte-for-byte.
 `EncodePage::extras` (`PageExtras`, all fields default-off) adds the
 page-level metadata writes:
 
+* **Orientation (274)** — §Orientation values 1..=8; the raster stays
+  in stored layout, the tag drives reader-side re-orientation (this
+  crate's decoder applies it on decode).
 * **Resolution (282 / 283 / 296)** — `PageResolution` writes the
   §"Physical Dimensions" XResolution / YResolution RATIONALs plus
   ResolutionUnit (1 none / 2 inch / 3 centimeter, validated).

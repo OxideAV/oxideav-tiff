@@ -147,6 +147,17 @@ pub struct PageExtras<'a> {
     /// Write a GPS IFD pointer (tag 34853, LONG / LONG8) to a child
     /// IFD carrying exactly these entries, as for [`Self::exif_ifd`].
     pub gps_ifd: Option<&'a [AuxIfdEntry<'a>]>,
+    /// Write the `Orientation` field (tag 274, TIFF 6.0 §Orientation,
+    /// page 36): how the *stored* 0th row / 0th column map onto the
+    /// displayed image, values 1..=8 (1 = canonical as-stored ==
+    /// as-displayed; 2..=4 mirror/180° in place; 5..=8 transpose
+    /// family, swapping displayed width/height). The raster in
+    /// `pixels` is always the stored layout — the encoder transports
+    /// it unchanged and this tag only tells readers how to re-orient
+    /// it for display (this crate's decoder applies the re-orientation
+    /// on decode). Values outside 1..=8 are rejected; `None` omits the
+    /// tag (spec default 1).
+    pub orientation: Option<u16>,
     /// Write the §"Physical Dimensions" resolution triple:
     /// XResolution (282) / YResolution (283) RATIONALs and
     /// ResolutionUnit (296). See [`PageResolution`].
@@ -2442,6 +2453,21 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
             field_type: offset_field_type,
             count: strip_count,
             value: IfdValue::StripOffsets,
+        });
+    }
+    // 274 Orientation (SHORT) — TIFF 6.0 §Orientation, values 1..=8.
+    // Sits between 273 (StripOffsets) and 277 (SamplesPerPixel).
+    if let Some(orient) = p.extras.orientation {
+        if !(1..=8).contains(&orient) {
+            return Err(Error::invalid(format!(
+                "TIFF encode: Orientation must be 1..=8 (TIFF 6.0 §Orientation); got {orient}"
+            )));
+        }
+        entries.push(PageIfdEntry {
+            tag: TAG_ORIENTATION,
+            field_type: TYPE_SHORT,
+            count: 1,
+            value: IfdValue::Inline(orient.to_le_bytes().to_vec()),
         });
     }
     // 277 SamplesPerPixel (SHORT)
