@@ -179,6 +179,26 @@ pub enum EncodePixelFormat<'a> {
     Gray16Le { pixels: &'a [u8] },
     /// 8-bit packed RGB. `pixels.len() == width * height * 3`.
     Rgb24 { pixels: &'a [u8] },
+    /// 16-bit packed RGB (`PhotometricInterpretation = 2`,
+    /// `SamplesPerPixel = 3`, `BitsPerSample = [16, 16, 16]`),
+    /// little-endian on disk — the encoder always writes II files, so
+    /// the input bytes are consumed verbatim exactly as for
+    /// [`Self::Gray16Le`]. `pixels` is row-major interleaved
+    /// `(R, G, B)` samples of two bytes each:
+    /// `pixels.len() == width * height * 6`. The decode side renders
+    /// this layout as [`crate::TiffPixelFormat::Rgb48Le`], closing the
+    /// encode-parity gap for the 16-bit RGB decode path. Compressors
+    /// accepted: None / PackBits / LZW / Deflate / Zstd (the
+    /// byte-aligned photometric-agnostic set); CCITT is bilevel-only
+    /// per §10 / §11 and rejected. `Predictor = 2` composes — §14
+    /// differences the 16-bit sample values per component ("subtract
+    /// red component values from red", at the sample width
+    /// BitsPerSample declares) with offset `SamplesPerPixel = 3`
+    /// chunky, offset 1 per plane. `PlanarConfiguration = 2` composes
+    /// (three full-resolution 16-bit component planes, exactly the
+    /// Rgb24 plane split at two bytes per sample); §15 tiling and
+    /// BigTIFF compose.
+    Rgb48 { pixels: &'a [u8] },
     /// 8-bit indexed palette. `indices.len() == width * height`,
     /// `palette.len() <= 256` (any extras are ignored).
     Palette8 {
@@ -962,6 +982,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         && !matches!(
             p.kind,
             EncodePixelFormat::Rgb24 { .. }
+                | EncodePixelFormat::Rgb48 { .. }
                 | EncodePixelFormat::CieLab8 { .. }
                 | EncodePixelFormat::Cmyk32 { .. }
                 | EncodePixelFormat::YCbCr24 { .. }
@@ -1201,6 +1222,21 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                     )));
                 }
                 (3u16, vec![8u16, 8, 8], PHOTO_RGB, pixels.to_vec(), None)
+            }
+            EncodePixelFormat::Rgb48 { pixels } => {
+                // 16-bit RGB: BitsPerSample = [16, 16, 16], two
+                // little-endian bytes per sample as for Gray16Le. The
+                // 3-entry SHORT array (6 bytes) spills out-of-line on
+                // classic TIFF and stays inline on BigTIFF via the
+                // existing BitsPerSample machinery.
+                let want = (p.width as usize) * (p.height as usize) * 6;
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/Rgb48: pixel buffer is {} bytes, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                (3u16, vec![16u16, 16, 16], PHOTO_RGB, pixels.to_vec(), None)
             }
             EncodePixelFormat::Palette8 { indices, palette } => {
                 let want = (p.width as usize) * (p.height as usize);

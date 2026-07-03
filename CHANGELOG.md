@@ -49,6 +49,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   equivalence pair, a two-page §22 chain, and a 12-case hand-built
   rejection matrix that runs in both registry and standalone builds.
 
+- **16-bit RGB encode (`EncodePixelFormat::Rgb48`) — encode parity for
+  the `Rgb48Le` decode path.** Writes `PhotometricInterpretation = 2`,
+  `SamplesPerPixel = 3`, `BitsPerSample = [16, 16, 16]` with two
+  little-endian bytes per sample (the encoder's II byte order), exactly
+  as the decoder's 16-bit RGB strip/tile walkers read it back. The
+  generic encode machinery composes untouched: byte-aligned compressors
+  (None / PackBits / LZW / Deflate / Zstd), `Predictor = 2` (§14
+  differences the 16-bit sample values per component), `PlanarConfiguration
+  = 2` (three 16-bit component planes), §15 tiling incl. partial edge
+  tiles, BigTIFF (the 6-byte BitsPerSample array stays inline in the
+  widened slot), and the multi-page chain. CCITT stays rejected
+  (bilevel-only). New `tests/encode_rgb48_roundtrip.rs` (10 tests):
+  byte-exact self-roundtrips across the full compressor × predictor ×
+  planar × tiled × BigTIFF matrix on odd-dimension rasters exercising
+  the full 16-bit range, IFD tag inspection, negative paths, and an
+  independent-reader cross-check (our LZW+predictor output transcoded
+  to a 16-bit PPM by ImageMagick matches the input sample-exact).
+
 - **Floating-point (`SampleFormat = 3`) encode + `Predictor = 3` writer
   (TIFF 6.0 §SampleFormat / §14 floating-point predictor).** Four new
   `EncodePixelFormat` variants — `GrayF32` / `GrayF64` (BlackIsZero

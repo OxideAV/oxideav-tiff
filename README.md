@@ -474,6 +474,7 @@ components.
 | BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Gray8` / `::Gray16Le` |
 | **BlackIsZero float** (SampleFormat = 3) | 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`** | `EncodePixelFormat::GrayF32` / `::GrayF64` (writes SampleFormat = 3; the §14 floating-point predictor) |
 | RGB            | 8         | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Rgb24`     |
+| **RGB**        | 16        | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, **`PlanarConfiguration = 2`** / **`Predictor = 2`**, BigTIFF | `EncodePixelFormat::Rgb48` (BitsPerSample = [16,16,16] little-endian — encode parity for the `Rgb48Le` decode path) |
 | **RGB float** (SampleFormat = 3) | 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`**, **`PlanarConfiguration = 2`** | `EncodePixelFormat::RgbF32` / `::RgbF64` (writes SampleFormat = 3, SamplesPerPixel = 3) |
 | Palette        | 8         | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Palette8`  |
 | **CIELab (3 chan)** | 8    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::CieLab8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 3, BitsPerSample = [8,8,8]) |
@@ -515,14 +516,15 @@ the encoder writes first differences (per-component, offset
 tag (317) so the decoder reverses the step — the exact inverse of the
 decoder's cumulative add. It applies to the lossless byte-aligned
 formats whose decode path already supports it (`Gray8`, `Gray16Le`,
-`Rgb24`, `Palette8`); combining it with the bilevel CCITT schemes or
+`Rgb24`, `Rgb48` — §14 differencing at the 16-bit sample width —
+`Palette8`); combining it with the bilevel CCITT schemes or
 with `Bilevel` input is rejected. An independent reference reader
 reports horizontal-differencing predictor 2 on the output, and an
 independent transcode to uncompressed re-decodes to the original pixels.
 
 `PlanarConfiguration = 2` (separate component planes, TIFF 6.0
 §"PlanarConfiguration") is available on encode via the
-`EncodePage::planar` flag. When set on an `Rgb24` page the encoder
+`EncodePage::planar` flag. When set on an `Rgb24` (or 16-bit `Rgb48`) page the encoder
 de-interleaves the chunky `RGBRGB…` data into one full-resolution
 strip per component plane and writes `StripOffsets` / `StripByteCounts`
 as `SamplesPerPixel`-entry arrays in plane order — the spec's
@@ -551,7 +553,7 @@ geometry by replicating the last visible column / row (§15 "Padding"), so
 every tile is the same size before compression; the decoder displays only
 the `ImageWidth × ImageLength` region and ignores the padding. Works for
 the byte-aligned chunky formats (`Gray8` / `Gray16Le` / `Rgb24` /
-`Palette8`) under None / PackBits / LZW / Deflate / ZSTD, with or without
+`Rgb48` / `Palette8`) under None / PackBits / LZW / Deflate / ZSTD, with or without
 `Predictor = 2` (applied per-tile), and for the 1-bit `Bilevel` /
 `TransparencyMask` formats under the same byte-aligned compressors
 (sub-byte tile-row bit packing with §15 edge replication, no predictor).
