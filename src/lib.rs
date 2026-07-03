@@ -32,8 +32,12 @@
 //!
 //! Encode-side coverage (classic II / single or multi page):
 //!
-//! * Photometric: WhiteIsZero (1-bit bilevel) / BlackIsZero (8/16-bit
-//!   greyscale) / RGB (8-bit) / Palette (8-bit indexed) /
+//! * Photometric: WhiteIsZero (1-bit bilevel) / BlackIsZero (4/8/16-bit
+//!   greyscale, plus 8/16-bit **signed** two's-complement greyscale
+//!   with `SampleFormat = 2` per TIFF 6.0 §SampleFormat) / RGB (8-bit
+//!   and 16-bit `Rgb48`, plus 8-bit RGBA with the §ExtraSamples tag
+//!   via [`EncodePixelFormat::Rgba32`]) / Palette (4- and 8-bit
+//!   indexed) /
 //!   TransparencyMask (1-bit, sets PhotometricInterpretation = 4 and
 //!   NewSubfileType bit 2 per TIFF 6.0 §"PhotometricInterpretation"
 //!   value 4 + §"NewSubfileType" bit 2) / CIELab (8-bit chunky
