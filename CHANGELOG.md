@@ -98,6 +98,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (4-bit `n` scales to 8-bit as `n · 17` exactly, so the independent
   reader must agree byte-for-byte — and does).
 
+- **Signed-integer (`SampleFormat = 2`) grayscale encode
+  (`EncodePixelFormat::GrayI8` / `GrayI16`) — encode parity for the
+  signed decode path.** One `i8` / `i16` per pixel, stored as
+  two's-complement bytes (16-bit little-endian) with
+  `PhotometricInterpretation = 1`, `SamplesPerPixel = 1`, and the
+  `SampleFormat = 2` tag (339) per TIFF 6.0 §SampleFormat — the layout
+  scientific / elevation TIFFs use. The decoder's order-preserving
+  offset-binary display map (sign-bit flip `XOR 0x80` / `XOR 0x8000`),
+  already validated against hand-built fixtures in
+  `tests/decode_sample_format_signed.rs`, is the round-trip oracle.
+  `Predictor = 2` composes (§14 differencing is a wrapping subtract on
+  the stored bytes, identical for two's-complement and unsigned
+  samples); §15 tiling, BigTIFF, and the multi-page chain compose;
+  CCITT and planar are rejected. New `tests/encode_signed_roundtrip.rs`
+  (7 tests): full-range i8/i16 rasters across the compressor ×
+  predictor × strip / tiled × BigTIFF × multi-page matrix,
+  SampleFormat-tag + raw-strip-byte inspection, and negative paths.
+
 - **Floating-point (`SampleFormat = 3`) encode + `Predictor = 3` writer
   (TIFF 6.0 §SampleFormat / §14 floating-point predictor).** Four new
   `EncodePixelFormat` variants — `GrayF32` / `GrayF64` (BlackIsZero

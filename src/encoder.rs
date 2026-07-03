@@ -239,6 +239,35 @@ pub enum EncodePixelFormat<'a> {
         indices: &'a [u8],
         palette: &'a [RgbColor],
     },
+    /// 8-bit **signed** two's-complement grayscale
+    /// (`PhotometricInterpretation = 1` BlackIsZero,
+    /// `SamplesPerPixel = 1`, `BitsPerSample = 8`,
+    /// **`SampleFormat = 2`**) per TIFF 6.0 §SampleFormat (tag 339,
+    /// page 80) — the layout scientific / elevation TIFFs use for
+    /// signed data. `pixels` is one `i8` per pixel in row-major order
+    /// (`pixels.len() == width * height`); each sample is stored as
+    /// its two's-complement byte and the encoder emits the
+    /// `SampleFormat = 2` tag so the decoder routes through its
+    /// order-preserving offset-binary display map (stored signed
+    /// minimum → display 0, signed maximum → display 255 — a sign-bit
+    /// flip). §SampleFormat's companion bounds SMinSampleValue /
+    /// SMaxSampleValue default to "the full range of the data type"
+    /// and are omitted. Compressors: None / PackBits / LZW / Deflate /
+    /// Zstd; CCITT is bilevel-only and rejected. `Predictor = 2`
+    /// composes — §14 differencing is a wrapping subtract on the
+    /// stored bytes, identical for two's-complement and unsigned
+    /// samples, and the decoder reverses it before the display map.
+    /// `PlanarConfiguration = 2` is irrelevant at `SamplesPerPixel =
+    /// 1` and rejected; §15 tiling and BigTIFF compose.
+    GrayI8 { pixels: &'a [i8] },
+    /// 16-bit **signed** two's-complement grayscale
+    /// (`SampleFormat = 2`, `BitsPerSample = 16`), two little-endian
+    /// bytes per sample. `pixels` is one `i16` per pixel,
+    /// `pixels.len() == width * height`. Same field set, compressor
+    /// set, and composition rules as [`Self::GrayI8`]; the decoder's
+    /// offset-binary map renders onto its `Gray16Le` display plane
+    /// (sign-bit flip `XOR 0x8000`).
+    GrayI16 { pixels: &'a [i16] },
     /// 32-bit IEEE 754 single-precision floating-point grayscale
     /// (`PhotometricInterpretation = 1` BlackIsZero, `SamplesPerPixel = 1`,
     /// `BitsPerSample = 32`, `SampleFormat = 3`) per TIFF 6.0 §SampleFormat
@@ -1347,6 +1376,35 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                 }
                 (1u16, vec![4u16], PHOTO_PALETTE, indices.to_vec(), Some(cm))
             }
+            EncodePixelFormat::GrayI8 { pixels } => {
+                // TIFF 6.0 §SampleFormat (tag 339): SampleFormat = 2,
+                // two's-complement signed integer at the width
+                // BitsPerSample declares. Each i8 is stored as its
+                // two's-complement byte.
+                let want = (p.width as usize) * (p.height as usize);
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/GrayI8: pixel buffer is {} samples, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                let buf: Vec<u8> = pixels.iter().map(|&s| s as u8).collect();
+                (1u16, vec![8u16], PHOTO_BLACK_IS_ZERO, buf, None)
+            }
+            EncodePixelFormat::GrayI16 { pixels } => {
+                let want = (p.width as usize) * (p.height as usize);
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/GrayI16: pixel buffer is {} samples, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                let mut buf = Vec::with_capacity(want * 2);
+                for s in *pixels {
+                    buf.extend_from_slice(&s.to_le_bytes());
+                }
+                (1u16, vec![16u16], PHOTO_BLACK_IS_ZERO, buf, None)
+            }
             EncodePixelFormat::GrayF32 { pixels } => {
                 // TIFF 6.0 §SampleFormat (tag 339): SampleFormat = 3 IEEE
                 // 754 single-precision grayscale. BitsPerSample fixes the
@@ -2029,8 +2087,9 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     }
 
     // 339 SampleFormat (SHORT × SamplesPerPixel) — TIFF 6.0 §SampleFormat
-    // (page 80). Only emitted for the float formats (SampleFormat = 3,
-    // IEEE floating point); the integer / unsigned formats default to
+    // (page 80). Emitted for the float formats (SampleFormat = 3, IEEE
+    // floating point) and the signed-integer formats (SampleFormat = 2,
+    // two's complement); the unsigned formats default to
     // SampleFormat = 1 and omit the tag (an absent field defaults to 1
     // per the spec). One value per component (uniform across the page).
     // Tag 339 sits between 334 (NumberOfInks) and 530 (YCbCrSubSampling)
@@ -2039,8 +2098,17 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     // 4-byte classic threshold) and 6 for RGB (spills out-of-line on
     // classic, fits inline at the 8-byte BigTIFF threshold), so reuse the
     // inline-vs-external decision the BitsPerSample path uses.
-    if is_float {
-        let sf_words = vec![SAMPLE_FORMAT_IEEE_FP; samples_per_pixel as usize];
+    let is_signed = matches!(
+        p.kind,
+        EncodePixelFormat::GrayI8 { .. } | EncodePixelFormat::GrayI16 { .. }
+    );
+    if is_float || is_signed {
+        let sf_value = if is_float {
+            SAMPLE_FORMAT_IEEE_FP
+        } else {
+            SAMPLE_FORMAT_SINT
+        };
+        let sf_words = vec![sf_value; samples_per_pixel as usize];
         let sf_bytes: Vec<u8> = sf_words.iter().flat_map(|w| w.to_le_bytes()).collect();
         if sf_bytes.len() <= inline_threshold {
             entries.push(PageIfdEntry {
