@@ -751,6 +751,24 @@ unchanged, and the multi-IFD chain ([`encode_tiff_multi`]) is supported
 as long as every page agrees on the variant (a mixed-variant chain
 errors out — classic and BigTIFF IFD layouts are wire-incompatible).
 
+### Multi-strip write (RowsPerStrip)
+
+`PageExtras::rows_per_strip = Some(r)` splits the written image into
+`ceil(ImageLength / r)` independently-compressed strips (TIFF 6.0
+§"RowsPerStrip" — the spec recommends ~8K-byte strips so readers can
+stream), or `ceil / r` strips **per component plane** under
+`PlanarConfiguration = 2` with plane 0's strips first
+(§"StripOffsets"). The §14 predictors are row-local transforms, so the
+per-strip compression restart is the only on-disk difference; the
+CCITT coders restart per strip exactly as the per-strip decoder
+expects. Composes with every compressor, both predictors, sub-byte
+rasters, floats (f16/f32/f64), chunky **and** planar chroma-subsampled
+YCbCr (`r` must be an integer multiple of `YCbCrSubsampleVert` per §21
+page 90; chroma-plane strips carry `r / sv` reduced rows), BigTIFF and
+multi-page. Mutually exclusive with tiled layout (§15: the tile fields
+replace RowsPerStrip). `None` keeps the historical single-strip output
+byte-for-byte.
+
 ### Page extras: PageNumber, NewSubfileType, Exif/GPS child IFDs, SubIFDs tree
 
 `EncodePage::extras` (`PageExtras`, all fields default-off) adds the

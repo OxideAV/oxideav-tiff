@@ -131,6 +131,22 @@ pub struct PageExtras<'a> {
     /// Write a GPS IFD pointer (tag 34853, LONG / LONG8) to a child
     /// IFD carrying exactly these entries, as for [`Self::exif_ifd`].
     pub gps_ifd: Option<&'a [AuxIfdEntry<'a>]>,
+    /// Split the image into strips of this many rows (TIFF 6.0
+    /// §"RowsPerStrip"; the spec recommends strips of about 8K bytes
+    /// so readers can stream). `None` keeps the historical
+    /// one-strip-per-image (or one-strip-per-plane) layout; `Some(r)`
+    /// writes `ceil(ImageLength / r)` strips per image — or per
+    /// component plane under `PlanarConfiguration = 2`, with plane 0's
+    /// strips first per §"StripOffsets" — each independently
+    /// compressed, and stores `RowsPerStrip = r`. The §14 predictors
+    /// are row-local transforms, so per-strip compression composes
+    /// unchanged; the CCITT coders restart per strip exactly as the
+    /// per-strip decoder expects. Constraints: `r > 0`; mutually
+    /// exclusive with tiled layout (§15 replaces the strip fields);
+    /// for chroma-subsampled YCbCr, `r` must be an integer multiple of
+    /// `YCbCrSubsampleVert` (§21 page 90), covering both the chunky
+    /// data-unit stream and the reduced planar chroma planes.
+    pub rows_per_strip: Option<u32>,
     /// Write a `SubIFDs` tree (tag 330, LONG / LONG8 × N): each
     /// element is a complete child *image* page — strips / tiles,
     /// compression, predictor, planar and BigTIFF-variant handling
@@ -2034,6 +2050,36 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         _ => None,
     };
 
+    // §"RowsPerStrip": None keeps the historical single-strip layout;
+    // Some(r) splits the image (or each plane) into ceil(height / r)
+    // independently-compressed strips. Validated here so every strip
+    // builder below can assume a legal value.
+    let rows_per_strip: u32 = match p.extras.rows_per_strip {
+        None => p.height,
+        Some(r) => {
+            if r == 0 {
+                return Err(Error::invalid(
+                    "TIFF encode: rows_per_strip must be non-zero",
+                ));
+            }
+            if p.tiling.is_some() {
+                return Err(Error::invalid(
+                    "TIFF encode: rows_per_strip cannot combine with tiled layout — TIFF 6.0 \
+                     §15: tile fields replace RowsPerStrip / the strip fields",
+                ));
+            }
+            if let Some((_, sv)) = ycbcr_subsampling_nontrivial {
+                if r as usize % sv != 0 {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode: rows_per_strip ({r}) must be an integer multiple of \
+                         YCbCrSubsampleVert ({sv}) — TIFF 6.0 §21 page 90"
+                    )));
+                }
+            }
+            r.min(p.height)
+        }
+    };
+
     let bps = bits_per_sample[0] as usize;
     let strips: Vec<Vec<u8>> = if let Some((tile_w, tile_h)) = p.tiling {
         if let Some((sh, sv)) = ycbcr_subsampling_nontrivial {
@@ -2146,6 +2192,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 sv,
                 p.predictor,
                 p.compression,
+                rows_per_strip as usize,
             )?
         } else {
             build_planes_chunky_source(
@@ -2157,6 +2204,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 p.predictor,
                 is_float,
                 p.compression,
+                rows_per_strip as usize,
             )?
         }
     } else {
@@ -2193,7 +2241,42 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 )?;
             }
         }
-        vec![p.compression.pack(&raw_pixels, p.width, p.height)?]
+        if rows_per_strip >= p.height {
+            vec![p.compression.pack(&raw_pixels, p.width, p.height)?]
+        } else {
+            // Multi-strip chunky write. Both §14 predictors are
+            // row-local transforms (each row differences within
+            // itself), so the whole-image application above equals the
+            // per-strip application the decoder reverses; only the
+            // compression restarts per strip ("Compressed or
+            // uncompressed image data can be stored almost anywhere in
+            // a TIFF file ... organized into strips for faster random
+            // access"). Byte ranges: for the packed §21 data-unit
+            // stream a group of sv luma rows occupies one data-unit
+            // row; everything else is the byte-aligned (or sub-byte
+            // row-padded) scanline stride.
+            let mut out = Vec::new();
+            let mut done: u32 = 0;
+            while done < p.height {
+                let rows_this = rows_per_strip.min(p.height - done);
+                let (start, end) = if let Some((sh, sv)) = ycbcr_subsampling_nontrivial {
+                    let unit_row_bytes = ((p.width as usize) / sh) * (sh * sv + 2);
+                    let start = (done as usize / sv) * unit_row_bytes;
+                    (start, start + (rows_this as usize / sv) * unit_row_bytes)
+                } else {
+                    let row_bytes =
+                        ((p.width as usize) * (samples_per_pixel as usize) * bps).div_ceil(8);
+                    let start = done as usize * row_bytes;
+                    (start, start + rows_this as usize * row_bytes)
+                };
+                out.push(
+                    p.compression
+                        .pack(&raw_pixels[start..end], p.width, rows_this)?,
+                );
+                done += rows_this;
+            }
+            out
+        }
     };
     let planar_config = if p.planar {
         PLANAR_SEPARATE
@@ -2322,7 +2405,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
             tag: TAG_ROWS_PER_STRIP,
             field_type: TYPE_LONG,
             count: 1,
-            value: IfdValue::Inline(p.height.to_le_bytes().to_vec()),
+            value: IfdValue::Inline(rows_per_strip.to_le_bytes().to_vec()),
         });
     }
     // 279 StripByteCounts. count matches StripOffsets. Omitted for
@@ -2824,11 +2907,12 @@ fn build_planes_chunky_source(
     predictor: bool,
     is_float: bool,
     compression: TiffCompression,
+    rows_per_strip: usize,
 ) -> Result<Vec<Vec<u8>>> {
     let bytes_per_sample = bps / 8;
     let pixels = width * height;
     let plane_len = pixels * bytes_per_sample;
-    let mut out_strips = Vec::with_capacity(spp);
+    let mut out_strips = Vec::new();
     for plane in 0..spp {
         let mut plane_buf = vec![0u8; plane_len];
         for px in 0..pixels {
@@ -2837,8 +2921,8 @@ fn build_planes_chunky_source(
             plane_buf[dst..dst + bytes_per_sample]
                 .copy_from_slice(&raw_pixels[src..src + bytes_per_sample]);
         }
+        let plane_row_bytes = width * bytes_per_sample;
         if predictor {
-            let plane_row_bytes = width * bytes_per_sample;
             if is_float {
                 forward_float_predictor(
                     &mut plane_buf,
@@ -2858,7 +2942,22 @@ fn build_planes_chunky_source(
                 )?;
             }
         }
-        out_strips.push(compression.pack(&plane_buf, width as u32, height as u32)?);
+        // §"StripOffsets": plane 0's strips first, then plane 1's, and
+        // so on — emit every strip of this plane before moving to the
+        // next. Both §14 predictors are row-local, so the whole-plane
+        // application above equals per-strip application.
+        let mut done: usize = 0;
+        while done < height {
+            let rows_this = rows_per_strip.min(height - done);
+            let start = done * plane_row_bytes;
+            let end = start + rows_this * plane_row_bytes;
+            out_strips.push(compression.pack(
+                &plane_buf[start..end],
+                width as u32,
+                rows_this as u32,
+            )?);
+            done += rows_this;
+        }
     }
     Ok(out_strips)
 }
@@ -2881,6 +2980,7 @@ fn build_planes_chunky_source(
 /// plane is differenced independently per §14 ("Differencing works the
 /// same as it does for grayscale data") at its own row width. Returns
 /// the three compressed plane strips in Y, Cb, Cr order.
+#[allow(clippy::too_many_arguments)]
 fn build_planes_ycbcr_subsampled(
     src: &[u8],
     width: usize,
@@ -2889,6 +2989,7 @@ fn build_planes_ycbcr_subsampled(
     sv: usize,
     predictor: bool,
     compression: TiffCompression,
+    rows_per_strip: usize,
 ) -> Result<Vec<Vec<u8>>> {
     let cw = width / sh;
     let ch = height / sv;
@@ -2916,16 +3017,30 @@ fn build_planes_ycbcr_subsampled(
             cr_plane[by * cw + bx] = ((cr_sum + n / 2) / n) as u8;
         }
     }
-    let mut out = Vec::with_capacity(3);
-    for (plane_buf, pw, ph) in [
-        (&mut y_plane, width, height),
-        (&mut cb_plane, cw, ch),
-        (&mut cr_plane, cw, ch),
+    // Per-plane strip rows: the caller validated rows_per_strip as a
+    // multiple of sv (§21 page 90), so a strip of `r` luma rows pairs
+    // with exactly `r / sv` chroma-plane rows.
+    let mut out = Vec::new();
+    for (plane_buf, pw, ph, plane_rps) in [
+        (&mut y_plane, width, height, rows_per_strip),
+        (&mut cb_plane, cw, ch, rows_per_strip / sv),
+        (&mut cr_plane, cw, ch, rows_per_strip / sv),
     ] {
         if predictor {
             forward_horizontal_predictor(plane_buf, pw, ph, 1, 8, pw)?;
         }
-        out.push(compression.pack(plane_buf, pw as u32, ph as u32)?);
+        let plane_rps = plane_rps.max(1).min(ph);
+        let mut done: usize = 0;
+        while done < ph {
+            let rows_this = plane_rps.min(ph - done);
+            let start = done * pw;
+            out.push(compression.pack(
+                &plane_buf[start..start + rows_this * pw],
+                pw as u32,
+                rows_this as u32,
+            )?);
+            done += rows_this;
+        }
     }
     Ok(out)
 }

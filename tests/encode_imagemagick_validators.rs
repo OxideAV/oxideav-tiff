@@ -1637,3 +1637,38 @@ fn encoder_extras_page_number_and_subifd_visible_to_tiffinfo() {
         eprintln!("skipping: tiffinfo not available");
     }
 }
+
+#[test]
+fn encoder_multi_strip_visible_to_tiffinfo_and_convert() {
+    // Multi-strip write (PageExtras::rows_per_strip): tiffinfo must
+    // report the Rows/Strip value, and ImageMagick must read the
+    // striped file back to the same pixels.
+    let pixels = ramp_gray8(32, 21);
+    let page = EncodePage {
+        width: 32,
+        height: 21,
+        kind: EncodePixelFormat::Gray8 { pixels: &pixels },
+        compression: TiffCompression::Lzw,
+        predictor: true,
+        planar: false,
+        tiling: None,
+        bigtiff: false,
+        extras: oxideav_tiff::PageExtras {
+            rows_per_strip: Some(6),
+            ..Default::default()
+        },
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    assert_eq!(decode_tiff(&bytes).unwrap().frame.planes[0].data, pixels);
+    if let Some(info) = run_tiffinfo(&bytes) {
+        assert!(
+            info.contains("Rows/Strip: 6"),
+            "tiffinfo missing Rows/Strip line: {info}"
+        );
+    } else {
+        eprintln!("skipping: tiffinfo not available");
+    }
+    if let Some(im_bytes) = write_and_decode_with_convert(&bytes, false) {
+        assert_eq!(im_bytes, pixels, "ImageMagick striped-file mismatch");
+    }
+}
