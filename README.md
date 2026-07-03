@@ -34,6 +34,7 @@ library source was consulted.
 | CMYK (4 chan)  | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
 | **CIELab (3 chan)** | 8         | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` (Lab→XYZ@D65→linear NTSC→sRGB) |
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
+| BlackIsZero / WhiteIsZero / RGB / YCbCr / CMYK | 8 | **Old-style JPEG** (Compression=6, TIFF 6.0 §22 **interchange-format layout**) | `Gray8` / `Rgb24` |
 
 `Predictor = 1` (no prediction), `Predictor = 2` (horizontal
 differencing, per-component for `SamplesPerPixel > 1`) and
@@ -124,13 +125,72 @@ tiled JPEG are exercised against ImageMagick-written fixtures (incl. a
 partial-edge 48×40 / 16×16 grid).
 
 Not supported (return precise `Error::Unsupported`):
-12-bit (SOF1 with `P = 12`), arithmetic (SOF9 / SOF11),
-`PlanarConfiguration = 2` (`Compression = 7` only; the non-JPEG
-compressors do accept planar layout — see above), and the
-deprecated TIFF 6.0 §22 "old-style" JPEG (`Compression = 6`).
+12-bit (SOF1 with `P = 12`), arithmetic (SOF9 / SOF11), and
+`PlanarConfiguration = 2` (`Compression = 7` and `= 6` only; the
+non-JPEG compressors do accept planar layout — see above).
+The deprecated TIFF 6.0 §22 "old-style" JPEG (`Compression = 6`)
+decodes in its interchange-format layout — see the next section.
 JPEG-in-TIFF requires the default-on `registry` Cargo feature; with
-`default-features = false` the JPEG path returns
-`Error::Unsupported`.
+`default-features = false` the JPEG decode paths return
+`Error::Unsupported` (the §22 field validation and its precise
+rejection errors still run in standalone builds).
+
+### Old-style JPEG (Compression = 6, TIFF 6.0 §22)
+
+TIFF 6.0 §22 predates Tech Note 2 and defines `Compression = 6` with
+nine auxiliary fields (tags 512–521). TN2 deprecates the design but
+keeps the tag values "reserved indefinitely" so readers can continue
+to read existing files; the `jpeg_old` module implements exactly that
+reader side.
+
+Two §22 layouts exist:
+
+* **Interchange-format layout — decodes.** §22 "Strips and Tiles":
+  "Compressed images conforming to the syntax of the JPEG interchange
+  format can be converted to TIFF simply by defining a single strip or
+  tile for the entire image and then concatenating the TIFF image
+  description fields to the JPEG compressed image data."
+  `JPEGInterchangeFormat` (tag 513) "points to the Start of Image
+  (SOI) marker code" and `JPEGInterchangeFormatLength` (tag 514)
+  gives the bitstream's byte length. The decoder slices that complete
+  SOI..EOI bitstream and routes it through the same segment decode +
+  composite machinery the `Compression = 7` path uses, as one
+  full-image segment. Accepted photometrics are §22's continuous-tone
+  set: grayscale (BlackIsZero / WhiteIsZero, with polarity
+  inversion), RGB, YCbCr (any sampling the JPEG stream declares), and
+  CMYK; both `II` and `MM` byte orders. Real-world §22 laxities are
+  tolerated: redundant strip pointers into the interchange area are
+  ignored; a missing length field (it is "useful", not mandatory)
+  reads to the last EOI before end-of-file; a declared length that
+  includes trailing padding is trimmed to the EOI; and a missing
+  `JPEGProc` is accepted when the interchange stream is present (the
+  SOF marker carries the process — TN2 records writers that omitted
+  every auxiliary field). Multi-page §22 chains decode via
+  [`decode_tiff_all`]. Byte-exact equivalence with the
+  `Compression = 7` wrapping of the identical bitstream is asserted in
+  `tests/decode_oldstyle_jpeg.rs`.
+
+* **Tables-form layout — recognised, precisely rejected.** Without an
+  interchange stream, §22 stores *raw* table payloads (64-byte
+  zigzag-order quantization tables; Huffman tables as "16 BYTES of
+  'BITS'" + "VALUES") behind per-component offset arrays
+  (`JPEGQTables` / `JPEGDCTables` / `JPEGACTables`), and each strip
+  "points directly to the start of the entropy coded data (not to a
+  JPEG marker)". Reconstructing a decodable datastream from those
+  fields requires synthesizing ISO 10918-1 marker segments
+  (DQT / DHT / SOF / SOS), whose byte syntax the TIFF spec does not
+  define — TN2 calls this out as the §22 design's core failure ("the
+  TIFF control logic must ... synthesize JPEG markers from the TIFF
+  fields to feed the codec"). This build reports the layout as
+  `Error::Unsupported` with a message naming the missing capability.
+  Malformed tables-form IFDs get `Error::InvalidData` first: the §22
+  JPEGProc applicability table is enforced (baseline requires
+  Q/DC/AC tables; lossless requires JPEGLosslessPredictors +
+  JPEGDCTables), `JPEGProc` values other than 1 (baseline) / 14
+  (lossless Huffman) are rejected per "will be defined in the
+  future", lossless predictor selection-values are range-checked
+  (1..=7), and out-of-bounds / non-SOI interchange offsets are typed
+  errors.
 
 ### CIELab (PhotometricInterpretation = 8)
 
@@ -658,11 +718,16 @@ The compression schemes, photometrics, and layout features described
 above are all implemented on both decode and encode where stated. The
 remaining gaps are:
 
-- **JPEG-in-TIFF `Compression = 6`** (old-style, deprecated by TIFF
-  Technical Note 2) — decoder returns `Error::Unsupported`. The
+- **Old-style JPEG `Compression = 6` tables-form layout** — the §22
+  interchange-format layout now **decodes** (see the Old-style JPEG
+  section above); the tables-form layout (raw table payloads +
+  entropy-coded strips) is recognised and precisely rejected because
+  rebuilding a datastream from the raw tables needs the ISO 10918-1
+  marker byte syntax, which is outside the TIFF spec material. The
   new-style `Compression = 7` path does not support 12-bit precision
   (SOF1 `P = 12`), arithmetic coding (SOF9 / SOF11), or
-  `PlanarConfiguration = 2` JPEG segments.
+  `PlanarConfiguration = 2` JPEG segments (the same planar limit
+  applies to `Compression = 6`).
 - **`Compression = 50001` (WebP)** from the de-facto registry — returns
   the generic unsupported-compression error.
 - **CCITT uncompressed-mode *emission*** — the decoder reads the
