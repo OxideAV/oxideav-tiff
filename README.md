@@ -44,9 +44,12 @@ sum, per the Adobe TIFF §14 floating-point predictor) are all supported.
 Predictor 3 decodes for 16-/32-/64-bit `SampleFormat = 3` grayscale and
 RGB across strip and tile layouts (chunky and per-plane), under any
 byte-oriented compression (None / PackBits / LZW / Deflate / ZSTD), and
-is now **written on encode** for 32-/64-bit float grayscale and RGB
-(`EncodePixelFormat::{GrayF32, GrayF64, RgbF32, RgbF64}`) across strip /
-tile / BigTIFF / multi-page — `forward_float_predictor` being the exact
+is now **written on encode** for 16-/32-/64-bit float grayscale and RGB
+(`EncodePixelFormat::{GrayF16, GrayF32, GrayF64, RgbF16, RgbF32,
+RgbF64}` — f16 pages carry raw binary16 bit patterns, with public
+`f32_to_f16_bits` / `f16_bits_to_f32` round-to-nearest-even helpers)
+across strip / tile / BigTIFF / multi-page — `forward_float_predictor`
+being the exact
 inverse of the decode-side `undo_float_predictor`. It is
 rejected over non-float or non-16/32/64-bit data per the §14 "the reader
 must give up" rule. Validated with a binary-independent
@@ -474,11 +477,11 @@ components.
 | BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Gray8` / `::Gray16Le` |
 | **BlackIsZero** | 4        | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled** (nibble-granularity edge replication), **`Predictor = 2`** (§14 nibble differencing mod 16), BigTIFF | `EncodePixelFormat::Gray4` (packed high-nibble-first raster, rows byte-padded) |
 | **BlackIsZero signed** (SampleFormat = 2) | 8 / 16 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, **`Predictor = 2`**, BigTIFF, multi-page | `EncodePixelFormat::GrayI8` / `::GrayI16` (two's-complement samples + SampleFormat = 2 tag; decoder renders via the offset-binary map) |
-| **BlackIsZero float** (SampleFormat = 3) | 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`** | `EncodePixelFormat::GrayF32` / `::GrayF64` (writes SampleFormat = 3; the §14 floating-point predictor) |
+| **BlackIsZero float** (SampleFormat = 3) | **16** / 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`** | `EncodePixelFormat::GrayF16` / `::GrayF32` / `::GrayF64` (writes SampleFormat = 3; the §14 floating-point predictor; f16 = raw binary16 bit patterns + `f32_to_f16_bits` helper) |
 | RGB            | 8         | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Rgb24`     |
 | **RGB + alpha/extra (§ExtraSamples)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, **`PlanarConfiguration = 2`** / **`Predictor = 2`**, BigTIFF | `EncodePixelFormat::Rgba32` + `ExtraSampleKind` (writes SamplesPerPixel = 4 and ExtraSamples = 0/1/2, tag 338) |
 | **RGB**        | 16        | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, **`PlanarConfiguration = 2`** / **`Predictor = 2`**, BigTIFF | `EncodePixelFormat::Rgb48` (BitsPerSample = [16,16,16] little-endian — encode parity for the `Rgb48Le` decode path) |
-| **RGB float** (SampleFormat = 3) | 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`**, **`PlanarConfiguration = 2`** | `EncodePixelFormat::RgbF32` / `::RgbF64` (writes SampleFormat = 3, SamplesPerPixel = 3) |
+| **RGB float** (SampleFormat = 3) | **16** / 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, BigTIFF, **`Predictor = 3`**, **`PlanarConfiguration = 2`** | `EncodePixelFormat::RgbF16` / `::RgbF32` / `::RgbF64` (writes SampleFormat = 3, SamplesPerPixel = 3) |
 | Palette        | 8         | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Palette8`  |
 | **Palette**    | 4         | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, **`Predictor = 2`**, BigTIFF | `EncodePixelFormat::Palette4` (48-SHORT §"Palette Color Images" ColorMap) |
 | **CIELab (3 chan)** | 8    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::CieLab8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 3, BitsPerSample = [8,8,8]) |
@@ -757,18 +760,21 @@ remaining gaps are:
   drive the plane split / horizontal difference, which has no
   single-shape definition in the spec).
 - **Float (`SampleFormat = 3`) grayscale and 3-channel RGB** decode **and
-  encode** (`EncodePixelFormat::{GrayF32, GrayF64, RgbF32, RgbF64}`,
-  32-/64-bit), and the **floating-point predictor (`Predictor = 3`)** is
+  encode** (`EncodePixelFormat::{GrayF16, GrayF32, GrayF64, RgbF16,
+  RgbF32, RgbF64}`, 16-/32-/64-bit), and the **floating-point predictor
+  (`Predictor = 3`)** is
   reversed on decode for 16-/32-/64-bit float grayscale and RGB across
   strip / tile and chunky / per-plane layouts, and **written** on encode
-  for 32-/64-bit grayscale and RGB across strip / tile / BigTIFF /
+  for the same 16-/32-/64-bit widths across strip / tile / BigTIFF /
   multi-page, and float RGB additionally encodes in
   `PlanarConfiguration = 2` (three component planes, §14 float predictor
-  per-plane) — see the SampleFormat / Predictor notes above. The float
-  encode + Predictor = 3 writer now gives the subsystem a fully
-  binary-independent self-roundtrip oracle. Remaining float gaps: f16
-  (binary16) *encode* (no native Rust half type — decode already widens
-  it), and float palette / CMYK / YCbCr / CIELab (no defensible display
+  per-plane) — see the SampleFormat / Predictor notes above. f16 pages
+  carry raw IEEE 754 binary16 bit patterns (Rust has no half type); the
+  public `f32_to_f16_bits` (round-to-nearest-even narrowing) and
+  `f16_bits_to_f32` (exact widening) helpers convert. The float
+  encode + Predictor = 3 writer gives the subsystem a fully
+  binary-independent self-roundtrip oracle. Remaining float gaps:
+  float palette / CMYK / YCbCr / CIELab (no defensible display
   mapping — precise typed errors on both sides). `Predictor = 3` over
   non-float or non-16/32/64-bit data is rejected per the §14 "the reader
   must give up" rule.

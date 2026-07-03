@@ -343,6 +343,40 @@ pub enum EncodePixelFormat<'a> {
     /// set, and `Predictor = 3` composition as [`Self::GrayF32`]; each
     /// sample is written as eight little-endian bytes.
     GrayF64 { pixels: &'a [f64] },
+    /// 16-bit IEEE 754 half-precision (binary16) floating-point
+    /// grayscale (`PhotometricInterpretation = 1` BlackIsZero,
+    /// `SamplesPerPixel = 1`, `BitsPerSample = 16`, `SampleFormat = 3`)
+    /// per TIFF 6.0 §SampleFormat (tag 339, page 80). Rust has no
+    /// native half type, so `pixels` carries the **raw binary16 bit
+    /// patterns** — one `u16` per pixel in row-major order, each the
+    /// IEEE 754 sign(1) / exponent(5) / mantissa(10) encoding
+    /// (`pixels.len() == width * height`). The encoder writes each
+    /// pattern as two little-endian bytes (the file's own II byte
+    /// order) — verbatim transport, exactly how the decoder's
+    /// half-widening display path reads them back. Use
+    /// [`f32_to_f16_bits`] to narrow `f32` samples
+    /// (round-to-nearest-even) and [`f16_bits_to_f32`] to widen.
+    /// Compressors accepted: None / PackBits / LZW / Deflate / Zstd;
+    /// CCITT is bilevel-only per §10 / §11 and rejected.
+    /// `Predictor = 3` (the §14 floating-point predictor) composes via
+    /// [`EncodePage::predictor`] — the §14 byte-plane transform is
+    /// defined per IEEE sample width and the decoder already reverses
+    /// it at 2 bytes per sample; `Predictor = 2` is integer-only and
+    /// rejected. `PlanarConfiguration = 2` is irrelevant for a single
+    /// sample and rejected; tiled layout (§15) and BigTIFF compose.
+    GrayF16 { pixels: &'a [u16] },
+    /// 16-bit IEEE 754 half-precision (binary16) floating-point RGB
+    /// (`PhotometricInterpretation = 2`, `SamplesPerPixel = 3`,
+    /// `BitsPerSample = [16, 16, 16]`, `SampleFormat = 3`). `pixels`
+    /// is row-major interleaved `(R, G, B)` **raw binary16 bit
+    /// patterns** (`pixels.len() == width * height * 3`), each written
+    /// as two little-endian bytes — see [`Self::GrayF16`] for the bit
+    /// convention and the [`f32_to_f16_bits`] / [`f16_bits_to_f32`]
+    /// helpers. Field set, compressor set, and `Predictor = 3` /
+    /// planar / tiling / BigTIFF composition match [`Self::RgbF32`]
+    /// at two bytes per sample; `Predictor = 2` and CCITT are
+    /// rejected.
+    RgbF16 { pixels: &'a [u16] },
     /// 32-bit IEEE 754 single-precision floating-point RGB
     /// (`PhotometricInterpretation = 2`, `SamplesPerPixel = 3`,
     /// `BitsPerSample = [32, 32, 32]`, `SampleFormat = 3`). `pixels` is
@@ -1071,8 +1105,10 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
     // from the planar allow-list below and rejected with a precise error.
     let is_float = matches!(
         p.kind,
-        EncodePixelFormat::GrayF32 { .. }
+        EncodePixelFormat::GrayF16 { .. }
+            | EncodePixelFormat::GrayF32 { .. }
             | EncodePixelFormat::GrayF64 { .. }
+            | EncodePixelFormat::RgbF16 { .. }
             | EncodePixelFormat::RgbF32 { .. }
             | EncodePixelFormat::RgbF64 { .. }
     );
@@ -1102,6 +1138,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                 | EncodePixelFormat::Cmyk32 { .. }
                 | EncodePixelFormat::YCbCr24 { .. }
                 | EncodePixelFormat::YCbCrSubsampled24 { .. }
+                | EncodePixelFormat::RgbF16 { .. }
                 | EncodePixelFormat::RgbF32 { .. }
                 | EncodePixelFormat::RgbF64 { .. }
         )
@@ -1470,6 +1507,43 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                     buf.extend_from_slice(&s.to_le_bytes());
                 }
                 (1u16, vec![16u16], PHOTO_BLACK_IS_ZERO, buf, None)
+            }
+            EncodePixelFormat::GrayF16 { pixels } => {
+                // TIFF 6.0 §SampleFormat (tag 339): SampleFormat = 3 IEEE
+                // 754 half-precision (binary16) grayscale. BitsPerSample
+                // fixes the width at 16; the caller supplies raw binary16
+                // bit patterns and the encoder writes each as two
+                // little-endian bytes (verbatim transport — the file owns
+                // the II byte order, the caller owns the IEEE encoding).
+                let want = (p.width as usize) * (p.height as usize);
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/GrayF16: pixel buffer is {} samples, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                let mut buf = Vec::with_capacity(want * 2);
+                for s in *pixels {
+                    buf.extend_from_slice(&s.to_le_bytes());
+                }
+                (1u16, vec![16u16], PHOTO_BLACK_IS_ZERO, buf, None)
+            }
+            EncodePixelFormat::RgbF16 { pixels } => {
+                // SampleFormat = 3 IEEE 754 binary16 RGB
+                // (PhotometricInterpretation = 2, SamplesPerPixel = 3),
+                // raw bit patterns as for GrayF16.
+                let want = (p.width as usize) * (p.height as usize) * 3;
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/RgbF16: pixel buffer is {} samples, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                let mut buf = Vec::with_capacity(want * 2);
+                for s in *pixels {
+                    buf.extend_from_slice(&s.to_le_bytes());
+                }
+                (3u16, vec![16u16, 16, 16], PHOTO_RGB, buf, None)
             }
             EncodePixelFormat::GrayF32 { pixels } => {
                 // TIFF 6.0 §SampleFormat (tag 339): SampleFormat = 3 IEEE
@@ -2729,6 +2803,95 @@ fn build_tiles_planar(
 /// `row_bytes` is the packed sample stride (chunky, single-strip). The
 /// "ignore the overflow bits" wrap-around §14 relies on is exactly
 /// two's-complement `wrapping_sub`.
+/// Narrow an `f32` to the IEEE 754 binary16 (half-precision) bit
+/// pattern — sign(1) / exponent(5, bias 15) / mantissa(10) — using
+/// round-to-nearest-even, the IEEE 754 default rounding direction.
+///
+/// This is the companion of [`f16_bits_to_f32`] for building
+/// [`EncodePixelFormat::GrayF16`] / [`EncodePixelFormat::RgbF16`]
+/// sample buffers from `f32` data (Rust has no native half type):
+///
+/// * Values whose magnitude exceeds the binary16 finite ceiling
+///   (65504) round to ±infinity (`0x7C00` / `0xFC00`).
+/// * Values below the smallest binary16 subnormal round to ±0.
+/// * In-range values round to the nearest representable half; exact
+///   ties go to the pattern with an even (zero) least-significant
+///   mantissa bit.
+/// * NaN stays NaN: the quiet bit (mantissa MSB) is forced on and the
+///   upper payload bits are carried across, so a signaling-NaN input
+///   cannot collapse to the infinity pattern.
+///
+/// The narrowing is pure IEEE 754 arithmetic (binary32 → binary16);
+/// TIFF 6.0 §SampleFormat defers the sample encoding to IEEE 754 and
+/// fixes only the storage width via BitsPerSample.
+pub fn f32_to_f16_bits(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xFF) as i32;
+    let man = bits & 0x007F_FFFF;
+    if exp == 0xFF {
+        // Inf / NaN. For NaN force the quiet bit and keep the top ten
+        // payload bits so the result is always a NaN pattern.
+        return if man == 0 {
+            sign | 0x7C00
+        } else {
+            sign | 0x7E00 | ((man >> 13) as u16)
+        };
+    }
+    if exp == 0 {
+        // binary32 subnormal (< 2^-126) — far below the smallest
+        // binary16 subnormal (2^-24); rounds to signed zero.
+        return sign;
+    }
+    // Re-bias the exponent for binary16 (bias 15 vs 127).
+    let e = exp - 127 + 15;
+    if e >= 0x1F {
+        // Overflow: every finite binary32 with e >= 31 is at least
+        // 2^16 > 65504 + ulp/2, so round-to-nearest-even gives Inf.
+        return sign | 0x7C00;
+    }
+    if e <= 0 {
+        // binary16 subnormal range. Reattach the implicit leading 1
+        // and shift the 24-bit significand down to the 10-bit
+        // subnormal mantissa position, rounding to nearest-even.
+        let shift = (14 - e) as u32; // >= 14
+        if shift > 24 {
+            // Even the rounded value cannot reach the smallest
+            // subnormal (the significand is < 2^24, so the round bit
+            // is always 0 at shift 25+).
+            return sign;
+        }
+        let m24 = man | 0x0080_0000;
+        let mut h = m24 >> shift;
+        let round_mask = (1u32 << shift) - 1;
+        let round = m24 & round_mask;
+        let half = 1u32 << (shift - 1);
+        if round > half || (round == half && (h & 1) == 1) {
+            h += 1; // may carry into exponent 1 (smallest normal) — correct
+        }
+        return sign | h as u16;
+    }
+    // Normal range: 10-bit mantissa with round-to-nearest-even on the
+    // 13 dropped bits. The increment naturally carries mantissa →
+    // exponent → infinity because the binary16 fields are contiguous.
+    let mut h = ((e as u32) << 10) | (man >> 13);
+    let round = man & 0x1FFF;
+    if round > 0x1000 || (round == 0x1000 && (h & 1) == 1) {
+        h += 1;
+    }
+    sign | h as u16
+}
+
+/// Widen an IEEE 754 binary16 (half-precision) bit pattern to `f32`.
+/// The widening is exact — every binary16 value (normals, subnormals,
+/// ±0, ±Inf) is representable in binary32; NaN widens to an `f32` NaN.
+/// Companion of [`f32_to_f16_bits`]; this is the same widening the
+/// decoder's `SampleFormat = 3` / `BitsPerSample = 16` display path
+/// applies to stored samples.
+pub fn f16_bits_to_f32(bits: u16) -> f32 {
+    crate::decoder::half_to_f32(bits)
+}
+
 fn forward_horizontal_predictor(
     buf: &mut [u8],
     width: usize,

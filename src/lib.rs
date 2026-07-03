@@ -114,8 +114,8 @@ pub const CODEC_ID_STR: &str = "tiff";
 // `registry` feature.
 pub use decoder::{decode_tiff, decode_tiff_all, DecodedTiff};
 pub use encoder::{
-    encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat, ExtraSampleKind, RgbColor,
-    TiffCompression,
+    encode_tiff, encode_tiff_multi, f16_bits_to_f32, f32_to_f16_bits, EncodePage,
+    EncodePixelFormat, ExtraSampleKind, RgbColor, TiffCompression,
 };
 pub use error::{Result, TiffError};
 pub use image::{TiffImage, TiffPixelFormat, TiffPlane};

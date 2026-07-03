@@ -43,6 +43,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **f16 (IEEE 754 binary16, `SampleFormat = 3` / `BitsPerSample = 16`)
+  encode.** New `EncodePixelFormat::GrayF16` / `::RgbF16` formats carry
+  raw binary16 bit patterns (`&[u16]` — Rust has no native half type)
+  and write them as little-endian sample bytes with the SampleFormat = 3
+  tag, closing the last SampleFormat = 3 width gap (the decoder has
+  widened f16 onto the display planes since the float decode round).
+  Composes with the full lossless matrix: None / PackBits / LZW /
+  Deflate / ZSTD, the §14 floating-point predictor (`Predictor = 3`, 2
+  bytes per sample), §15 tiling, `PlanarConfiguration = 2` (RgbF16),
+  BigTIFF, and multi-page. Public `f32_to_f16_bits`
+  (round-to-nearest-even narrowing with overflow-to-Inf,
+  underflow-to-zero, NaN-preserving quiet-bit semantics) and
+  `f16_bits_to_f32` (exact widening — the same map the decoder's
+  display path uses) helpers convert; the narrowing is validated
+  exhaustively over all 65 536 bit patterns plus directed
+  rounding-edge cases.
+
 - **Old-style JPEG (`Compression = 6`, TIFF 6.0 §22): interchange-format
   decode + precise recognition/rejection semantics.** The §22 fields
   (tags 512–521: JPEGProc, JPEGInterchangeFormat[Length],

@@ -2327,7 +2327,7 @@ fn build_gray16le(
 /// BitsPerSample; the 16-bit width is IEEE 754 binary16: one sign bit,
 /// five exponent bits (bias 15), ten mantissa bits. The value is widened
 /// to `f32` exactly (binary16 → binary32 is lossless).
-fn half_to_f32(bits: u16) -> f32 {
+pub(crate) fn half_to_f32(bits: u16) -> f32 {
     let sign = (bits >> 15) & 0x1;
     let exp = (bits >> 10) & 0x1f;
     let mant = bits & 0x3ff;
