@@ -1,5 +1,7 @@
 # oxideav-tiff
 
+[![CI](https://github.com/OxideAV/oxideav-tiff/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-tiff/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-tiff.svg)](https://crates.io/crates/oxideav-tiff) [![docs.rs](https://docs.rs/oxideav-tiff/badge.svg)](https://docs.rs/oxideav-tiff) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust TIFF 6.0 image decoder + encoder + container for the
 [`oxideav`](https://github.com/OxideAV/oxideav) framework.
 
