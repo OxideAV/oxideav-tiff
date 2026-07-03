@@ -292,17 +292,19 @@ fn encoder_ycbcr24_444_rejects_ccitt_only() {
 }
 
 #[test]
-fn encoder_ycbcr_subsampled_rejects_planar_and_predictor() {
-    // Under non-1:1 subsampling the on-disk stream is the packed §21
-    // data-unit sequence (a 2-D luma block then single Cb / Cr samples),
-    // not a per-pixel chunky interleave. Neither a `PlanarConfiguration =
-    // 2` plane split nor a §14 per-component horizontal difference has a
-    // defined shape over that layout, so both stay rejected for the
-    // genuinely-subsampled `YCbCrSubsampled24` pairs.
+fn encoder_ycbcr_subsampled_rejects_chunky_predictor_and_tiled_planar() {
+    // Under non-1:1 subsampling the *chunky* on-disk stream is the
+    // packed §21 data-unit sequence (a 2-D luma block then single
+    // Cb / Cr samples), over which a §14 per-component horizontal
+    // difference has no defined shape — predictor × chunky stays
+    // rejected. The planar strip layout now encodes (see
+    // ycbcr_subsampled_planar_roundtrip.rs), but planar × *tiled*
+    // stays rejected: §15 fixes the same tile count for every plane,
+    // which has no consistent geometry for reduced-size chroma planes.
     let pixels = vec![128u8; 8 * 8 * 3];
 
     for (sh, sv) in [(2u16, 1u16), (2, 2), (4, 1), (4, 2)] {
-        let planar_page = EncodePage {
+        let tiled_planar_page = EncodePage {
             width: 8,
             height: 8,
             kind: EncodePixelFormat::YCbCrSubsampled24 {
@@ -312,12 +314,12 @@ fn encoder_ycbcr_subsampled_rejects_planar_and_predictor() {
             compression: TiffCompression::Lzw,
             predictor: false,
             planar: true,
-            tiling: None,
+            tiling: Some((16, 16)),
             bigtiff: false,
         };
         assert!(
-            encode_tiff(&planar_page).is_err(),
-            "subsampled ({sh},{sv}) planar must reject"
+            encode_tiff(&tiled_planar_page).is_err(),
+            "subsampled ({sh},{sv}) tiled planar must reject"
         );
 
         let pred_page = EncodePage {

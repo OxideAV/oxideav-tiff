@@ -694,17 +694,42 @@ full-resolution components into separate Y / Cb / Cr planes exactly as
 for `Rgb24`, and §14 differences each component independently
 ("Differencing works the same as it does for grayscale data" — offset
 `SamplesPerPixel` chunky, offset 1 per plane). Both compose with §15
-tiling and the byte-aligned compressors. They stay **rejected for the
-genuinely chroma-subsampled pairs** (`[2,1]`/`[2,2]`/`[4,1]`/`[4,2]`),
-where the on-disk §21 data-unit stream is not a per-pixel component
-interleave a plane split or horizontal difference can act on. On the
+tiling and the byte-aligned compressors.
+
+**The genuinely chroma-subsampled `PlanarConfiguration = 2` strip
+layout now encodes and decodes too.** §21 "Ordering of Component
+Samples": "For PlanarConfiguration = 2, component samples are stored as
+3 separate planes, and the ordering is the same as that used for other
+PhotometricInterpretation field values" — plain row-major planes, no
+data-unit packing — with the Cb / Cr planes at the reduced §21 "chroma
+image" resolution ("ImageWidth of this chroma image is half the
+ImageWidth of the associated luma image"): `(width/sh) × (height/sv)`.
+The encoder (`build_planes_ycbcr_subsampled`) writes a full-resolution
+Y plane plus two box-filter-decimated chroma planes, one strip per
+plane; the decoder (`decode_strips_planar_ycbcr_subsampled`) sizes each
+plane by its own geometry — honouring multi-strip files under the
+§"PlanarConfiguration" `SamplesPerPixel × StripsPerImage` accounting
+and the §21 "RowsPerStrip must be an integer multiple of
+YCbCrSubsampleVert" constraint (violations rejected precisely) — then
+splats each chroma sample back over its `sh × sv` block. `Predictor =
+2` composes per-plane (§14: "Differencing works the same as it does
+for grayscale data" — each plane differences at its own row width);
+the *chunky* subsampled predictor stays rejected (no defined shape
+over the packed data-unit stream), as does **tiled** planar subsampled
+on both sides (§15 fixes `TileOffsets` at `SamplesPerPixel ×
+TilesPerImage` — the same tile count for every plane — which has no
+consistent geometry for a reduced-size chroma plane under a shared
+`TileWidth × TileLength` grid). Luma round-trips bit-exact; chroma
+round-trips exactly when block-constant, matching the chunky
+subsampled paths. On the
 decode side a planar 4:4:4 YCbCr page re-interleaves the three planes
-into chunky order for the §22 matrix; a subsampled planar page (Cb / Cr
-stored at reduced resolution) is rejected rather than mis-sized. Hand-built classic-II fixtures carrying the same `(Y, Cb, Cr)` bytes
+into chunky order for the §22 matrix. Hand-built classic-II fixtures carrying the same `(Y, Cb, Cr)` bytes
 decode to the same `Rgb24` as the encoder's output across the four
-accepted compressors; the IFD bytes are inspected byte-for-byte to
-confirm tags 262 / 277 / 284 / 530 / 531 / 532 carry the documented
-values.
+accepted compressors (including a hand-built two-strips-per-plane
+subsampled planar fixture); the IFD bytes are inspected byte-for-byte
+to confirm tags 262 / 277 / 284 / 530 / 531 / 532 carry the documented
+values, and `tiffinfo` (black-box) confirms the separate-planes +
+subsampling field set.
 
 ### BigTIFF write
 
@@ -749,16 +774,16 @@ remaining gaps are:
   (it is a bit-rate control extension, not a compression win for
   facsimile content).
 - **DNG / GeoTIFF / EXIF blob extraction.**
-- **Subsampled-YCbCr `PlanarConfiguration = 2` / predictor combinations**
-  — chunky subsampled YCbCr now **encodes and decodes in both strip and
-  tiled layouts** (TIFF 6.0 §21, `TileWidth` / `TileLength` integer
-  multiples of the subsampling factors), and the **4:4:4** ratio now
-  composes with both `PlanarConfiguration = 2` and `Predictor = 2` (see
-  the YCbCr write note above). The **genuinely chroma-subsampled**
-  separate-planes layout and §14 differencing over the packed data-unit
-  stream remain deferred (those would need the §21 data-unit geometry to
-  drive the plane split / horizontal difference, which has no
-  single-shape definition in the spec).
+- **Subsampled-YCbCr residual combinations** — chunky subsampled YCbCr
+  encodes and decodes in both strip and tiled layouts (TIFF 6.0 §21),
+  4:4:4 composes with `PlanarConfiguration = 2` and `Predictor = 2`,
+  and the genuinely chroma-subsampled **separate-planes strip layout**
+  now encodes and decodes too (reduced §21 "chroma image" planes,
+  per-plane §14 predictor — see the YCbCr write note above). Still
+  deferred: §14 differencing over the packed *chunky* data-unit stream
+  (no defined shape) and **tiled** planar subsampled (§15's fixed
+  `SamplesPerPixel × TilesPerImage` TileOffsets count has no consistent
+  geometry for reduced-size chroma planes).
 - **Float (`SampleFormat = 3`) grayscale and 3-channel RGB** decode **and
   encode** (`EncodePixelFormat::{GrayF16, GrayF32, GrayF64, RgbF16,
   RgbF32, RgbF64}`, 16-/32-/64-bit), and the **floating-point predictor

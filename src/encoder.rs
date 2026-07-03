@@ -1185,29 +1185,39 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
         // PlanarConfiguration=2 and the §14 horizontal-differencing
         // predictor both operate on the on-disk sample layout. For 4:4:4
         // YCbCr that layout is a plain chunky `(Y, Cb, Cr)` interleave, so
-        // both compose exactly as they do for Rgb24: §"PlanarConfiguration"
-        // splits the three full-resolution components into three planes,
-        // and §14 ("If PlanarConfiguration is 2 … Differencing works the
-        // same as it does for grayscale data") differences each plane /
-        // each chunky component independently. Under non-1:1 subsampling
-        // the on-disk stream is the packed §21 data-unit sequence (a 2-D
-        // luma block then single Cb/Cr), where neither a per-plane split
-        // nor a per-component horizontal difference has a defined shape —
-        // those stay rejected.
-        if p.planar && !is_ycbcr_444 {
+        // both compose exactly as they do for Rgb24. For non-1:1
+        // subsampling, PlanarConfiguration=2 is well-defined too — §21
+        // "Ordering of Component Samples": "For PlanarConfiguration = 2,
+        // component samples are stored as 3 separate planes, and the
+        // ordering is the same as that used for other
+        // PhotometricInterpretation field values", with the Cb / Cr
+        // planes at the reduced §21 "chroma image" resolution
+        // ("ImageWidth of this chroma image is half the ImageWidth of
+        // the associated luma image"). One strip per plane; §14
+        // differencing runs per-plane ("Differencing works the same as
+        // it does for grayscale data") at that plane's own row width.
+        // The *tiled* planar subsampled form stays rejected: §15
+        // TileOffsets fixes the same tile count for every plane, which
+        // has no consistent geometry for a reduced-size chroma plane
+        // under a shared TileWidth × TileLength grid.
+        if p.planar && !is_ycbcr_444 && p.tiling.is_some() {
             return Err(Error::invalid(
-                "TIFF encode: PlanarConfiguration=2 with chroma-subsampled YCbCr is not \
-                 supported (the §21 data-unit ordering changes shape under non-1:1 \
-                 subsampling); 4:4:4 YCbCr (YCbCrSubSampling = [1, 1]) does compose with \
-                 planar",
+                "TIFF encode: tiled PlanarConfiguration=2 with chroma-subsampled YCbCr is \
+                 not supported (§15 TileOffsets fixes the same tile count for every plane, \
+                 which has no consistent geometry for the reduced-resolution §21 chroma \
+                 planes); use strip layout, 4:4:4, or chunky tiles",
             ));
         }
-        if p.predictor && !is_ycbcr_444 {
+        // Over the *chunky* packed §21 data-unit stream a per-component
+        // horizontal difference has no defined shape, so predictor ×
+        // chunky × subsampled stays rejected; the planar subsampled
+        // write differences per-plane and composes.
+        if p.predictor && !is_ycbcr_444 && !p.planar {
             return Err(Error::invalid(
-                "TIFF encode: Predictor=2 with chroma-subsampled YCbCr is not supported \
-                 (the §21 chroma-difference samples and the §14 cumulative-add reversal \
-                 interact through the §22 / §20 reference coding range); 4:4:4 YCbCr \
-                 (YCbCrSubSampling = [1, 1]) does compose with Predictor=2",
+                "TIFF encode: Predictor=2 with chunky chroma-subsampled YCbCr is not \
+                 supported (§14 differencing has no defined shape over the packed §21 \
+                 data-unit stream); 4:4:4 YCbCr and the planar subsampled layout \
+                 (per-plane grayscale differencing) do compose with Predictor=2",
             ));
         }
         // §21 page 90: under subsampling, TileWidth / TileLength must be
@@ -1733,11 +1743,14 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
                         pixels.len()
                     )));
                 }
-                // Strip layout packs the whole-image §21 data-unit stream
-                // up front. Tiled layout instead packs per-tile data units
-                // (`build_tiles_ycbcr_subsampled` below) directly from the
-                // full-resolution pixels, so leave them unpacked here.
-                let buf = if p.tiling.is_some() {
+                // Chunky strip layout packs the whole-image §21 data-unit
+                // stream up front. Tiled layout instead packs per-tile
+                // data units (`build_tiles_ycbcr_subsampled` below) and
+                // the planar layout splits decimated component planes
+                // (`build_planes_ycbcr_subsampled` below), both directly
+                // from the full-resolution pixels — leave those unpacked
+                // here.
+                let buf = if p.tiling.is_some() || (p.planar && (sh, sv) != (1, 1)) {
                     pixels.to_vec()
                 } else {
                     pack_ycbcr_data_units(
@@ -1863,54 +1876,35 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
             )?
         }
     } else if p.planar {
-        // De-interleave chunky RGBRGB… into separate R / G / B planes
-        // (TIFF 6.0 §"PlanarConfiguration": "Red components in one
-        // component plane, the Green in another, and the Blue in
-        // another"). Only Rgb24 (SPP=3, 8 bits) reaches here.
-        let spp = samples_per_pixel as usize;
-        let bytes_per_sample = bps / 8;
-        let pixels = (p.width as usize) * (p.height as usize);
-        let plane_len = pixels * bytes_per_sample;
-        let mut out_strips = Vec::with_capacity(spp);
-        for plane in 0..spp {
-            let mut plane_buf = vec![0u8; plane_len];
-            for px in 0..pixels {
-                let src = (px * spp + plane) * bytes_per_sample;
-                let dst = px * bytes_per_sample;
-                plane_buf[dst..dst + bytes_per_sample]
-                    .copy_from_slice(&raw_pixels[src..src + bytes_per_sample]);
-            }
-            // §14: "If PlanarConfiguration is 2 … Differencing works the
-            // same as it does for grayscale data." Each plane is a
-            // single-component image, so the predictor runs with an
-            // offset of one sample. Float planes take the §14
-            // floating-point predictor (the decoder reverses it per-plane
-            // with the plane width as its row sample count); integer
-            // planes take the horizontal-differencing predictor.
-            if p.predictor {
-                let plane_row_bytes = (p.width as usize) * bytes_per_sample;
-                if is_float {
-                    forward_float_predictor(
-                        &mut plane_buf,
-                        p.width as usize,
-                        p.height as usize,
-                        bytes_per_sample,
-                        plane_row_bytes,
-                    )?;
-                } else {
-                    forward_horizontal_predictor(
-                        &mut plane_buf,
-                        p.width as usize,
-                        p.height as usize,
-                        1,
-                        bps,
-                        plane_row_bytes,
-                    )?;
-                }
-            }
-            out_strips.push(p.compression.pack(&plane_buf, p.width, p.height)?);
+        if let Some((sh, sv)) = ycbcr_subsampling_nontrivial {
+            // Chroma-subsampled YCbCr planes (TIFF 6.0 §21 +
+            // §"PlanarConfiguration"): full-resolution Y plane plus
+            // reduced-resolution Cb / Cr "chroma image" planes, one
+            // strip per plane, §14 predictor per-plane at the plane's
+            // own row width. `raw_pixels` holds the unpacked
+            // full-resolution interleave for this case (see the
+            // YCbCrSubsampled24 match arm).
+            build_planes_ycbcr_subsampled(
+                &raw_pixels,
+                p.width as usize,
+                p.height as usize,
+                sh,
+                sv,
+                p.predictor,
+                p.compression,
+            )?
+        } else {
+            build_planes_chunky_source(
+                &raw_pixels,
+                p.width as usize,
+                p.height as usize,
+                samples_per_pixel as usize,
+                bps,
+                p.predictor,
+                is_float,
+                p.compression,
+            )?
         }
-        out_strips
     } else {
         // Apply the predictor *before* compression. The encoder stores
         // the transform; the decoder reverses it exactly. Chunky
@@ -2383,6 +2377,131 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool) -> Result<PlannedPage> {
 /// symmetric even-tap box filter §21 page 92 associates with the
 /// centered (`YCbCrPositioning = 1`) sample positioning the encoder
 /// declares. Luminance is transported unchanged.
+/// De-interleave a chunky multi-sample raster into
+/// `PlanarConfiguration = 2` component planes (TIFF 6.0
+/// §"PlanarConfiguration": "Red components in one component plane, the
+/// Green in another, and the Blue in another"), difference each plane
+/// per §14 when requested ("If PlanarConfiguration is 2 … Differencing
+/// works the same as it does for grayscale data" — offset of one
+/// sample; float planes take the §14 floating-point predictor), and
+/// compress each plane as its own strip. Returns the strips in plane
+/// order (component 0 first), the order §"StripOffsets" prescribes.
+#[allow(clippy::too_many_arguments)]
+fn build_planes_chunky_source(
+    raw_pixels: &[u8],
+    width: usize,
+    height: usize,
+    spp: usize,
+    bps: usize,
+    predictor: bool,
+    is_float: bool,
+    compression: TiffCompression,
+) -> Result<Vec<Vec<u8>>> {
+    let bytes_per_sample = bps / 8;
+    let pixels = width * height;
+    let plane_len = pixels * bytes_per_sample;
+    let mut out_strips = Vec::with_capacity(spp);
+    for plane in 0..spp {
+        let mut plane_buf = vec![0u8; plane_len];
+        for px in 0..pixels {
+            let src = (px * spp + plane) * bytes_per_sample;
+            let dst = px * bytes_per_sample;
+            plane_buf[dst..dst + bytes_per_sample]
+                .copy_from_slice(&raw_pixels[src..src + bytes_per_sample]);
+        }
+        if predictor {
+            let plane_row_bytes = width * bytes_per_sample;
+            if is_float {
+                forward_float_predictor(
+                    &mut plane_buf,
+                    width,
+                    height,
+                    bytes_per_sample,
+                    plane_row_bytes,
+                )?;
+            } else {
+                forward_horizontal_predictor(
+                    &mut plane_buf,
+                    width,
+                    height,
+                    1,
+                    bps,
+                    plane_row_bytes,
+                )?;
+            }
+        }
+        out_strips.push(compression.pack(&plane_buf, width as u32, height as u32)?);
+    }
+    Ok(out_strips)
+}
+
+/// Split a full-resolution interleaved `(Y, Cb, Cr)` raster into the
+/// TIFF 6.0 §21 `PlanarConfiguration = 2` plane set for the given
+/// `(sh, sv)` subsampling factors: a full-resolution `width × height`
+/// Y plane plus two reduced `(width/sh) × (height/sv)` chroma planes —
+/// §21 YCbCrSubSampling defines the Cb / Cr components as a "chroma
+/// image" whose ImageWidth / ImageLength are the luma dimensions
+/// divided by the factors, and §21 "Ordering of Component Samples"
+/// states that for PlanarConfiguration = 2 "the ordering is the same
+/// as that used for other PhotometricInterpretation field values"
+/// (plain row-major planes — no data-unit packing).
+///
+/// Each chroma plane sample is the rounded arithmetic mean of its
+/// `sh × sv` full-resolution block (the same centered box filter the
+/// chunky packer `pack_ycbcr_data_units` applies, matching the
+/// `YCbCrPositioning = 1` declaration). When `predictor` is set, each
+/// plane is differenced independently per §14 ("Differencing works the
+/// same as it does for grayscale data") at its own row width. Returns
+/// the three compressed plane strips in Y, Cb, Cr order.
+fn build_planes_ycbcr_subsampled(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    sh: usize,
+    sv: usize,
+    predictor: bool,
+    compression: TiffCompression,
+) -> Result<Vec<Vec<u8>>> {
+    let cw = width / sh;
+    let ch = height / sv;
+    // Y plane: full resolution, transported unchanged.
+    let mut y_plane = vec![0u8; width * height];
+    for (i, chunk) in src.chunks_exact(3).enumerate() {
+        y_plane[i] = chunk[0];
+    }
+    // Chroma planes: per-block rounded box-filter mean.
+    let mut cb_plane = vec![0u8; cw * ch];
+    let mut cr_plane = vec![0u8; cw * ch];
+    let n = (sh * sv) as u32;
+    for by in 0..ch {
+        for bx in 0..cw {
+            let mut cb_sum: u32 = 0;
+            let mut cr_sum: u32 = 0;
+            for sy in 0..sv {
+                for sx in 0..sh {
+                    let s = ((by * sv + sy) * width + bx * sh + sx) * 3;
+                    cb_sum += src[s + 1] as u32;
+                    cr_sum += src[s + 2] as u32;
+                }
+            }
+            cb_plane[by * cw + bx] = ((cb_sum + n / 2) / n) as u8;
+            cr_plane[by * cw + bx] = ((cr_sum + n / 2) / n) as u8;
+        }
+    }
+    let mut out = Vec::with_capacity(3);
+    for (plane_buf, pw, ph) in [
+        (&mut y_plane, width, height),
+        (&mut cb_plane, cw, ch),
+        (&mut cr_plane, cw, ch),
+    ] {
+        if predictor {
+            forward_horizontal_predictor(plane_buf, pw, ph, 1, 8, pw)?;
+        }
+        out.push(compression.pack(plane_buf, pw as u32, ph as u32)?);
+    }
+    Ok(out)
+}
+
 fn pack_ycbcr_data_units(src: &[u8], width: usize, height: usize, sh: usize, sv: usize) -> Vec<u8> {
     let block_w = width / sh;
     let block_h = height / sv;

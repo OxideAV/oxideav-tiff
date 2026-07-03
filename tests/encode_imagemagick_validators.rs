@@ -1443,3 +1443,97 @@ fn encoder_ccitt_t6_tiffinfo_reports_group4() {
         eprintln!("skipping: tiffinfo not available");
     }
 }
+
+#[test]
+fn encoder_planar_subsampled_ycbcr_tiffinfo_reports_geometry() {
+    // Chroma-subsampled YCbCr in PlanarConfiguration = 2 (TIFF 6.0 §21
+    // + §"PlanarConfiguration"): libtiff's `tiffinfo` must read the IFD
+    // and report the separate-planes layout, the YCbCr photometric,
+    // and the 2,2 subsampling — a black-box structural check that the
+    // written field set is spec-conformant.
+    let (w, h) = (32u32, 16u32);
+    let mut pixels = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            pixels.push((x * 3 + y * 5) as u8);
+            pixels.push(((x / 2) * 20) as u8);
+            pixels.push(((y / 2) * 20 + 60) as u8);
+        }
+    }
+    let page = EncodePage {
+        width: w,
+        height: h,
+        kind: EncodePixelFormat::YCbCrSubsampled24 {
+            pixels: &pixels,
+            subsampling: (2, 2),
+        },
+        compression: TiffCompression::Lzw,
+        predictor: false,
+        planar: true,
+        tiling: None,
+        bigtiff: false,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    // Our own decoder first.
+    let d = decode_tiff(&bytes).unwrap();
+    assert_eq!((d.width, d.height), (w, h));
+    if let Some(info) = run_tiffinfo(&bytes) {
+        let lc = info.to_lowercase();
+        assert!(
+            lc.contains("separate image planes"),
+            "tiffinfo missing separate-planes line: {info}"
+        );
+        assert!(
+            lc.contains("ycbcr"),
+            "tiffinfo missing YCbCr photometric: {info}"
+        );
+        assert!(
+            info.contains("YCbCr Subsampling: 2, 2"),
+            "tiffinfo missing 2,2 subsampling: {info}"
+        );
+    } else {
+        eprintln!("skipping: tiffinfo not available");
+    }
+}
+
+#[test]
+fn encoder_f16_tiffinfo_reports_ieee_float_16() {
+    // f16 (binary16) grayscale, SampleFormat = 3 / BitsPerSample = 16:
+    // tiffinfo must report the IEEE floating-point sample format at
+    // 16 bits — black-box confirmation of the tag-339/258 pair.
+    use oxideav_tiff::f32_to_f16_bits;
+    let (w, h) = (24u32, 10u32);
+    let bits: Vec<u16> = (0..w * h)
+        .map(|i| f32_to_f16_bits(i as f32 * 0.125))
+        .collect();
+    let page = EncodePage {
+        width: w,
+        height: h,
+        kind: EncodePixelFormat::GrayF16 { pixels: &bits },
+        compression: TiffCompression::Deflate,
+        predictor: true,
+        planar: false,
+        tiling: None,
+        bigtiff: false,
+    };
+    let bytes = encode_tiff(&page).unwrap();
+    let d = decode_tiff(&bytes).unwrap();
+    assert_eq!((d.width, d.height), (w, h));
+    if let Some(info) = run_tiffinfo(&bytes) {
+        let lc = info.to_lowercase();
+        assert!(
+            info.contains("Bits/Sample: 16"),
+            "tiffinfo missing 16-bit line: {info}"
+        );
+        assert!(
+            lc.contains("ieee floating point"),
+            "tiffinfo missing IEEE float sample format: {info}"
+        );
+        assert!(
+            lc.contains("horizontal differencing") || lc.contains("floating point predictor"),
+            "tiffinfo missing predictor line: {info}"
+        );
+    } else {
+        eprintln!("skipping: tiffinfo not available");
+    }
+}

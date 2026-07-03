@@ -261,14 +261,26 @@ fn planar_ycbcr_444_solid_chroma_preserves_plane_order() {
 }
 
 #[test]
-fn planar_ycbcr_subsampled_rejected() {
-    // Build a planar YCbCr fixture but tag it YCbCrSubSampling = [2, 2].
-    // The planar walker sizes every plane at the full image resolution,
-    // which is only correct at 4:4:4; under subsampling the Cb/Cr planes
-    // are stored at reduced resolution, so the decoder must reject rather
-    // than silently mis-read.
+fn planar_ycbcr_subsampled_uses_reduced_chroma_geometry() {
+    // Build a planar YCbCr fixture and re-tag it YCbCrSubSampling =
+    // [2, 2]. Since the planar-subsampled round, the decoder honours
+    // the §21 planar geometry: the Y plane stays full-resolution and
+    // the Cb / Cr planes are read as the reduced (w/2) × (h/2) §21
+    // "chroma image" — i.e. only the leading (w/2)*(h/2) bytes of each
+    // chroma strip — then splatted back over the 2 × 2 blocks. The
+    // re-tagged fixture's chroma strips are over-long (they still hold
+    // full-resolution planes), which the walker truncates exactly as
+    // every other strip walker in this decoder treats over-long strip
+    // payloads. With a constant-chroma pattern the leading bytes equal
+    // the block means, so the decode must match the 4:4:4 planar
+    // decode of the same pixels.
     let (w, h) = (8u32, 8u32);
-    let pixels = ycbcr_pattern(w, h);
+    let mut pixels = Vec::new();
+    for _ in 0..(w * h) {
+        pixels.push(90); // Y constant so splat differences cannot hide
+        pixels.push(200); // Cb constant
+        pixels.push(60); // Cr constant
+    }
     let mut tiff = build_planar_ycbcr_tiff(w, h, &pixels);
 
     // Patch the YCbCrSubSampling (tag 530) entry's two inline SHORTs from
@@ -291,9 +303,11 @@ fn planar_ycbcr_subsampled_rejected() {
     }
     assert!(patched, "test setup: tag 530 not found to patch");
 
-    let err = decode_tiff(&tiff);
-    assert!(
-        err.is_err(),
-        "subsampled (2,2) planar YCbCr must be rejected, not silently mis-decoded"
+    let got = decode_tiff(&tiff).expect("subsampled (2,2) planar YCbCr strips now decode");
+    assert_eq!((got.width, got.height), (w, h));
+    let want = decode_tiff(&build_planar_ycbcr_tiff(w, h, &pixels)).unwrap();
+    assert_eq!(
+        got.frame.planes[0].data, want.frame.planes[0].data,
+        "constant-chroma subsampled planar decode must match the 4:4:4 decode"
     );
 }

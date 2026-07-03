@@ -866,6 +866,17 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
                 }
                 None => (2, 2),
             };
+            // PlanarConfiguration = 2: the planar walker has already
+            // decoded the reduced §21 chroma planes and splatted them
+            // back to full resolution (see
+            // `decode_strips_planar_ycbcr_subsampled`), so `pixel_buf`
+            // is a full-resolution per-pixel interleave regardless of
+            // the tag-530 factors — walk it as 1:1.
+            let (sh, sv) = if planar == PLANAR_SEPARATE {
+                (1, 1)
+            } else {
+                (sh, sv)
+            };
             (
                 build_rgb24_from_ycbcr(&pixel_buf, width, height, sh, sv)?,
                 TiffPixelFormat::Rgb24,
@@ -1028,22 +1039,26 @@ fn ycbcr_subsampling_factors(
     }
 }
 
-/// Reject a chroma-subsampled YCbCr page that arrives on the
-/// `PlanarConfiguration = 2` walkers.
+/// Reject a chroma-subsampled YCbCr page that arrives on the *tiled*
+/// `PlanarConfiguration = 2` walker.
 ///
-/// The planar walkers size every component plane at the full image
-/// `width × height` (one sample per pixel per plane). That accounting is
-/// correct only for **4:4:4** YCbCr (`YCbCrSubSampling = [1, 1]`), where
-/// each of the Y / Cb / Cr planes is genuinely full-resolution and the
-/// §21 "Ordering of Component Samples" data unit collapses to a plain
-/// chunky `(Y, Cb, Cr)` triple. Under any other subsampling the spec
-/// (§"PlanarConfiguration" + §21) stores the Cb and Cr planes at the
-/// reduced `width/sh × height/sv` resolution, so the full-resolution
-/// plane stride would mis-read the chroma planes. The §22 default when
-/// the tag is absent is `[2, 2]` (subsampled), so an untagged planar
-/// YCbCr page is also rejected here rather than mis-decoded — a planar
-/// 4:4:4 page must carry an explicit `YCbCrSubSampling = [1, 1]`, which
-/// is exactly what this crate's encoder writes.
+/// The generic planar walkers size every component plane at the full
+/// image `width × height` (one sample per pixel per plane). That
+/// accounting is correct only for **4:4:4** YCbCr (`YCbCrSubSampling =
+/// [1, 1]`), where each of the Y / Cb / Cr planes is genuinely
+/// full-resolution and the §21 "Ordering of Component Samples" data
+/// unit collapses to a plain chunky `(Y, Cb, Cr)` triple. Under any
+/// other subsampling the spec (§"PlanarConfiguration" + §21) stores the
+/// Cb and Cr planes at the reduced `width/sh × height/sv` resolution.
+/// The *strip* planar walker routes that shape to
+/// `decode_strips_planar_ycbcr_subsampled`; the tiled planar walker
+/// still rejects it — §15 fixes `TileOffsets` at `SamplesPerPixel ×
+/// TilesPerImage` (the same tile count for every plane), which is
+/// inconsistent with a reduced-size chroma plane under a shared
+/// `TileWidth × TileLength` grid, and §21's tile constraints only
+/// address the chunky data-unit layout. The §22 default when the tag
+/// is absent is `[2, 2]` (subsampled), so an untagged planar tiled
+/// YCbCr page is also rejected here rather than mis-decoded.
 fn reject_subsampled_planar_ycbcr(
     entries: &[Entry],
     bo: ByteOrder,
@@ -1064,10 +1079,10 @@ fn reject_subsampled_planar_ycbcr(
         compression,
     )? {
         return Err(Error::Unsupported(format!(
-            "TIFF: PlanarConfiguration=2 with chroma-subsampled YCbCr \
-             (YCbCrSubSampling=({sh},{sv})) is not supported — under non-1:1 subsampling \
-             the §21 Cb/Cr planes are stored at reduced resolution; only 4:4:4 \
-             (YCbCrSubSampling=[1,1]) planar YCbCr decodes"
+            "TIFF: tiled PlanarConfiguration=2 with chroma-subsampled YCbCr \
+             (YCbCrSubSampling=({sh},{sv})) is not supported — §15 TileOffsets fixes the \
+             same tile count for every plane, which has no consistent geometry for the \
+             reduced-resolution §21 chroma planes; strip layout (and tiled 4:4:4) decodes"
         )));
     }
     Ok(())
@@ -1624,7 +1639,40 @@ fn decode_strips_planar(
             "TIFF: PlanarConfiguration=2 at sub-byte bit depths not supported",
         ));
     }
-    reject_subsampled_planar_ycbcr(entries, bo, samples_per_pixel, bps_first, compression)?;
+    // Chroma-subsampled YCbCr in separate planes (TIFF 6.0 §21 +
+    // §"PlanarConfiguration"): the Cb / Cr components form
+    // reduced-resolution planes ("ImageWidth of this chroma image is
+    // half the ImageWidth of the associated luma image", §21
+    // YCbCrSubSampling), so the full-resolution plane accounting below
+    // does not apply — route to the dedicated walker, which sizes each
+    // plane by its own §21 geometry, splats the chroma back over the
+    // sh × sv blocks, and returns the full-resolution interleave.
+    {
+        let photometric = find(entries, TAG_PHOTOMETRIC_INTERPRETATION)
+            .map(|e| e.as_u32(bo))
+            .transpose()?
+            .unwrap_or(0);
+        if let Some((sh, sv)) = ycbcr_subsampling_factors(
+            entries,
+            bo,
+            photometric,
+            samples_per_pixel,
+            bps_first,
+            compression,
+        )? {
+            return decode_strips_planar_ycbcr_subsampled(
+                input,
+                entries,
+                bo,
+                width,
+                height,
+                compression,
+                predictor,
+                sh,
+                sv,
+            );
+        }
+    }
     let rows_per_strip = find(entries, TAG_ROWS_PER_STRIP)
         .map(|e| e.as_u32(bo))
         .transpose()?
@@ -1751,6 +1799,190 @@ fn decode_strips_planar(
         planes.push(plane_buf);
     }
     interleave_planes(&planes, width, height, samples_per_pixel, bps_first)
+}
+
+/// Decode strips for chroma-subsampled YCbCr in
+/// `PlanarConfiguration = 2` (TIFF 6.0 §21 + §"PlanarConfiguration").
+///
+/// §21 "Ordering of Component Samples": "For PlanarConfiguration = 2,
+/// component samples are stored as 3 separate planes, and the ordering
+/// is the same as that used for other PhotometricInterpretation field
+/// values" — i.e. each plane is a plain row-major single-component
+/// image. The plane *dimensions* come from the §21 YCbCrSubSampling
+/// field: the Y plane is the full `width × height` luma image, while
+/// the Cb and Cr planes are the reduced "chroma image" ("ImageWidth of
+/// this chroma image is half the ImageWidth of the associated luma
+/// image", and likewise for ImageLength) — `(width / sh) × (height /
+/// sv)`. §21 constrains ImageWidth / ImageLength to integer multiples
+/// of the factors and RowsPerStrip to an integer multiple of
+/// YCbCrSubsampleVert, so a strip of `r` luma rows always pairs with
+/// exactly `r / sv` chroma rows.
+///
+/// Strip accounting follows §"PlanarConfiguration" /
+/// §"StripByteCounts": `SamplesPerPixel × StripsPerImage` entries,
+/// plane 0's strips first. The §14 predictor (value 2) differences
+/// each plane independently ("Differencing works the same as it does
+/// for grayscale data"), so it reverses per-plane at that plane's own
+/// row width.
+///
+/// After the three planes decode, each Cb / Cr sample is splatted back
+/// over its `sh × sv` luma block (the same full-resolution
+/// chroma-replication policy the chunky data-unit walker
+/// `build_rgb24_from_ycbcr` applies) and the full-resolution
+/// interleaved `(Y, Cb, Cr)` buffer is returned; the caller's
+/// photometric conversion then treats it as 1:1 chunky.
+#[allow(clippy::too_many_arguments)]
+fn decode_strips_planar_ycbcr_subsampled(
+    input: &[u8],
+    entries: &[Entry],
+    bo: ByteOrder,
+    width: u32,
+    height: u32,
+    compression: u16,
+    predictor: u16,
+    sh: usize,
+    sv: usize,
+) -> Result<Vec<u8>> {
+    // §21 page 90: "ImageWidth and ImageLength are constrained to be
+    // integer multiples of YCbCrSubsampleHoriz and YCbCrSubsampleVert
+    // respectively."
+    if width as usize % sh != 0 || height as usize % sv != 0 {
+        return Err(Error::invalid(format!(
+            "TIFF: planar subsampled YCbCr requires ImageWidth ({width}) to be a multiple \
+             of YCbCrSubsampleHoriz ({sh}) and ImageLength ({height}) a multiple of \
+             YCbCrSubsampleVert ({sv}) — TIFF 6.0 §21 page 90"
+        )));
+    }
+    if predictor == PREDICTOR_FLOAT {
+        return Err(Error::Unsupported(
+            "TIFF: Predictor=3 (floating-point) is undefined for YCbCr integer samples".to_string(),
+        ));
+    }
+    let cw = width as usize / sh; // chroma image width (§21)
+    let ch = height as usize / sv; // chroma image height (§21)
+    let rows_per_strip = find(entries, TAG_ROWS_PER_STRIP)
+        .map(|e| e.as_u32(bo))
+        .transpose()?
+        .unwrap_or(height)
+        .min(height);
+    // §21 page 90: "RowsPerStrip must be an integer multiple of
+    // YCbCrSubsampleVert." Without it a strip boundary would split a
+    // chroma row between two independently-compressed strips.
+    if rows_per_strip == 0 || rows_per_strip as usize % sv != 0 {
+        return Err(Error::invalid(format!(
+            "TIFF: planar subsampled YCbCr RowsPerStrip ({rows_per_strip}) must be a \
+             non-zero integer multiple of YCbCrSubsampleVert ({sv}) — TIFF 6.0 §21 page 90"
+        )));
+    }
+    let strip_offsets = find(entries, TAG_STRIP_OFFSETS)
+        .ok_or_else(|| Error::invalid("TIFF: missing StripOffsets"))?
+        .as_u64_vec(bo)?;
+    let strip_byte_counts = find(entries, TAG_STRIP_BYTE_COUNTS)
+        .ok_or_else(|| Error::invalid("TIFF: missing StripByteCounts"))?
+        .as_u64_vec(bo)?;
+    if strip_offsets.len() != strip_byte_counts.len() {
+        return Err(Error::invalid(
+            "TIFF: StripOffsets / StripByteCounts length mismatch",
+        ));
+    }
+    let strips_per_image = (height as u64).div_ceil(rows_per_strip as u64) as usize;
+    let expected_entries = strips_per_image * 3;
+    if strip_offsets.len() != expected_entries {
+        return Err(Error::invalid(format!(
+            "TIFF: planar subsampled YCbCr expects {expected_entries} strip entries \
+             (3 planes × StripsPerImage={strips_per_image}), got {}",
+            strip_offsets.len()
+        )));
+    }
+
+    // Decode the three planes. Plane 0 is the full-resolution luma
+    // image; planes 1 / 2 are the reduced §21 chroma images. Within a
+    // strip, plane rows are `rows_this_strip` (luma) or
+    // `rows_this_strip / sv` (chroma) rows of `plane_w` samples.
+    let mut planes: Vec<Vec<u8>> = Vec::with_capacity(3);
+    for plane in 0..3usize {
+        let (plane_w, plane_h) = if plane == 0 {
+            (width as usize, height as usize)
+        } else {
+            (cw, ch)
+        };
+        let mut plane_buf: Vec<u8> = Vec::with_capacity(plane_w * plane_h);
+        let mut luma_rows_done: u32 = 0;
+        let plane_start = plane * strips_per_image;
+        for s in 0..strips_per_image {
+            let i = plane_start + s;
+            let offset = strip_offsets[i];
+            let byte_count = strip_byte_counts[i];
+            let start = offset as usize;
+            let end = start.checked_add(byte_count as usize).ok_or_else(|| {
+                Error::invalid(format!("TIFF: plane-{plane} strip {s} length overflow"))
+            })?;
+            if end > input.len() {
+                return Err(Error::invalid(format!(
+                    "TIFF: plane-{plane} strip {s} extends past EOF"
+                )));
+            }
+            let luma_rows_this = rows_per_strip.min(height - luma_rows_done);
+            let plane_rows_this = if plane == 0 {
+                luma_rows_this as usize
+            } else {
+                // height and rows_per_strip are both multiples of sv,
+                // so every strip's luma row count divides exactly.
+                luma_rows_this as usize / sv
+            };
+            let expected = plane_w * plane_rows_this;
+            let decompressed = decompress_block(&input[start..end], expected, compression, None)?;
+            if decompressed.len() < expected {
+                return Err(Error::invalid(format!(
+                    "TIFF: plane-{plane} strip {s} short after decompress: got {}, \
+                     expected {expected}",
+                    decompressed.len()
+                )));
+            }
+            let mut strip = decompressed[..expected].to_vec();
+            if predictor == PREDICTOR_HORIZONTAL {
+                // §14: per-plane grayscale differencing at the plane's
+                // own row width.
+                apply_horizontal_predictor(
+                    &mut strip,
+                    plane_w,
+                    plane_rows_this,
+                    1,
+                    8,
+                    plane_w,
+                    bo,
+                )?;
+            }
+            plane_buf.extend_from_slice(&strip);
+            luma_rows_done += luma_rows_this;
+            if luma_rows_done >= height {
+                break;
+            }
+        }
+        if luma_rows_done < height {
+            return Err(Error::invalid(format!(
+                "TIFF: plane-{plane} strips did not cover full image"
+            )));
+        }
+        planes.push(plane_buf);
+    }
+
+    // Rebuild the full-resolution chunky interleave: Y verbatim, each
+    // chroma sample splatted over its sh × sv block (matching the
+    // chunky data-unit walker's full-resolution replication).
+    let w = width as usize;
+    let h = height as usize;
+    let mut out = vec![0u8; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let ci = (y / sv) * cw + (x / sh);
+            let o = (y * w + x) * 3;
+            out[o] = planes[0][y * w + x];
+            out[o + 1] = planes[1][ci];
+            out[o + 2] = planes[2][ci];
+        }
+    }
+    Ok(out)
 }
 
 /// Decode tiles for `PlanarConfiguration = 2`, per TIFF 6.0

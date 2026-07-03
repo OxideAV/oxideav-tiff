@@ -63,13 +63,14 @@
 //! layout (raw JPEGQTables/JPEGDCTables/JPEGACTables + entropy-coded
 //! strips) is recognised and rejected with a precise error — see
 //! [`jpeg_old`]. Encode-side JPEG-in-TIFF (Compression=7) remains out
-//! of scope. YCbCr encode is currently
-//! `YCbCrSubSampling = [1, 1]` chunky 4:4:4 only; the
-//! chroma-subsampled writes (`[2, 1]` / `[2, 2]` / `[4, 1]` /
-//! `[4, 2]` / `[1, 2]`) and the YCbCr planar / tiled / predictor
-//! compositions are deferred — the §21 "Ordering of Component
-//! Samples" data-unit shape changes under non-1:1 subsampling and
-//! needs the dedicated packer. Decode-side Compression=7 (new-style
+//! of scope. YCbCr encodes chunky 4:4:4, chroma-subsampled chunky
+//! (§21 data-unit packing, strip + tiled) and chroma-subsampled
+//! `PlanarConfiguration = 2` strips (full-resolution Y plane +
+//! reduced §21 "chroma image" Cb / Cr planes, per-plane §14
+//! predictor); still deferred are the §14 predictor over the packed
+//! *chunky* data-unit stream and *tiled* planar subsampled layout
+//! (no consistent per-plane tile geometry under §15's fixed
+//! TileOffsets count). Decode-side Compression=7 (new-style
 //! JPEG-in-TIFF, per TIFF Tech Note 2) is implemented as of round 92.
 //!
 //! ## Standalone vs registry-integrated

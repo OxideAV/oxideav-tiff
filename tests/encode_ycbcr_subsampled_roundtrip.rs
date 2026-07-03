@@ -369,10 +369,12 @@ fn rejects_wrong_buffer_length() {
 }
 
 #[test]
-fn rejects_predictor_planar_and_ccitt() {
-    // Predictor / PlanarConfiguration=2 / CCITT remain deferred for
-    // subsampled YCbCr. (Tiled subsampled layout is now supported — see
-    // `subsampled_tiled_matches_strip` below.)
+fn rejects_chunky_predictor_tiled_planar_and_ccitt() {
+    // The §14 predictor over the packed *chunky* data-unit stream and
+    // CCITT remain rejected for subsampled YCbCr, as does the *tiled*
+    // planar layout; the planar *strip* layout now encodes (see
+    // ycbcr_subsampled_planar_roundtrip.rs) and the tiled chunky
+    // layout is supported (`subsampled_tiled_matches_strip` below).
     let (w, h) = (8usize, 4usize);
     let pixels = block_uniform_chroma(w, h, 2, 2);
     let base = |comp, predictor, planar, tiling| EncodePage {
@@ -389,8 +391,10 @@ fn rejects_predictor_planar_and_ccitt() {
         bigtiff: false,
     };
     assert!(encode_tiff(&base(TiffCompression::None, true, false, None)).is_err());
-    assert!(encode_tiff(&base(TiffCompression::None, false, true, None)).is_err());
+    assert!(encode_tiff(&base(TiffCompression::None, false, true, Some((16, 16)))).is_err());
     assert!(encode_tiff(&base(TiffCompression::CcittT6, false, false, None)).is_err());
+    // Planar *strips* now encode.
+    assert!(encode_tiff(&base(TiffCompression::None, false, true, None)).is_ok());
     // A tile geometry that is not a multiple of the subsampling factors
     // is rejected (§21 page 90); TileLength 18 is not a multiple of sv=2.
     assert!(encode_tiff(&base(TiffCompression::None, false, false, Some((16, 18)))).is_err());
