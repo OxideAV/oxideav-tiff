@@ -53,6 +53,10 @@ pub fn type_size(t: u16) -> u32 {
 
 // --- Baseline tags (Section 8) ------------------------------------------
 pub const TAG_NEW_SUBFILE_TYPE: u16 = 254;
+/// SubfileType (TIFF 6.0 §8, page 42): deprecated SHORT that predates
+/// [`TAG_NEW_SUBFILE_TYPE`]; 1 = full-resolution, 2 = reduced-resolution,
+/// 3 = single page of a multi-page image.
+pub const TAG_SUBFILE_TYPE: u16 = 255;
 pub const TAG_IMAGE_WIDTH: u16 = 256;
 pub const TAG_IMAGE_LENGTH: u16 = 257;
 pub const TAG_BITS_PER_SAMPLE: u16 = 258;
@@ -71,13 +75,26 @@ pub const TAG_RESOLUTION_UNIT: u16 = 296;
 /// PageNumber (TIFF 6.0 §"PageNumber", page 40): SHORT × 2 — the
 /// 0-based page number and the total page count (0 = unknown total).
 pub const TAG_PAGE_NUMBER: u16 = 297;
+/// DocumentName (TIFF 6.0 §8, page 32): ASCII name of the scanned
+/// document this image is a page of.
+pub const TAG_DOCUMENT_NAME: u16 = 269;
 /// ImageDescription (TIFF 6.0 §8, page 34): ASCII "string that
 /// describes the subject of the image".
 pub const TAG_IMAGE_DESCRIPTION: u16 = 270;
+/// Make (TIFF 6.0 §8, page 35): ASCII scanner/camera manufacturer.
+pub const TAG_MAKE: u16 = 271;
+/// Model (TIFF 6.0 §8, page 35): ASCII scanner/camera model name.
+pub const TAG_MODEL: u16 = 272;
+/// PageName (TIFF 6.0 §8, page 39): ASCII name of the page the image
+/// is on.
+pub const TAG_PAGE_NAME: u16 = 285;
 pub const TAG_SOFTWARE: u16 = 305;
 pub const TAG_DATE_TIME: u16 = 306;
 /// Artist (TIFF 6.0 §8, page 28): ASCII "person who created the image".
 pub const TAG_ARTIST: u16 = 315;
+/// HostComputer (TIFF 6.0 §8, page 34): ASCII computer / OS the image
+/// was created on.
+pub const TAG_HOST_COMPUTER: u16 = 316;
 /// Copyright (TIFF 6.0 §8, page 31): ASCII copyright notice.
 pub const TAG_COPYRIGHT: u16 = 33432;
 pub const TAG_PREDICTOR: u16 = 317;

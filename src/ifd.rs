@@ -243,6 +243,34 @@ impl Entry {
             .next()
             .ok_or_else(|| Error::invalid("TIFF: empty integer entry"))
     }
+
+    /// Decode an ASCII (`TYPE_ASCII`, code 2) field to a `String`.
+    ///
+    /// Per TIFF 6.0 §2 an ASCII field is a NUL-terminated 7-bit ASCII
+    /// string; `count` includes the trailing NUL. This reader returns
+    /// the first NUL-terminated string (a field may in principle store
+    /// several, but every writer in the wild stores one), trimming the
+    /// terminator. Bytes are interpreted lossily so a hostile field
+    /// carrying non-ASCII / non-UTF-8 octets never fails the whole
+    /// decode — the substitution character is substituted instead.
+    ///
+    /// Returns an error only if the field type is not `TYPE_ASCII`; a
+    /// zero-length or unterminated payload yields an empty / best-effort
+    /// string rather than an error, since descriptive metadata must
+    /// never gate a pixel decode.
+    pub fn as_ascii(&self) -> Result<String> {
+        if self.field_type != TYPE_ASCII {
+            return Err(Error::invalid(format!(
+                "TIFF: tag {} is field type {}, not ASCII (2)",
+                self.tag, self.field_type
+            )));
+        }
+        let n = (self.count as usize).min(self.data.len());
+        let slice = &self.data[..n];
+        // Cut at the first NUL; if there is none, take the whole slice.
+        let end = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+        Ok(String::from_utf8_lossy(&slice[..end]).into_owned())
+    }
 }
 
 /// Result of parsing the file header.

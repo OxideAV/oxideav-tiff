@@ -105,6 +105,7 @@ pub mod encoder;
 pub mod error;
 pub mod ifd;
 pub mod image;
+pub mod metadata;
 pub mod types;
 
 // Compression = 50001 (WebP-in-TIFF) codec-in-container carriage.
@@ -142,6 +143,7 @@ pub use encoder::{
 };
 pub use error::{Result, TiffError};
 pub use image::{TiffImage, TiffPixelFormat, TiffPlane};
+pub use metadata::{ResolutionUnit, TiffMetadata};
 
 // Framework-integrated API (`oxideav-core`-dependent). Gated behind
 // `registry` so image-library callers can build the crate without

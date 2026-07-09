@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decode-side metadata exposure: `decode_tiff` / `decode_tiff_at` now return a `TiffMetadata` (`DecodedTiff::metadata`) gathering the TIFF 6.0 §8 descriptive ASCII fields (DocumentName / ImageDescription / Make / Model / PageName / Software / DateTime / Artist / HostComputer / Copyright), the resolution triple (XResolution / YResolution as raw RATIONALs + ResolutionUnit), and the page-level structural tags (Orientation, PageNumber, NewSubfileType, SubfileType). Extraction is total — a malformed metadata entry (wrong field type, truncated RATIONAL, unterminated ASCII) leaves that one field `None` and never gates the pixel decode. New `Entry::as_ascii` reader (lossy, NUL-trimmed). Round-trips everything the encoder's `PageExtras` writes.
 - Compression=50001 (WebP-in-TIFF) decode + encode: codec-in-container carriage where each strip / tile payload is one complete WebP file (VP8L lossless / VP8 lossy on decode; lossless VP8L on encode via `TiffCompression::Webp` for Rgb24 / Rgba32), routed through the `oxideav-webp` sibling crate's public framework-free API; multi-strip, §15 tiling, BigTIFF and multi-page compose; predictor / planar / non-RGB(A) shapes rejected per the §14 reader rule. Independently produced black-box reference fixtures committed under `tests/data/webp50001/`.
 
 ## [0.0.5](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.4...v0.0.5) - 2026-07-03

@@ -8,6 +8,7 @@ use crate::compress::{unpack_deflate, unpack_lzw, unpack_packbits, unpack_zstd};
 use crate::error::{Result, TiffError as Error};
 use crate::ifd::{find, parse_header, parse_ifd, ByteOrder, Entry};
 use crate::image::{TiffImage, TiffPixelFormat, TiffPlane};
+use crate::metadata::{extract_metadata, TiffMetadata};
 use crate::types::*;
 
 /// Maximum total pixels (`ImageWidth * ImageLength`) the decoder will
@@ -33,6 +34,11 @@ pub struct DecodedTiff {
     pub width: u32,
     pub height: u32,
     pub pixel_format: TiffPixelFormat,
+    /// Descriptive + structural metadata gathered from the same IFD
+    /// (TIFF 6.0 §8 ASCII fields, resolution triple, orientation,
+    /// page number, subfile-type flags). See [`TiffMetadata`]. Empty
+    /// (`TiffMetadata::default()`) when the IFD carries no such tags.
+    pub metadata: TiffMetadata,
 }
 
 /// Decode the first IFD of a TIFF/BigTIFF file. Multi-page callers
@@ -44,11 +50,13 @@ pub fn decode_tiff(input: &[u8]) -> Result<DecodedTiff> {
     let (entries, _next_ifd) = parse_ifd(input, bo, variant, header.first_ifd_offset)?;
     let frame = decode_ifd(input, bo, &entries)?;
     let pf = frame.pixel_format;
+    let metadata = extract_metadata(&entries, bo);
     Ok(DecodedTiff {
         width: frame.width,
         height: frame.height,
         pixel_format: pf,
         frame,
+        metadata,
     })
 }
 
@@ -64,11 +72,13 @@ pub fn decode_tiff_at(input: &[u8], ifd_offset: u64) -> Result<DecodedTiff> {
     let (entries, _next_ifd) = parse_ifd(input, bo, variant, ifd_offset)?;
     let frame = decode_ifd(input, bo, &entries)?;
     let pf = frame.pixel_format;
+    let metadata = extract_metadata(&entries, bo);
     Ok(DecodedTiff {
         width: frame.width,
         height: frame.height,
         pixel_format: pf,
         frame,
+        metadata,
     })
 }
 

@@ -150,6 +150,7 @@ fn decode_cielab_3sample_pure_neutral_gradient() {
         width,
         height,
         pixel_format,
+        ..
     } = decode_tiff(&tiff).expect("decode CIELab 3-sample");
     assert_eq!((width, height), (4, 1));
     assert_eq!(pixel_format, TiffPixelFormat::Rgb24);
@@ -268,6 +269,7 @@ fn decode_cielab_1sample_l_only_emits_gray8() {
         width,
         height,
         pixel_format,
+        ..
     } = decode_tiff(&tiff).expect("decode CIELab L*-only");
     assert_eq!((width, height), (4, 1));
     assert_eq!(pixel_format, TiffPixelFormat::Gray8);
