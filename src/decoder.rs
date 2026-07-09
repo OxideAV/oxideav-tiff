@@ -109,6 +109,44 @@ pub fn decode_tiff_all(input: &[u8]) -> Result<Vec<TiffImage>> {
     Ok(out)
 }
 
+/// Decode every IFD in the file, returning one [`DecodedTiff`] per page
+/// so each page's [`TiffMetadata`] (TIFF 6.0 §8 descriptive fields,
+/// resolution triple, page number, subfile-type flags) travels with its
+/// pixels.
+///
+/// This is the metadata-carrying counterpart of [`decode_tiff_all`]
+/// (which returns bare [`TiffImage`]s). It walks the identical next-IFD
+/// chain with the same cyclic-pointer guard.
+pub fn decode_tiff_all_pages(input: &[u8]) -> Result<Vec<DecodedTiff>> {
+    let header = parse_header(input)?;
+    let bo = header.byte_order;
+    let variant = header.variant;
+    let mut out = Vec::new();
+    let mut next = header.first_ifd_offset;
+    let mut visited: Vec<u64> = Vec::new();
+    while next != 0 {
+        if visited.contains(&next) {
+            return Err(Error::invalid("TIFF: cyclic next-IFD pointer"));
+        }
+        visited.push(next);
+        let (entries, n) = parse_ifd(input, bo, variant, next)?;
+        let frame = decode_ifd(input, bo, &entries)?;
+        let metadata = extract_metadata(&entries, bo);
+        out.push(DecodedTiff {
+            width: frame.width,
+            height: frame.height,
+            pixel_format: frame.pixel_format,
+            frame,
+            metadata,
+        });
+        next = n;
+    }
+    if out.is_empty() {
+        return Err(Error::invalid("TIFF: no IFDs in file"));
+    }
+    Ok(out)
+}
+
 /// Decode one IFD (already parsed into `entries`) into a [`TiffImage`].
 fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImage> {
     // ---- Mandatory tags ----

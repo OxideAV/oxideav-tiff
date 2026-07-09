@@ -136,7 +136,9 @@ pub const CODEC_ID_STR: &str = "tiff";
 
 // Standalone, framework-free API. Available regardless of the
 // `registry` feature.
-pub use decoder::{decode_tiff, decode_tiff_all, decode_tiff_at, DecodedTiff};
+pub use decoder::{
+    decode_tiff, decode_tiff_all, decode_tiff_all_pages, decode_tiff_at, DecodedTiff,
+};
 pub use encoder::{
     encode_tiff, encode_tiff_multi, f16_bits_to_f32, f32_to_f16_bits, AuxIfdEntry, EncodePage,
     EncodePixelFormat, ExtraSampleKind, PageExtras, PageResolution, RgbColor, TiffCompression,
