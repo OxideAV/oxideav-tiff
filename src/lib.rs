@@ -145,7 +145,7 @@ pub use encoder::{
 };
 pub use error::{Result, TiffError};
 pub use image::{TiffImage, TiffPixelFormat, TiffPlane};
-pub use metadata::{ResolutionUnit, TiffMetadata};
+pub use metadata::{ResolutionUnit, TiffFormatInfo, TiffMetadata};
 
 // Framework-integrated API (`oxideav-core`-dependent). Gated behind
 // `registry` so image-library callers can build the crate without

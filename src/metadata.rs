@@ -102,6 +102,93 @@ pub struct TiffMetadata {
     pub subfile_type: Option<u16>,
 }
 
+/// Raw structural / codec tags describing *how* the image is stored —
+/// the introspection surface a CLI or transcoder needs ("8-bit RGB,
+/// LZW, tiled 256×256") without re-walking the IFD.
+///
+/// These are the *on-disk* tag values, not the decoder's interpreted
+/// pixel format: `photometric` / `compression` are the raw tag 262 /
+/// 259 codes, `bits_per_sample` is the per-sample list, etc. A tag that
+/// is absent (and has a spec default) is reported as its resolved
+/// value where the default is unambiguous (`samples_per_pixel` default
+/// 1, `bits_per_sample` default `[1]`), else `None` / empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TiffFormatInfo {
+    /// PhotometricInterpretation (tag 262) — raw code.
+    pub photometric: Option<u16>,
+    /// Compression (tag 259) — raw code (1 = none, 5 = LZW, …). Absent
+    /// tag resolves to the spec default 1 (no compression).
+    pub compression: Option<u16>,
+    /// BitsPerSample (tag 258) — one entry per sample; empty only for a
+    /// malformed entry (the spec default is `[1]`, filled in here).
+    pub bits_per_sample: Vec<u16>,
+    /// SamplesPerPixel (tag 277) — resolved (default 1).
+    pub samples_per_pixel: u16,
+    /// PlanarConfiguration (tag 284) — 1 = chunky, 2 = planar.
+    pub planar_config: Option<u16>,
+    /// Predictor (tag 317) — 1 = none, 2 = horizontal, 3 = float.
+    pub predictor: Option<u16>,
+    /// FillOrder (tag 266) — 1 = MSB-first, 2 = LSB-first.
+    pub fill_order: Option<u16>,
+    /// SampleFormat (tag 339) — one entry per sample (1 = uint, 2 = int,
+    /// 3 = IEEE float); empty when the tag is absent (spec default uint).
+    pub sample_format: Vec<u16>,
+    /// `true` when the IFD stores tiles (has TileWidth / TileLength)
+    /// rather than strips.
+    pub tiled: bool,
+    /// TileWidth × TileLength (tags 322 / 323) when tiled.
+    pub tile_size: Option<(u32, u32)>,
+    /// RowsPerStrip (tag 278) for a stripped image.
+    pub rows_per_strip: Option<u32>,
+}
+
+/// Gather the raw structural / codec tags from a parsed IFD. Total: a
+/// malformed entry is dropped, never propagated.
+pub fn extract_format_info(entries: &[Entry], bo: ByteOrder) -> TiffFormatInfo {
+    let short = |tag: u16| -> Option<u16> {
+        find(entries, tag)
+            .and_then(|e| e.as_u32(bo).ok())
+            .and_then(|v| u16::try_from(v).ok())
+    };
+    let short_vec = |tag: u16| -> Vec<u16> {
+        find(entries, tag)
+            .and_then(|e| e.as_u32_vec(bo).ok())
+            .map(|v| {
+                v.into_iter()
+                    .filter_map(|x| u16::try_from(x).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let samples_per_pixel = short(TAG_SAMPLES_PER_PIXEL).unwrap_or(1);
+    let mut bits_per_sample = short_vec(TAG_BITS_PER_SAMPLE);
+    if bits_per_sample.is_empty() {
+        // Spec default is 1 bit per sample.
+        bits_per_sample = vec![1];
+    }
+    let tile_w = find(entries, TAG_TILE_WIDTH).and_then(|e| e.as_u32(bo).ok());
+    let tile_h = find(entries, TAG_TILE_LENGTH).and_then(|e| e.as_u32(bo).ok());
+    let tile_size = match (tile_w, tile_h) {
+        (Some(w), Some(h)) => Some((w, h)),
+        _ => None,
+    };
+
+    TiffFormatInfo {
+        photometric: short(TAG_PHOTOMETRIC_INTERPRETATION),
+        compression: Some(short(TAG_COMPRESSION).unwrap_or(1)),
+        bits_per_sample,
+        samples_per_pixel,
+        planar_config: short(TAG_PLANAR_CONFIGURATION),
+        predictor: short(TAG_PREDICTOR),
+        fill_order: short(TAG_FILL_ORDER),
+        sample_format: short_vec(TAG_SAMPLE_FORMAT),
+        tiled: tile_size.is_some(),
+        tile_size,
+        rows_per_strip: find(entries, TAG_ROWS_PER_STRIP).and_then(|e| e.as_u32(bo).ok()),
+    }
+}
+
 /// Read a two-`u32` RATIONAL (or single unsigned SHORT/LONG treated as
 /// `x/1`) from an entry, guarding the payload length. Returns `None`
 /// for a malformed / wrong-type entry.

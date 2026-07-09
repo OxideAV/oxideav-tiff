@@ -8,7 +8,7 @@ use crate::compress::{unpack_deflate, unpack_lzw, unpack_packbits, unpack_zstd};
 use crate::error::{Result, TiffError as Error};
 use crate::ifd::{find, parse_header, parse_ifd, ByteOrder, Entry};
 use crate::image::{TiffImage, TiffPixelFormat, TiffPlane};
-use crate::metadata::{extract_metadata, TiffMetadata};
+use crate::metadata::{extract_format_info, extract_metadata, TiffFormatInfo, TiffMetadata};
 use crate::types::*;
 
 /// Maximum total pixels (`ImageWidth * ImageLength`) the decoder will
@@ -39,6 +39,10 @@ pub struct DecodedTiff {
     /// page number, subfile-type flags). See [`TiffMetadata`]. Empty
     /// (`TiffMetadata::default()`) when the IFD carries no such tags.
     pub metadata: TiffMetadata,
+    /// Raw structural / codec tags describing how the image is stored
+    /// (photometric, compression, bit depth, planar / tiled layout).
+    /// See [`TiffFormatInfo`].
+    pub format: TiffFormatInfo,
 }
 
 /// Decode the first IFD of a TIFF/BigTIFF file. Multi-page callers
@@ -51,12 +55,14 @@ pub fn decode_tiff(input: &[u8]) -> Result<DecodedTiff> {
     let frame = decode_ifd(input, bo, &entries)?;
     let pf = frame.pixel_format;
     let metadata = extract_metadata(&entries, bo);
+    let format = extract_format_info(&entries, bo);
     Ok(DecodedTiff {
         width: frame.width,
         height: frame.height,
         pixel_format: pf,
         frame,
         metadata,
+        format,
     })
 }
 
@@ -73,12 +79,14 @@ pub fn decode_tiff_at(input: &[u8], ifd_offset: u64) -> Result<DecodedTiff> {
     let frame = decode_ifd(input, bo, &entries)?;
     let pf = frame.pixel_format;
     let metadata = extract_metadata(&entries, bo);
+    let format = extract_format_info(&entries, bo);
     Ok(DecodedTiff {
         width: frame.width,
         height: frame.height,
         pixel_format: pf,
         frame,
         metadata,
+        format,
     })
 }
 
@@ -132,12 +140,14 @@ pub fn decode_tiff_all_pages(input: &[u8]) -> Result<Vec<DecodedTiff>> {
         let (entries, n) = parse_ifd(input, bo, variant, next)?;
         let frame = decode_ifd(input, bo, &entries)?;
         let metadata = extract_metadata(&entries, bo);
+        let format = extract_format_info(&entries, bo);
         out.push(DecodedTiff {
             width: frame.width,
             height: frame.height,
             pixel_format: frame.pixel_format,
             frame,
             metadata,
+            format,
         });
         next = n;
     }
