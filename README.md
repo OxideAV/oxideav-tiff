@@ -531,6 +531,32 @@ per the spec default, and an RGB page with `SamplesPerPixel ≥ 4` but
 no tag 338 still decodes by skipping the undeclared trailing
 components.
 
+## Metadata & format introspection
+
+Every decode result carries the descriptive and structural tags that sit
+alongside the pixels, so a caller can read back exactly what a writer
+stored without re-walking the IFD. `decode_tiff` / `decode_tiff_at`
+return a `DecodedTiff` whose `metadata: TiffMetadata` and
+`format: TiffFormatInfo` fields expose:
+
+| Field group | Tags | Reported as |
+| ----------- | ---- | ----------- |
+| §8 ASCII descriptive | DocumentName (269), ImageDescription (270), Make (271), Model (272), PageName (285), Software (305), DateTime (306), Artist (315), HostComputer (316), Copyright (33432) | `Option<String>` each (lossy, NUL-trimmed) |
+| Resolution | XResolution (282), YResolution (283) as raw `(num, den)` RATIONALs; ResolutionUnit (296) | `Option<(u32, u32)>` / `Option<ResolutionUnit>` |
+| Page structure | Orientation (274), PageNumber (297), NewSubfileType (254), SubfileType (255) | `Option<u16>` / `Option<(u16, u16)>` / `Option<u32>` |
+| Format (`TiffFormatInfo`) | PhotometricInterpretation (262), Compression (259), BitsPerSample (258), SamplesPerPixel (277), PlanarConfiguration (284), Predictor (317), FillOrder (266), SampleFormat (339), tiled-vs-stripped layout (TileWidth/Length 322/323 or RowsPerStrip 278) | raw tag codes / `Vec<u16>` / `bool` / `Option<(u32, u32)>` |
+
+Extraction is **total**: a malformed informational entry (wrong field
+type, truncated RATIONAL, out-of-range enum, over-long / unterminated /
+non-UTF-8 ASCII) leaves that one field empty and never gates the pixel
+decode or panics. `decode_tiff_all_pages` returns one `DecodedTiff` per
+IFD so the metadata travels with each page of a multi-page file.
+
+On the write side the encoder's `PageExtras` emits every §8 ASCII field,
+the resolution triple, Orientation, PageNumber and the NewSubfileType
+bits, interleaved into the IFD in the §2-required ascending tag order —
+so the whole §8 metadata surface round-trips end to end.
+
 ## Encode
 
 | Photometric    | Bit depth | Compression                                                 | API call                |

@@ -34,7 +34,19 @@
 //! * Predictor: 1 (none) and 2 (horizontal differencing,
 //!   per-component for SamplesPerPixel > 1)
 //! * Strip OR tile layout
-//! * Multi-page (full next-IFD chain walk via [`decode_tiff_all`])
+//! * Multi-page (full next-IFD chain walk via [`decode_tiff_all`], or
+//!   [`decode_tiff_all_pages`] to keep each page's metadata)
+//! * Metadata: every decode result carries a [`TiffMetadata`]
+//!   (`DecodedTiff::metadata`) with the TIFF 6.0 §8 ASCII descriptive
+//!   fields (DocumentName / ImageDescription / Make / Model / PageName /
+//!   Software / DateTime / Artist / HostComputer / Copyright), the
+//!   resolution triple (XResolution / YResolution raw RATIONALs +
+//!   ResolutionUnit) and the page-level tags (Orientation, PageNumber,
+//!   NewSubfileType, SubfileType); plus a [`TiffFormatInfo`]
+//!   (`DecodedTiff::format`) with the raw structural / codec tags
+//!   (photometric, compression, bit depth, planar / tiled layout).
+//!   Extraction is total — a malformed informational tag leaves that
+//!   field empty and never gates the pixel decode.
 //!
 //! Encode-side coverage (classic II / single or multi page):
 //!
@@ -68,9 +80,12 @@
 //!   via [`EncodePage::predictor`]
 //! * Multi-page chain via [`encode_tiff_multi`]; SubIFDs (330) child
 //!   image trees, Exif (34665) / GPS (34853) verbatim child IFDs,
-//!   PageNumber / NewSubfileType bits, resolution + §8 ASCII metadata
-//!   via [`encoder::PageExtras`] (children decode through
-//!   [`decode_tiff_at`])
+//!   PageNumber / NewSubfileType bits, resolution + the full TIFF 6.0
+//!   §8 ASCII metadata set (DocumentName / ImageDescription / Make /
+//!   Model / PageName / Software / DateTime / Artist / HostComputer /
+//!   Copyright) via [`encoder::PageExtras`] (children decode through
+//!   [`decode_tiff_at`]) — everything the decoder's [`TiffMetadata`]
+//!   exposes round-trips
 //!
 //! The deprecated TIFF 6.0 §22 old-style JPEG (Compression=6) decodes
 //! in its interchange-format layout (`JPEGInterchangeFormat`, tag 513,
