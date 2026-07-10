@@ -5,10 +5,13 @@
 //! and *structural* tags that sit alongside the pixels — the TIFF 6.0
 //! §8 ASCII information fields (ImageDescription, Software, Artist, …),
 //! the resolution triple (XResolution / YResolution / ResolutionUnit),
-//! and the page-level layout tags (Orientation, PageNumber, the two
-//! SubfileType flavours). None of these steer pixel reconstruction, so
-//! they were previously discarded; exposing them lets a caller read
-//! back exactly what the encoder's [`crate::encoder::PageExtras`] wrote.
+//! the page-level layout tags (Orientation, PageNumber, the two
+//! SubfileType flavours), and the two registered opaque payloads —
+//! the XMP packet (tag 700) and the embedded ICC profile (tag 34675),
+//! per `docs/image/tiff/tiff-icc-xmp-tags.md`. None of these steer
+//! pixel reconstruction, so they were previously discarded; exposing
+//! them lets a caller read back exactly what the encoder's
+//! [`crate::encoder::PageExtras`] wrote.
 //!
 //! Extraction is deliberately *total*: a malformed metadata entry
 //! (wrong field type, truncated RATIONAL, unterminated ASCII) leaves

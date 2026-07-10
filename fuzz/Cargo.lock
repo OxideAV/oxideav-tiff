@@ -116,11 +116,12 @@ dependencies = [
 
 [[package]]
 name = "oxideav-tiff"
-version = "0.0.3"
+version = "0.0.5"
 dependencies = [
  "compcol",
  "oxideav-core",
  "oxideav-mjpeg",
+ "oxideav-webp",
 ]
 
 [[package]]
@@ -129,6 +130,21 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "oxideav-tiff",
+]
+
+[[package]]
+name = "oxideav-vp8"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ca0b48d98de1d0134782e0267fb03ebc4ef3d45f0ea26843ac623a1a80c880a"
+
+[[package]]
+name = "oxideav-webp"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cce95e65b90f1382e20b8774204ae07337b4f9051dcfe5d452c3cc9d13fd08a"
+dependencies = [
+ "oxideav-vp8",
 ]
 
 [[package]]

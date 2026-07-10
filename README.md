@@ -545,6 +545,7 @@ return a `DecodedTiff` whose `metadata: TiffMetadata` and
 | Resolution | XResolution (282), YResolution (283) as raw `(num, den)` RATIONALs; ResolutionUnit (296) | `Option<(u32, u32)>` / `Option<ResolutionUnit>` |
 | Page structure | Orientation (274), PageNumber (297), NewSubfileType (254), SubfileType (255) | `Option<u16>` / `Option<(u16, u16)>` / `Option<u32>` |
 | Format (`TiffFormatInfo`) | PhotometricInterpretation (262), Compression (259), BitsPerSample (258), SamplesPerPixel (277), PlanarConfiguration (284), Predictor (317), FillOrder (266), SampleFormat (339), tiled-vs-stripped layout (TileWidth/Length 322/323 or RowsPerStrip 278) | raw tag codes / `Vec<u16>` / `bool` / `Option<(u32, u32)>` |
+| Registered opaque payloads | XMP packet (700), embedded ICC profile / InterColorProfile (34675) | `Option<Vec<u8>>` each, byte-for-byte |
 
 Extraction is **total**: a malformed informational entry (wrong field
 type, truncated RATIONAL, out-of-range enum, over-long / unterminated /
@@ -556,6 +557,30 @@ On the write side the encoder's `PageExtras` emits every §8 ASCII field,
 the resolution triple, Orientation, PageNumber and the NewSubfileType
 bits, interleaved into the IFD in the §2-required ascending tag order —
 so the whole §8 metadata surface round-trips end to end.
+
+### ICC profile (34675) & XMP packet (700)
+
+Neither tag is defined by TIFF 6.0 itself — tag 34675 (InterColorProfile)
+comes from the TIFF/EP (ISO 12234-2) assignment and tag 700 (XMP) from
+the Adobe XMP Specification Part 3; both are implemented per the trace
+doc [`docs/image/tiff/tiff-icc-xmp-tags.md`](docs/image/tiff/tiff-icc-xmp-tags.md).
+Decode accepts either registered field type (BYTE 1 / UNDEFINED 7 —
+1-byte opaque elements both ways, `Count` = exact payload length,
+inline value-slot payloads included) and surfaces the bytes **verbatim**
+in `TiffMetadata::icc_profile` / `TiffMetadata::xmp`: the file's
+`II`/`MM` byte order applies to the IFD entry's integer fields only,
+never to the payloads (an ICC profile is internally big-endian,
+always). The ICC profile's own big-endian size field at offset +0 is
+the authoritative length and must equal the IFD `Count`; a mismatch is
+malformed and drops the field without gating the pixel decode. Encode
+writes both via `PageExtras::icc_profile` (UNDEFINED) / `PageExtras::xmp`
+(BYTE) in the §2 ascending tag positions (700 before Copyright; 34675
+between the Exif and GPS pointers), validating the ICC header/size
+precisely before writing. Round-trips byte-exact across classic +
+BigTIFF, strip/tile/planar layouts and per page of a multi-page chain;
+black-box interop (`tests/icc_xmp_blackbox.rs`) proves both directions
+against `magick`, `tiffcp` and `tiffdump` as opaque validator
+processes.
 
 ## Encode
 

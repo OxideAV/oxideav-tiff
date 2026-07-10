@@ -42,7 +42,11 @@
 //!   Software / DateTime / Artist / HostComputer / Copyright), the
 //!   resolution triple (XResolution / YResolution raw RATIONALs +
 //!   ResolutionUnit) and the page-level tags (Orientation, PageNumber,
-//!   NewSubfileType, SubfileType); plus a [`TiffFormatInfo`]
+//!   NewSubfileType, SubfileType) and the registered opaque payloads
+//!   — the XMP packet (tag 700) and the embedded ICC profile (tag
+//!   34675 InterColorProfile), both surfaced byte-for-byte (BYTE or
+//!   UNDEFINED typed; never byte-swapped — see
+//!   `docs/image/tiff/tiff-icc-xmp-tags.md`); plus a [`TiffFormatInfo`]
 //!   (`DecodedTiff::format`) with the raw structural / codec tags
 //!   (photometric, compression, bit depth, planar / tiled layout).
 //!   Extraction is total — a malformed informational tag leaves that
@@ -83,7 +87,9 @@
 //!   PageNumber / NewSubfileType bits, resolution + the full TIFF 6.0
 //!   §8 ASCII metadata set (DocumentName / ImageDescription / Make /
 //!   Model / PageName / Software / DateTime / Artist / HostComputer /
-//!   Copyright) via [`encoder::PageExtras`] (children decode through
+//!   Copyright) plus the XMP packet (tag 700) and embedded ICC
+//!   profile (tag 34675, header/size-validated, stored verbatim) via
+//!   [`encoder::PageExtras`] (children decode through
 //!   [`decode_tiff_at`]) — everything the decoder's [`TiffMetadata`]
 //!   exposes round-trips
 //!
