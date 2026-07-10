@@ -185,6 +185,35 @@ pub const TAG_YCBCR_SUBSAMPLING: u16 = 530;
 pub const TAG_YCBCR_POSITIONING: u16 = 531;
 pub const TAG_REFERENCE_BLACK_WHITE: u16 = 532;
 
+// --- Registered opaque metadata payload tags -----------------------------
+//
+// Neither tag exists in TIFF 6.0 itself; both are registered private
+// tags whose payloads ride in an IFD as ordinary entries. Layout and
+// semantics per the OxideAV trace doc
+// `docs/image/tiff/tiff-icc-xmp-tags.md`:
+/// XMP metadata packet (tag 700 / 0x02BC). Defined by the Adobe XMP
+/// Specification Part 3 (Storage in Files): a serialised UTF-8 XML
+/// packet stored in IFD0 as type BYTE (writers may emit UNDEFINED;
+/// readers accept either — both are 1-byte opaque elements). `Count`
+/// is the exact packet byte length. The packet bytes are copied
+/// verbatim: the TIFF `II`/`MM` byte order applies only to the IFD
+/// entry's integer fields, never to the payload.
+pub const TAG_XMP: u16 = 700;
+/// Embedded ICC colour profile (tag 34675 / 0x8773). Assigned by
+/// TIFF/EP (ISO 12234-2) / the ICC embedding guidance: a complete
+/// ICC.1 device profile stored as type UNDEFINED (readers also accept
+/// BYTE), at most one per IFD. `Count` equals the profile byte length
+/// and must match the profile's own big-endian 4-byte size field at
+/// profile offset +0. The profile is internally big-endian *always*,
+/// independent of the enclosing file's `II`/`MM` order — the payload
+/// is copied verbatim, never byte-swapped.
+pub const TAG_ICC_PROFILE: u16 = 34675;
+
+/// Byte length of the fixed ICC.1 profile header that starts every
+/// embedded profile (size field at +0, `acsp` signature at +36, tag
+/// table after the header).
+pub const ICC_PROFILE_HEADER_LEN: usize = 128;
+
 // --- Child-IFD pointer tags ----------------------------------------------
 // The child-IFD *mechanism* is plain TIFF 6.0 §2 IFD structure (an IFD
 // at a file offset, reached through a LONG-typed entry). The tag

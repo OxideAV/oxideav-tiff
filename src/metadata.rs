@@ -100,6 +100,24 @@ pub struct TiffMetadata {
     pub new_subfile_type: Option<u32>,
     /// SubfileType (tag 255) — the deprecated pre-6.0 SHORT enum.
     pub subfile_type: Option<u16>,
+
+    // ---- Registered opaque metadata payloads ----
+    /// XMP packet (tag 700, Adobe XMP Specification Part 3): the
+    /// serialised UTF-8 XML packet, byte-for-byte as stored. Accepted
+    /// as BYTE or UNDEFINED (both 1-byte opaque elements); the payload
+    /// is copied verbatim — the file's `II`/`MM` byte order never
+    /// applies to it. See `docs/image/tiff/tiff-icc-xmp-tags.md`.
+    pub xmp: Option<Vec<u8>>,
+    /// Embedded ICC colour profile (tag 34675, TIFF/EP / ICC.1): the
+    /// complete profile, byte-for-byte as stored. ICC profiles are
+    /// internally big-endian regardless of the enclosing TIFF's byte
+    /// order, so the bytes are surfaced verbatim, never swapped.
+    /// `Some` only when the payload passes the trace-doc integrity
+    /// checks: at least the 128-byte ICC header is present and the
+    /// profile's own big-endian size field at offset +0 equals the IFD
+    /// `Count` (a mismatch is malformed and drops the field, per the
+    /// total-extraction rule).
+    pub icc_profile: Option<Vec<u8>>,
 }
 
 /// Raw structural / codec tags describing *how* the image is stored —
@@ -206,6 +224,45 @@ fn rational(e: &Entry, bo: ByteOrder) -> Option<(u32, u32)> {
     }
 }
 
+/// Extract an opaque byte payload (XMP packet / ICC profile) verbatim.
+///
+/// Per `docs/image/tiff/tiff-icc-xmp-tags.md` §4: accept both BYTE (1)
+/// and UNDEFINED (7) — each is a 1-byte opaque element, so `Count` is
+/// the exact payload byte length — and copy the bytes without applying
+/// the file's `II`/`MM` byte order. `None` for a wrong-typed, empty, or
+/// short entry (total extraction: malformed metadata is dropped).
+fn opaque_bytes(entries: &[Entry], tag: u16) -> Option<Vec<u8>> {
+    let e = find(entries, tag)?;
+    if e.field_type != TYPE_BYTE && e.field_type != TYPE_UNDEFINED {
+        return None;
+    }
+    let n = usize::try_from(e.count).ok()?;
+    if n == 0 || e.data.len() < n {
+        return None;
+    }
+    Some(e.data[..n].to_vec())
+}
+
+/// Extract the embedded ICC profile (tag 34675) with the trace-doc
+/// integrity checks: the fixed 128-byte ICC header must be present and
+/// the profile's own size field — a big-endian u32 at profile offset
+/// +0, big-endian *regardless* of the TIFF byte order — must equal the
+/// IFD `Count`. "The 4-byte profile size at offset +0 of the profile
+/// equals the IFD entry's `Count` and is the authoritative payload
+/// length; treat a mismatch as malformed"
+/// (`docs/image/tiff/tiff-icc-xmp-tags.md` §2).
+fn icc_profile(entries: &[Entry]) -> Option<Vec<u8>> {
+    let p = opaque_bytes(entries, TAG_ICC_PROFILE)?;
+    if p.len() < ICC_PROFILE_HEADER_LEN {
+        return None;
+    }
+    let declared = u32::from_be_bytes([p[0], p[1], p[2], p[3]]) as usize;
+    if declared != p.len() {
+        return None;
+    }
+    Some(p)
+}
+
 /// Best-effort ASCII read: `None` unless the tag is present and its
 /// (lossy-decoded) string is non-empty.
 fn ascii(entries: &[Entry], tag: u16) -> Option<String> {
@@ -258,5 +315,8 @@ pub fn extract_metadata(entries: &[Entry], bo: ByteOrder) -> TiffMetadata {
         page_number,
         new_subfile_type: find(entries, TAG_NEW_SUBFILE_TYPE).and_then(|e| e.as_u32(bo).ok()),
         subfile_type: short(TAG_SUBFILE_TYPE),
+
+        xmp: opaque_bytes(entries, TAG_XMP),
+        icc_profile: icc_profile(entries),
     }
 }
