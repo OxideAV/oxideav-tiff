@@ -2,16 +2,24 @@
 //! stream `0`. Width / height / pixel-format are pulled from the
 //! first IFD up-front so callers that read `StreamInfo` before
 //! seeing any frames get accurate metadata.
+//!
+//! Container-level metadata surfaces through the core `Demuxer`
+//! accessors: the TIFF 6.0 §8 ASCII descriptive fields of the first
+//! IFD become flat `metadata()` key/value pairs, and the registered
+//! opaque payloads — the embedded ICC profile (tag 34675) and the
+//! XMP packet (tag 700), per `docs/image/tiff/tiff-icc-xmp-tags.md` —
+//! become structured `attachments()` carrying the raw bytes verbatim.
 
 use std::io::{Read, SeekFrom};
 
 use oxideav_core::{
-    CodecId, CodecParameters, CodecResolver, Error, Packet, PixelFormat, Result, StreamInfo,
-    TimeBase,
+    Attachment, CodecId, CodecParameters, CodecResolver, Error, Packet, PixelFormat, Result,
+    StreamInfo, TimeBase,
 };
 use oxideav_core::{ContainerRegistry, Demuxer, ProbeData, ProbeScore, ReadSeek, MAX_PROBE_SCORE};
 
 use crate::ifd::{find, parse_header, parse_ifd};
+use crate::metadata::extract_metadata;
 use crate::types::*;
 
 pub fn register(reg: &mut ContainerRegistry) {
@@ -97,9 +105,54 @@ pub fn open_demuxer(
         start_time: Some(0),
         duration: None,
     };
+
+    // Container-level metadata from the first IFD: the §8 ASCII
+    // descriptive fields become flat key/value pairs, the ICC / XMP
+    // payloads become structured attachments. Extraction is total, so
+    // malformed informational tags simply produce fewer entries.
+    let md = extract_metadata(&entries, bo);
+    let mut metadata: Vec<(String, String)> = Vec::new();
+    for (key, value) in [
+        ("document_name", &md.document_name),
+        ("description", &md.image_description),
+        ("make", &md.make),
+        ("model", &md.model),
+        ("page_name", &md.page_name),
+        ("software", &md.software),
+        ("date", &md.date_time),
+        ("artist", &md.artist),
+        ("host_computer", &md.host_computer),
+        ("copyright", &md.copyright),
+    ] {
+        if let Some(v) = value {
+            metadata.push((key.to_string(), v.clone()));
+        }
+    }
+    let mut attachments: Vec<Attachment> = Vec::new();
+    if let Some(icc) = md.icc_profile {
+        attachments.push(Attachment {
+            name: "profile.icc".to_string(),
+            // IANA-registered media type for ICC profiles.
+            mime: Some("application/vnd.iccprofile".to_string()),
+            description: Some("embedded ICC colour profile (TIFF tag 34675)".to_string()),
+            data: icc,
+        });
+    }
+    if let Some(xmp) = md.xmp {
+        attachments.push(Attachment {
+            name: "packet.xmp".to_string(),
+            // XMP packets are RDF/XML documents.
+            mime: Some("application/rdf+xml".to_string()),
+            description: Some("XMP metadata packet (TIFF tag 700)".to_string()),
+            data: xmp,
+        });
+    }
+
     Ok(Box::new(TiffDemuxer {
         streams: vec![stream],
         data: Some(buf),
+        metadata,
+        attachments,
     }))
 }
 
@@ -107,6 +160,10 @@ struct TiffDemuxer {
     streams: Vec<StreamInfo>,
     /// `None` once the sole packet has been emitted.
     data: Option<Vec<u8>>,
+    /// Flat §8 descriptive metadata from the first IFD.
+    metadata: Vec<(String, String)>,
+    /// ICC profile / XMP packet payloads from the first IFD.
+    attachments: Vec<Attachment>,
 }
 
 impl Demuxer for TiffDemuxer {
@@ -127,5 +184,11 @@ impl Demuxer for TiffDemuxer {
             }
             None => Err(Error::Eof),
         }
+    }
+    fn metadata(&self) -> &[(String, String)] {
+        &self.metadata
+    }
+    fn attachments(&self) -> &[Attachment] {
+        &self.attachments
     }
 }
