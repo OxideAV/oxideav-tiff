@@ -58,7 +58,8 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_tiff::compress::{unpack_deflate, unpack_lzw, unpack_packbits, unpack_zstd};
 use oxideav_tiff::ifd::{parse_header, parse_ifd};
-use oxideav_tiff::{decode_tiff, decode_tiff_all, decode_tiff_at};
+use oxideav_tiff::metadata::{extract_format_info, extract_metadata};
+use oxideav_tiff::{decode_tiff, decode_tiff_all, decode_tiff_all_pages, decode_tiff_at};
 
 /// Cap the standalone-decompressor `expected_len` so a tiny fuzz
 /// input claiming a huge expected size cannot drive a multi-gibibyte
@@ -77,6 +78,9 @@ fuzz_target!(|data: &[u8]| {
     // -----------------------------------------------------------------
     let _ = decode_tiff(data);
     let _ = decode_tiff_all(data);
+    // `decode_tiff_all_pages` walks the same chain but also runs the
+    // metadata + format-info extractors per page; drive it too.
+    let _ = decode_tiff_all_pages(data);
     // `decode_tiff_at` takes an explicit (attacker-controllable in a
     // hostile SubIFDs entry) IFD offset — probe it with a
     // fuzzer-chosen offset and a couple of fixed danger spots (header
@@ -97,7 +101,16 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(hdr) = parse_header(data) {
         // The first IFD's offset is attacker-controlled; the parser
         // must reject it cleanly if it points past EOF.
-        let _ = parse_ifd(data, hdr.byte_order, hdr.variant, hdr.first_ifd_offset);
+        if let Ok((entries, _next)) =
+            parse_ifd(data, hdr.byte_order, hdr.variant, hdr.first_ifd_offset)
+        {
+            // The metadata / format-info extractors are *total*: a
+            // wrong-type / truncated / unterminated informational tag
+            // must leave that one field empty, never panic. Drive them
+            // over whatever entry table the parser accepted.
+            let _ = extract_metadata(&entries, hdr.byte_order);
+            let _ = extract_format_info(&entries, hdr.byte_order);
+        }
         // Also probe `parse_ifd` at offset 0 explicitly — a TIFF
         // file whose first IFD overlaps the header is malformed but
         // must not panic the parser.
