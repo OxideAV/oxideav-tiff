@@ -180,6 +180,21 @@ pub struct PageExtras<'a> {
     /// Write Copyright (tag 33432, ASCII): "Copyright notice of the
     /// person or organization that claims the copyright to the image."
     pub copyright: Option<&'a str>,
+    /// Write DocumentName (tag 269, ASCII): "The name of the document
+    /// from which this image was scanned" (TIFF 6.0 §8). Same ASCII
+    /// rules as [`Self::description`].
+    pub document_name: Option<&'a str>,
+    /// Write Make (tag 271, ASCII): "The scanner manufacturer" (§8).
+    pub make: Option<&'a str>,
+    /// Write Model (tag 272, ASCII): "The scanner model name or number"
+    /// (§8).
+    pub model: Option<&'a str>,
+    /// Write PageName (tag 285, ASCII): "The name of the page from
+    /// which this image was scanned" (§8).
+    pub page_name: Option<&'a str>,
+    /// Write HostComputer (tag 316, ASCII): "The computer and/or
+    /// operating system in use at the time of image creation" (§8).
+    pub host_computer: Option<&'a str>,
     /// Split the image into strips of this many rows (TIFF 6.0
     /// §"RowsPerStrip"; the spec recommends strips of about 8K bytes
     /// so readers can stream). `None` keeps the historical
@@ -2492,11 +2507,38 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         count: 1,
         value: IfdValue::Inline(photometric.to_le_bytes().to_vec()),
     });
+    // 269 DocumentName (ASCII) — TIFF 6.0 §8. Sits between 262 and 270.
+    if let Some(text) = p.extras.document_name {
+        entries.push(ascii_entry(
+            TAG_DOCUMENT_NAME,
+            text,
+            inline_threshold,
+            &mut externals,
+        )?);
+    }
     // 270 ImageDescription (ASCII) — TIFF 6.0 §8. Caller-supplied,
-    // NUL-terminated by the writer. Sits between 262 and 273.
+    // NUL-terminated by the writer. Sits between 269 and 271.
     if let Some(text) = p.extras.description {
         entries.push(ascii_entry(
             TAG_IMAGE_DESCRIPTION,
+            text,
+            inline_threshold,
+            &mut externals,
+        )?);
+    }
+    // 271 Make / 272 Model (ASCII) — TIFF 6.0 §8 scanner identity.
+    // Sit between 270 (ImageDescription) and 273 (StripOffsets).
+    if let Some(text) = p.extras.make {
+        entries.push(ascii_entry(
+            TAG_MAKE,
+            text,
+            inline_threshold,
+            &mut externals,
+        )?);
+    }
+    if let Some(text) = p.extras.model {
+        entries.push(ascii_entry(
+            TAG_MODEL,
             text,
             inline_threshold,
             &mut externals,
@@ -2607,6 +2649,16 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         count: 1,
         value: IfdValue::Inline(planar_config.to_le_bytes().to_vec()),
     });
+    // 285 PageName (ASCII) — TIFF 6.0 §8. Sits between 284
+    // (PlanarConfiguration) and 296 (ResolutionUnit).
+    if let Some(text) = p.extras.page_name {
+        entries.push(ascii_entry(
+            TAG_PAGE_NAME,
+            text,
+            inline_threshold,
+            &mut externals,
+        )?);
+    }
     // 292 T4Options (LONG) — only for Compression=3. Bit 0 (2D
     // coding, T4OPT_2D_CODING) is set for the T.4 2-D variant per
     // TIFF 6.0 §11; bit 1 (uncompressed mode) is always clear
@@ -2713,6 +2765,16 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
     if let Some(text) = p.extras.artist {
         entries.push(ascii_entry(
             TAG_ARTIST,
+            text,
+            inline_threshold,
+            &mut externals,
+        )?);
+    }
+    // 316 HostComputer (ASCII) — TIFF 6.0 §8. Sits between 315 (Artist)
+    // and 317 (Predictor).
+    if let Some(text) = p.extras.host_computer {
+        entries.push(ascii_entry(
+            TAG_HOST_COMPUTER,
             text,
             inline_threshold,
             &mut externals,
