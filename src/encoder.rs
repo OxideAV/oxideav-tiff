@@ -195,6 +195,27 @@ pub struct PageExtras<'a> {
     /// Write HostComputer (tag 316, ASCII): "The computer and/or
     /// operating system in use at the time of image creation" (§8).
     pub host_computer: Option<&'a str>,
+    /// Write an XMP metadata packet (tag 700, type BYTE × N) — the
+    /// serialised XMP packet (a UTF-8 XML document, normally wrapped
+    /// in the `<?xpacket?>` envelope) per the Adobe XMP Specification
+    /// Part 3 storage-in-TIFF rule; see the trace doc
+    /// `docs/image/tiff/tiff-icc-xmp-tags.md` §3. The bytes are stored
+    /// verbatim — the packet is opaque to the encoder (the file's byte
+    /// order applies only to the IFD entry's integer fields) and
+    /// `Count` is the exact byte length. Must be non-empty.
+    pub xmp: Option<&'a [u8]>,
+    /// Write an embedded ICC colour profile (tag 34675
+    /// InterColorProfile, type UNDEFINED × N) — a complete ICC.1
+    /// device profile, per the TIFF/EP (ISO 12234-2) tag assignment;
+    /// see the trace doc `docs/image/tiff/tiff-icc-xmp-tags.md` §2.
+    /// The profile bytes are stored verbatim (ICC profiles are
+    /// internally big-endian, always — the encoder never swaps them).
+    /// Validated precisely before writing: at least the fixed 128-byte
+    /// ICC header must be present, and the profile's own big-endian
+    /// 4-byte size field at offset +0 must equal the payload length
+    /// (that size "is the authoritative payload length; treat a
+    /// mismatch as malformed"). At most one per IFD.
+    pub icc_profile: Option<&'a [u8]>,
     /// Split the image into strips of this many rows (TIFF 6.0
     /// §"RowsPerStrip"; the spec recommends strips of about 8K bytes
     /// so readers can stream). `None` keeps the historical
@@ -3012,6 +3033,27 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         });
     }
 
+    // 700 XMP packet (BYTE × N) — Adobe XMP Specification Part 3 /
+    // trace doc `docs/image/tiff/tiff-icc-xmp-tags.md` §3. The packet
+    // is an opaque byte string stored verbatim; `Count` is its exact
+    // byte length. Tag 700 sits between 532 (ReferenceBlackWhite) and
+    // 33432 (Copyright) in ascending order — the doc's "XMP (700)
+    // therefore appears before most image tags" note is about tag
+    // *numbering*, and 700 lands here in this encoder's tag sequence.
+    if let Some(packet) = p.extras.xmp {
+        if packet.is_empty() {
+            return Err(Error::invalid(
+                "TIFF encode: XMP packet (tag 700) must be non-empty",
+            ));
+        }
+        entries.push(opaque_entry(
+            TAG_XMP,
+            TYPE_BYTE,
+            packet,
+            inline_threshold,
+            &mut externals,
+        ));
+    }
     // 33432 Copyright (ASCII) — TIFF 6.0 §8; above every baseline tag,
     // below the 34665/34853 pointer tags.
     if let Some(text) = p.extras.copyright {
@@ -3046,6 +3088,41 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
             plan_aux_ifd(tags, bigtiff, "Exif", &mut aux_seq)?,
         ));
     }
+    // 34675 InterColorProfile (UNDEFINED × N) — TIFF/EP tag
+    // assignment / trace doc `docs/image/tiff/tiff-icc-xmp-tags.md`
+    // §2. Sits between 34665 (Exif IFD pointer) and 34853 (GPS IFD
+    // pointer) in ascending tag order. The profile bytes are written
+    // verbatim (internally big-endian, always, independent of the
+    // enclosing file's byte order) after the precise §2 integrity
+    // check: the 128-byte fixed header must be present and the
+    // profile's own big-endian size field at offset +0 — "the
+    // authoritative payload length" — must equal the payload length.
+    if let Some(profile) = p.extras.icc_profile {
+        if profile.len() < ICC_PROFILE_HEADER_LEN {
+            return Err(Error::invalid(format!(
+                "TIFF encode: ICC profile (tag 34675) shorter than the fixed \
+                 {ICC_PROFILE_HEADER_LEN}-byte ICC header ({} bytes)",
+                profile.len()
+            )));
+        }
+        let declared =
+            u32::from_be_bytes([profile[0], profile[1], profile[2], profile[3]]) as usize;
+        if declared != profile.len() {
+            return Err(Error::invalid(format!(
+                "TIFF encode: ICC profile (tag 34675) size field at offset +0 declares \
+                 {declared} bytes but the payload is {} bytes — the big-endian profile size \
+                 is the authoritative length and must match",
+                profile.len()
+            )));
+        }
+        entries.push(opaque_entry(
+            TAG_ICC_PROFILE,
+            TYPE_UNDEFINED,
+            profile,
+            inline_threshold,
+            &mut externals,
+        ));
+    }
     if let Some(tags) = p.extras.gps_ifd {
         entries.push(PageIfdEntry {
             tag: TAG_GPS_IFD,
@@ -3072,6 +3149,36 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         externals,
         children,
     })
+}
+
+/// Build an opaque byte-payload entry (XMP packet / ICC profile): the
+/// bytes are stored verbatim — the file's byte order applies only to
+/// the entry's Tag/Type/Count/Offset fields, never to the payload
+/// (`docs/image/tiff/tiff-icc-xmp-tags.md` §1) — with `Count` equal to
+/// the exact payload byte length (BYTE and UNDEFINED are both 1-byte
+/// elements). Payloads that fit the variant's value slot stay inline;
+/// larger ones go out-of-line at an even offset via a page-level blob.
+fn opaque_entry(
+    tag: u16,
+    field_type: u16,
+    payload: &[u8],
+    inline_threshold: usize,
+    externals: &mut Vec<(BlobId, Vec<u8>)>,
+) -> PageIfdEntry {
+    let count = payload.len() as u64;
+    let value = if payload.len() <= inline_threshold {
+        IfdValue::Inline(payload.to_vec())
+    } else {
+        let id = BlobId::MetaValue(tag);
+        externals.push((id, payload.to_vec()));
+        IfdValue::ExternalBlob(id)
+    };
+    PageIfdEntry {
+        tag,
+        field_type,
+        count,
+        value,
+    }
 }
 
 /// Build a TIFF 6.0 §2 ASCII entry: "8-bit byte that contains a 7-bit
