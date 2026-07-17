@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.5...v0.0.6) - 2026-07-17
+
+### Other
+
+- Mark internal plumbing #[doc(hidden)] so API-diff tooling skips it
+- demuxer exposes §8 metadata + ICC/XMP attachments through the core Demuxer accessors
+- independently-written ICC/XMP carriage fixtures (classic + BigTIFF) with SHA-256 pins
+- ICC/XMP carriage — README section + crate-doc + metadata module doc
+- black-box ICC/XMP interop — magick both directions, tiffcp rewrite, tiffdump structural listing
+- write XMP (700) + InterColorProfile (34675) via PageExtras — byte-exact round-trip across all layouts
+- ICC profile (34675) + XMP packet (700) extraction — TiffMetadata surfaces both payloads verbatim
+- metadata & format-introspection API — README + crate-doc
+- write DocumentName / Make / Model / PageName / HostComputer
+- hostile-input hardening + fuzz coverage for the extractors
+- TiffFormatInfo — raw structural / codec tag introspection
+- decode_tiff_all_pages — per-page TiffMetadata over the IFD chain
+- expose TiffMetadata — §8 ASCII + resolution + page tags
+- WebP-in-TIFF (Compression=50001) coverage — README section + crate-doc + CHANGELOG
+- Compression=50001 (WebP-in-TIFF): decode + encode codec-in-container carriage
+- add CI / crates.io / docs.rs / MIT-license badges
+- Orientation (274) write — PageExtras::orientation
+- refresh crate-doc encode coverage (multi-strip, Predictor 3, PageExtras tree) + PageNumber doc-link fix
+- resolution + §8 ASCII metadata writes (PageExtras)
+- multi-strip write — PageExtras::rows_per_strip (TIFF 6.0 §RowsPerStrip)
+- accept field type 13 (IFD offset) + fuzz decode_tiff_at hostile offsets
+- PageExtras — PageNumber/NewSubfileType bits + Exif/GPS child IFDs + SubIFDs tree
+- chroma-subsampled YCbCr PlanarConfiguration=2 strips — encode + decode
+- f16 (binary16) SampleFormat=3 write — GrayF16/RgbF16 + f32<->f16 helpers
+
 ### Changed
 
 - Marked the crate's internal plumbing `#[doc(hidden)]` (byte-cursor / IFD parsing in `ifd`, compression codecs in `compress`, CCITT in `ccitt`, tag constants in `types`, JPEG-in-TIFF internals in `jpeg`, the container demuxer in `container`, and the `metadata` `extract_*` helpers) so API-diff tooling no longer treats these test/fuzz-exposed internals as stable public API. The documented decode/encode entry points, typed tag/IFD accessors, and the §8 metadata/attachment surface remain public and unchanged.
