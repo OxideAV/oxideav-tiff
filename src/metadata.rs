@@ -165,6 +165,8 @@ pub struct TiffFormatInfo {
 
 /// Gather the raw structural / codec tags from a parsed IFD. Total: a
 /// malformed entry is dropped, never propagated.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub fn extract_format_info(entries: &[Entry], bo: ByteOrder) -> TiffFormatInfo {
     let short = |tag: u16| -> Option<u16> {
         find(entries, tag)
@@ -280,6 +282,8 @@ fn ascii(entries: &[Entry], tag: u16) -> Option<String> {
 /// Gather the descriptive + structural metadata from a parsed IFD.
 ///
 /// Never fails: a malformed field is dropped, not propagated.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub fn extract_metadata(entries: &[Entry], bo: ByteOrder) -> TiffMetadata {
     let short = |tag: u16| -> Option<u16> {
         find(entries, tag)

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Marked the crate's internal plumbing `#[doc(hidden)]` (byte-cursor / IFD parsing in `ifd`, compression codecs in `compress`, CCITT in `ccitt`, tag constants in `types`, JPEG-in-TIFF internals in `jpeg`, the container demuxer in `container`, and the `metadata` `extract_*` helpers) so API-diff tooling no longer treats these test/fuzz-exposed internals as stable public API. The documented decode/encode entry points, typed tag/IFD accessors, and the §8 metadata/attachment surface remain public and unchanged.
+
 ### Added
 
 - Registry-integrated container surface: the TIFF demuxer now overrides `Demuxer::metadata()` (the first IFD's §8 ASCII descriptive fields as flat key/value pairs — document_name / description / make / model / page_name / software / date / artist / host_computer / copyright) and `Demuxer::attachments()` (the embedded ICC profile as `profile.icc`, `application/vnd.iccprofile`; the XMP packet as `packet.xmp`, `application/rdf+xml` — raw bytes verbatim), so pipeline consumers get the colour-management and metadata payloads without re-decoding the packet.

@@ -119,14 +119,22 @@
 //! [`TiffImage`] / [`TiffPixelFormat`] / [`TiffPlane`] / [`TiffError`]
 //! types — none of which depend on `oxideav-core`.
 
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod ccitt;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod compress;
 pub mod decoder;
 pub mod encoder;
 pub mod error;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod ifd;
 pub mod image;
 pub mod metadata;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod types;
 
 // Compression = 50001 (WebP-in-TIFF) codec-in-container carriage.
@@ -136,10 +144,14 @@ pub mod types;
 // exactly like Compression=50000 (Zstandard).
 mod webp;
 
+// internal — exposed for tests/fuzz; not part of the stable API
 #[cfg(feature = "registry")]
+#[doc(hidden)]
 pub mod container;
 
+// internal — exposed for tests/fuzz; not part of the stable API
 #[cfg(feature = "registry")]
+#[doc(hidden)]
 pub mod jpeg;
 
 // TIFF 6.0 §22 old-style JPEG (Compression = 6) field parsing. Not
