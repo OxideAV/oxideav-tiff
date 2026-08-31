@@ -56,6 +56,13 @@ pub struct JpegSegment {
     /// TIFF photometric. The TIFF compositor cross-checks the two
     /// against `PhotometricInterpretation` + `YCbCrSubSampling`.
     pub pixel_format: JpegPixelFormat,
+    /// Sample precision in bits (the SOFn `P` parameter, which TN2
+    /// mandates to equal the TIFF `BitsPerSample`). `8` is the
+    /// one-byte-per-sample layout; `9..=16` (SOF1 permits 12, SOF3
+    /// permits 2–16 per T.81 Table B.2) store each sample as two
+    /// little-endian bytes in the plane data, carrying the raw
+    /// `0 .. 2^bits - 1` code values.
+    pub bits: u16,
 }
 
 impl JpegSegment {
@@ -72,10 +79,13 @@ impl JpegSegment {
     /// an index panic in a compositor. (Larger-than-needed planes —
     /// e.g. MCU-height padding — are fine.)
     pub fn validate_dims(&self) -> Result<()> {
+        // 9..=16-bit precisions store one sample as two little-endian
+        // bytes; the packed layouts scale accordingly.
+        let sb = if self.bits > 8 { 2usize } else { 1 };
         let bytes_per_sample = match self.pixel_format {
-            JpegPixelFormat::Rgb24Packed => 3usize,
-            JpegPixelFormat::Cmyk8 => 4,
-            _ => 1,
+            JpegPixelFormat::Rgb24Packed => 3 * sb,
+            JpegPixelFormat::Cmyk8 => 4 * sb,
+            _ => sb,
         };
         for (i, p) in self.planes.iter().enumerate() {
             let (pw, ph) = plane_dims(self.pixel_format, self.width, self.height, i);
@@ -242,16 +252,24 @@ fn decode_one_jpeg(jpeg_bytes: Vec<u8>) -> Result<VideoFrame> {
 /// Decide which TIFF-compositor-known JPEG output layout the codec
 /// produced by inspecting the plane count + per-plane dimensions
 /// against the segment's declared width / height.
-fn classify(vf: &VideoFrame, seg_w: u32, seg_h: u32, photometric: u16) -> Result<JpegPixelFormat> {
+fn classify(
+    vf: &VideoFrame,
+    seg_w: u32,
+    seg_h: u32,
+    photometric: u16,
+    sb: usize,
+) -> Result<JpegPixelFormat> {
     use crate::types::*;
     let np = vf.planes.len();
     match np {
         1 => {
             // Single plane: either grayscale (`stride ≈ width`) or
             // packed CMYK (`stride ≈ width * 4`, photometric must be
-            // CMYK). Pick by stride.
+            // CMYK). Pick by stride. `sb` (1 or 2 bytes per sample,
+            // from the IFD `BitsPerSample` that TN2 mandates to match
+            // the SOFn precision) scales every stride expectation.
             let p = &vf.planes[0];
-            let w = seg_w as usize;
+            let w = seg_w as usize * sb;
             let h = seg_h as usize;
             // CMYK detection: oxideav-mjpeg packs 4 components into
             // one plane with stride == width * 4. The TIFF spec
@@ -305,7 +323,7 @@ fn classify(vf: &VideoFrame, seg_w: u32, seg_h: u32, photometric: u16) -> Result
             // YUV (chunky) or RGB. mjpeg's render path produces 3
             // planes of equal dimensions for RGB and 3 planes of
             // {full, sub, sub} dimensions for YUV.
-            let y_w = vf.planes[0].stride.max(seg_w as usize);
+            let y_w = vf.planes[0].stride.max(seg_w as usize * sb);
             let c_stride = vf.planes[1].stride;
             // RGB-from-JPEG produces 3 planes each at full
             // resolution; YUV produces chroma at sub-resolution. We
@@ -367,10 +385,12 @@ pub fn decode_segment(
     seg_w: u32,
     seg_h: u32,
     photometric: u16,
+    bits: u16,
 ) -> Result<JpegSegment> {
     let merged = merge_jpeg_segment(tables, segment)?;
     let vf = decode_one_jpeg(merged)?;
-    let pf = classify(&vf, seg_w, seg_h, photometric)?;
+    let sb = if bits > 8 { 2usize } else { 1 };
+    let pf = classify(&vf, seg_w, seg_h, photometric, sb)?;
 
     // Mjpeg's VideoFrame doesn't carry width/height — we trust the
     // segment dims from the IFD because TN2 mandates them to match
@@ -396,6 +416,7 @@ pub fn decode_segment(
         height: seg_h,
         planes,
         pixel_format: pf,
+        bits,
     };
     // Guarantee the compositors' blit loops are in-bounds (a frame
     // smaller than the segment dims becomes a typed error here).
@@ -628,6 +649,191 @@ pub fn composite_cmyk_to_rgb(
     Ok(())
 }
 
+/// Widen a raw `bits`-precision code value (`0 .. 2^bits - 1`) onto
+/// the full 16-bit display extent by bit replication — the same
+/// max-value-preserving map the 4-bit grayscale path uses at 8 bits
+/// (`(n << 4) | n`): the code maximum lands exactly on 0xFFFF and the
+/// map is monotone. Identity at `bits = 16`.
+#[inline]
+fn scale_to_16(v: u16, bits: u16) -> u16 {
+    if bits >= 16 {
+        v
+    } else {
+        let v = v & (((1u32 << bits) - 1) as u16);
+        (v << (16 - bits)) | (v >> (2 * bits - 16))
+    }
+}
+
+/// Read the sample at `(x, y)` of a two-byte-per-sample plane
+/// (little-endian, per [`JpegSegment::bits`] > 8).
+#[inline]
+fn plane_u16(p: &Plane, x: usize, y: usize) -> u16 {
+    let off = y * p.stride + x * 2;
+    u16::from_le_bytes([p.data[off], p.data[off + 1]])
+}
+
+/// Composite a deep (9..=16-bit) grayscale segment into a `Gray16Le`
+/// destination, widening each raw code value onto the 16-bit display
+/// extent and applying the `WhiteIsZero` polarity inversion after the
+/// (monotone) widening.
+#[allow(clippy::too_many_arguments)]
+pub fn composite_gray16(
+    seg: &JpegSegment,
+    visible_w: u32,
+    visible_h: u32,
+    dst: &mut [u8],
+    dst_row_stride: usize,
+    dst_x: u32,
+    dst_y: u32,
+    invert: bool,
+) -> Result<()> {
+    if seg.pixel_format != JpegPixelFormat::Gray8 || seg.bits <= 8 {
+        return Err(Error::invalid(
+            "composite_gray16 called with a non-deep-grayscale segment",
+        ));
+    }
+    let p = &seg.planes[0];
+    for y in 0..visible_h as usize {
+        let dy = dst_y as usize + y;
+        for x in 0..visible_w as usize {
+            let mut v = scale_to_16(plane_u16(p, x, y), seg.bits);
+            if invert {
+                v = 0xFFFF - v;
+            }
+            let off = dy * dst_row_stride + (dst_x as usize + x) * 2;
+            dst[off..off + 2].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
+/// Composite a deep (9..=16-bit) planar YUV segment into an `Rgb48Le`
+/// destination. Same BT.601 matrix / TN2 default `ReferenceBlackWhite`
+/// as the 8-bit path, evaluated at the segment's own precision (the
+/// chroma midpoint is `2^(bits-1)`), then widened to the 16-bit
+/// display extent per channel.
+#[allow(clippy::too_many_arguments)]
+pub fn composite_yuv16_to_rgb48(
+    seg: &JpegSegment,
+    visible_w: u32,
+    visible_h: u32,
+    dst: &mut [u8],
+    dst_row_stride: usize,
+    dst_x: u32,
+    dst_y: u32,
+) -> Result<()> {
+    let (sh, sv) = match seg.pixel_format {
+        JpegPixelFormat::Yuv444P => (1u32, 1u32),
+        JpegPixelFormat::Yuv422P => (2, 1),
+        JpegPixelFormat::Yuv420P => (2, 2),
+        JpegPixelFormat::Yuv411P => (4, 1),
+        _ => {
+            return Err(Error::invalid(
+                "composite_yuv16_to_rgb48 called with a non-YUV segment",
+            ))
+        }
+    };
+    if seg.bits <= 8 {
+        return Err(Error::invalid(
+            "composite_yuv16_to_rgb48 called with an 8-bit segment",
+        ));
+    }
+    let bits = seg.bits;
+    let mid = 1i64 << (bits - 1);
+    let maxv = (1i64 << bits) - 1;
+    let yp = &seg.planes[0];
+    let cbp = &seg.planes[1];
+    let crp = &seg.planes[2];
+    for y in 0..visible_h as usize {
+        let cy = y / sv as usize;
+        let dy = dst_y as usize + y;
+        for x in 0..visible_w as usize {
+            let cx = x / sh as usize;
+            let yv = plane_u16(yp, x, y) as i64;
+            let cb = plane_u16(cbp, cx, cy) as i64 - mid;
+            let cr = plane_u16(crp, cx, cy) as i64 - mid;
+            // BT.601 Q16 coefficients, precision-independent (the
+            // matrix scales linearly with the code range).
+            let r = (yv + ((91881 * cr + 32768) >> 16)).clamp(0, maxv) as u16;
+            let g = (yv - ((22554 * cb + 46802 * cr + 32768) >> 16)).clamp(0, maxv) as u16;
+            let b = (yv + ((116130 * cb + 32768) >> 16)).clamp(0, maxv) as u16;
+            let off = dy * dst_row_stride + (dst_x as usize + x) * 6;
+            dst[off..off + 2].copy_from_slice(&scale_to_16(r, bits).to_le_bytes());
+            dst[off + 2..off + 4].copy_from_slice(&scale_to_16(g, bits).to_le_bytes());
+            dst[off + 4..off + 6].copy_from_slice(&scale_to_16(b, bits).to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
+/// Composite a deep (9..=16-bit) 3-plane full-resolution RGB segment
+/// (or a 4:4:4 frame being rendered as planar) into an `Rgb48Le`
+/// destination by interleaving the widened planes.
+pub fn composite_rgb48_planar(
+    seg: &JpegSegment,
+    visible_w: u32,
+    visible_h: u32,
+    dst: &mut [u8],
+    dst_row_stride: usize,
+    dst_x: u32,
+    dst_y: u32,
+) -> Result<()> {
+    if !matches!(
+        seg.pixel_format,
+        JpegPixelFormat::Rgb24 | JpegPixelFormat::Yuv444P
+    ) || seg.bits <= 8
+    {
+        return Err(Error::invalid(
+            "composite_rgb48_planar called with a non-deep-3-plane-full-res segment",
+        ));
+    }
+    let bits = seg.bits;
+    for y in 0..visible_h as usize {
+        let dy = dst_y as usize + y;
+        for x in 0..visible_w as usize {
+            let off = dy * dst_row_stride + (dst_x as usize + x) * 6;
+            for c in 0..3 {
+                let v = scale_to_16(plane_u16(&seg.planes[c], x, y), bits);
+                dst[off + c * 2..off + c * 2 + 2].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Composite a deep (9..=16-bit) packed-RGB segment (one plane of
+/// interleaved little-endian `R G B` words, stride ≥ `width × 6`)
+/// into an `Rgb48Le` destination.
+pub fn composite_rgb48_packed(
+    seg: &JpegSegment,
+    visible_w: u32,
+    visible_h: u32,
+    dst: &mut [u8],
+    dst_row_stride: usize,
+    dst_x: u32,
+    dst_y: u32,
+) -> Result<()> {
+    if seg.pixel_format != JpegPixelFormat::Rgb24Packed || seg.bits <= 8 {
+        return Err(Error::invalid(
+            "composite_rgb48_packed called with a non-deep-packed-RGB segment",
+        ));
+    }
+    let bits = seg.bits;
+    let p = &seg.planes[0];
+    for y in 0..visible_h as usize {
+        let dy = dst_y as usize + y;
+        for x in 0..visible_w as usize {
+            let off = dy * dst_row_stride + (dst_x as usize + x) * 6;
+            for c in 0..3 {
+                let s = y * p.stride + (x * 3 + c) * 2;
+                let v = scale_to_16(u16::from_le_bytes([p.data[s], p.data[s + 1]]), bits);
+                dst[off + c * 2..off + c * 2 + 2].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn ycbcr_to_rgb(y: i32, cb: i32, cr: i32) -> (u8, u8, u8) {
     let cb = cb - 128;
     let cr = cr - 128;
@@ -762,6 +968,7 @@ mod tests {
                 data,
             }],
             pixel_format: JpegPixelFormat::Cmyk8,
+            bits: 8,
         };
         let dst_stride = plane_w as usize * 3;
         let mut dst = vec![0u8; dst_stride * plane_h as usize];
@@ -790,7 +997,7 @@ mod tests {
             }],
         };
         assert_eq!(
-            classify(&packed, w, h, crate::types::PHOTO_RGB).unwrap(),
+            classify(&packed, w, h, crate::types::PHOTO_RGB, 1).unwrap(),
             JpegPixelFormat::Rgb24Packed
         );
         let planar = VideoFrame {
@@ -803,7 +1010,7 @@ mod tests {
                 .collect(),
         };
         assert_eq!(
-            classify(&planar, w, h, crate::types::PHOTO_RGB).unwrap(),
+            classify(&planar, w, h, crate::types::PHOTO_RGB, 1).unwrap(),
             JpegPixelFormat::Rgb24
         );
     }
@@ -820,7 +1027,7 @@ mod tests {
                 data: vec![0u8; 8],
             }],
         };
-        assert!(classify(&vf, 4, 2, crate::types::PHOTO_RGB).is_err());
+        assert!(classify(&vf, 4, 2, crate::types::PHOTO_RGB, 1).is_err());
     }
 
     /// `composite_rgb_packed` blits the visible prefix of each packed
@@ -845,6 +1052,7 @@ mod tests {
                 data,
             }],
             pixel_format: JpegPixelFormat::Rgb24Packed,
+            bits: 8,
         };
         // Destination is 3x2 RGB; paste at dst_x = 1 so the offset
         // arithmetic is exercised.
@@ -873,6 +1081,7 @@ mod tests {
                 data: vec![0u8],
             }],
             pixel_format: JpegPixelFormat::Gray8,
+            bits: 8,
         };
         let mut dst = vec![0u8; 3];
         assert!(composite_rgb_packed(&seg, 1, 1, &mut dst, 3, 0, 0).is_err());
@@ -891,6 +1100,7 @@ mod tests {
                 data: vec![0u8],
             }],
             pixel_format: JpegPixelFormat::Gray8,
+            bits: 8,
         };
         let mut dst = vec![0u8; 3];
         let r = composite_cmyk_to_rgb(&seg, 1, 1, &mut dst, 3, 0, 0);

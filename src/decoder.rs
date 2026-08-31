@@ -464,7 +464,19 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     // against the float grayscale arms below.
     let float_width_ok =
         sample_format == SAMPLE_FORMAT_IEEE_FP && (bps_first == 32 || bps_first == 64);
-    if bps_first != 1 && bps_first != 4 && bps_first != 8 && bps_first != 16 && !float_width_ok {
+    // The JPEG compressions additionally admit the deep 9..=16-bit
+    // precisions (TN2: SOF1 permits 12, SOF3 permits 2..=16; the SOFn
+    // precision must agree with BitsPerSample) — the JPEG dispatch
+    // below applies its own per-photometric depth gates.
+    let deep_jpeg_ok = matches!(compression, COMPRESSION_JPEG_OLD | COMPRESSION_JPEG_NEW)
+        && (9..=16).contains(&bps_first);
+    if bps_first != 1
+        && bps_first != 4
+        && bps_first != 8
+        && bps_first != 16
+        && !float_width_ok
+        && !deep_jpeg_ok
+    {
         return Err(Error::invalid(format!(
             "TIFF: BitsPerSample={bps_first} not supported"
         )));
@@ -3404,12 +3416,16 @@ fn decode_ifd_jpeg(
     bps_first: u16,
     photometric: u16,
 ) -> Result<TiffImage> {
-    // TN2: SOFn precision must equal BitsPerSample, and 8-bit is the
-    // only baseline-mandatory precision. Reject other depths up-front
-    // so the JPEG decoder doesn't have to.
-    if bps_first != 8 {
+    // TN2: "The data precision field of the SOFn marker shall agree
+    // with the TIFF BitsPerSample field", and the permitted SOFn
+    // precisions are 8 (SOF0), 8 or 12 (SOF1), and 2..=16 (SOF3
+    // lossless). This build decodes 8-bit everywhere plus the deep
+    // 9..=16-bit precisions (12-bit SOF1 extended sequential, 9..16-bit
+    // SOF3 lossless) for the grayscale / YCbCr / RGB photometrics —
+    // sub-8-bit lossless precisions and deep CMYK stay precise errors.
+    if bps_first != 8 && !(9..=16).contains(&bps_first) {
         return Err(Error::Unsupported(format!(
-            "TIFF/JPEG: BitsPerSample={bps_first} (only 8-bit is supported in this build)"
+            "TIFF/JPEG: BitsPerSample={bps_first} (8-bit and 9..=16-bit precisions decode              in this build; TN2 permits 8/12 for DCT and 2..=16 for lossless)"
         )));
     }
     // TN2 explicitly forbids palette (3) and transparency-mask (4)
@@ -3434,6 +3450,11 @@ fn decode_ifd_jpeg(
         }
     };
     let _ = want_planes;
+    if bps_first > 8 && photometric == PHOTO_CMYK {
+        return Err(Error::Unsupported(format!(
+            "TIFF/JPEG: deep ({bps_first}-bit) CMYK JPEG-in-TIFF is not supported in              this build (8-bit CMYK decodes)"
+        )));
+    }
 
     // Optional JPEGTables blob (tag 347). Per TN2 it's type
     // UNDEFINED, which the IFD parser keeps as raw bytes already; we
@@ -3447,18 +3468,33 @@ fn decode_ifd_jpeg(
     //   (CMYK is collapsed to Rgb24 by the same additive-RGB
     //    conversion the uncompressed CMYK path uses — see
     //    `build_rgb24_from_cmyk` / `composite_cmyk_to_rgb`.)
-    let (pixel_format, dst_row_stride, dst_size) = match photometric {
-        PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO => (
+    // Deep (9..=16-bit) precisions render onto the 16-bit output
+    // planes (Gray16Le / Rgb48Le), each raw code value widened onto
+    // the full 16-bit display extent by bit replication — the same
+    // display map the 4-bit grayscale path applies at 8 bits.
+    let deep = bps_first > 8;
+    let (pixel_format, dst_row_stride, dst_size) = match (photometric, deep) {
+        (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, false) => (
             TiffPixelFormat::Gray8,
             width as usize,
             width as usize * height as usize,
         ),
-        PHOTO_RGB | PHOTO_YCBCR | PHOTO_CMYK => (
+        (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, true) => (
+            TiffPixelFormat::Gray16Le,
+            width as usize * 2,
+            width as usize * 2 * height as usize,
+        ),
+        (PHOTO_RGB | PHOTO_YCBCR | PHOTO_CMYK, false) => (
             TiffPixelFormat::Rgb24,
             width as usize * 3,
             width as usize * 3 * height as usize,
         ),
-        _ => unreachable!("photometric vetted above"),
+        (PHOTO_RGB | PHOTO_YCBCR, true) => (
+            TiffPixelFormat::Rgb48Le,
+            width as usize * 6,
+            width as usize * 6 * height as usize,
+        ),
+        _ => unreachable!("photometric/depth vetted above"),
     };
     let mut dst = vec![0u8; dst_size];
 
@@ -3474,6 +3510,7 @@ fn decode_ifd_jpeg(
             width,
             height,
             photometric,
+            bps_first,
             tables,
             invert,
             want_yuv,
@@ -3488,6 +3525,7 @@ fn decode_ifd_jpeg(
             width,
             height,
             photometric,
+            bps_first,
             tables,
             invert,
             want_yuv,
@@ -3564,16 +3602,23 @@ fn decode_ifd_jpeg_old(
         }
     }
     // §22 "JPEG Baseline Process": "The algorithm accepts as input
-    // only those images having 8 bits per component." (The §22
-    // lossless process allows 2..16-bit precision, but this build's
-    // JPEG codec renders 8-bit planes only.)
-    if bps_first != 8 {
+    // only those images having 8 bits per component"; the §22
+    // lossless process (JPEGProc = 14) allows 2..16-bit precision.
+    // This build decodes 8-bit everywhere plus the deep 9..=16-bit
+    // precisions for grayscale / RGB / YCbCr (deep CMYK and sub-8-bit
+    // precisions stay precise errors).
+    if bps_first != 8 && !(9..=16).contains(&bps_first) {
         return Err(Error::Unsupported(format!(
-            "TIFF/JPEG(§22): BitsPerSample={bps_first} (only 8-bit decodes in this build)"
+            "TIFF/JPEG(§22): BitsPerSample={bps_first} (8-bit and 9..=16-bit decode in              this build)"
+        )));
+    }
+    if bps_first > 8 && photometric == PHOTO_CMYK {
+        return Err(Error::Unsupported(format!(
+            "TIFF/JPEG(§22): deep ({bps_first}-bit) CMYK is not supported in this build"
         )));
     }
 
-    decode_jpeg_old_interchange(stream, width, height, photometric)
+    decode_jpeg_old_interchange(stream, width, height, photometric, bps_first)
 }
 
 /// Decode the §22 interchange-format bitstream (one JPEG frame
@@ -3586,25 +3631,37 @@ fn decode_jpeg_old_interchange(
     width: u32,
     height: u32,
     photometric: u16,
+    bps: u16,
 ) -> Result<TiffImage> {
-    let (pixel_format, dst_row_stride, dst_size) = match photometric {
-        PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO => (
+    let deep = bps > 8;
+    let (pixel_format, dst_row_stride, dst_size) = match (photometric, deep) {
+        (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, false) => (
             TiffPixelFormat::Gray8,
             width as usize,
             width as usize * height as usize,
         ),
-        PHOTO_RGB | PHOTO_YCBCR | PHOTO_CMYK => (
+        (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, true) => (
+            TiffPixelFormat::Gray16Le,
+            width as usize * 2,
+            width as usize * 2 * height as usize,
+        ),
+        (PHOTO_RGB | PHOTO_YCBCR | PHOTO_CMYK, false) => (
             TiffPixelFormat::Rgb24,
             width as usize * 3,
             width as usize * 3 * height as usize,
         ),
-        _ => unreachable!("photometric vetted by caller"),
+        (PHOTO_RGB | PHOTO_YCBCR, true) => (
+            TiffPixelFormat::Rgb48Le,
+            width as usize * 6,
+            width as usize * 6 * height as usize,
+        ),
+        _ => unreachable!("photometric/depth vetted by caller"),
     };
     let mut dst = vec![0u8; dst_size];
     let invert = photometric == PHOTO_WHITE_IS_ZERO;
     let want_yuv = photometric == PHOTO_YCBCR;
 
-    let seg = crate::jpeg::decode_segment(None, stream, width, height, photometric)?;
+    let seg = crate::jpeg::decode_segment(None, stream, width, height, photometric, bps)?;
     composite_segment(
         &seg,
         width,
@@ -3639,6 +3696,7 @@ fn decode_jpeg_old_interchange(
     _width: u32,
     _height: u32,
     _photometric: u16,
+    _bps: u16,
 ) -> Result<TiffImage> {
     Err(Error::Unsupported(
         "TIFF/JPEG(§22): Compression=6 interchange-format decode requires the `registry` feature"
@@ -3655,6 +3713,7 @@ fn decode_ifd_jpeg_strips(
     width: u32,
     height: u32,
     photometric: u16,
+    bps: u16,
     tables: Option<&[u8]>,
     invert: bool,
     want_yuv: bool,
@@ -3695,7 +3754,7 @@ fn decode_ifd_jpeg_strips(
         let raw = &input[start..end];
         let rows_this_strip = rows_per_strip.min(height - rows_done);
 
-        let seg = decode_segment(tables, raw, width, rows_this_strip, photometric)?;
+        let seg = decode_segment(tables, raw, width, rows_this_strip, photometric, bps)?;
         composite_segment(
             &seg,
             width,
@@ -3728,6 +3787,7 @@ fn decode_ifd_jpeg_tiles(
     width: u32,
     height: u32,
     photometric: u16,
+    bps: u16,
     tables: Option<&[u8]>,
     invert: bool,
     want_yuv: bool,
@@ -3778,7 +3838,7 @@ fn decode_ifd_jpeg_tiles(
                 return Err(Error::invalid("TIFF/JPEG: tile extends past EOF"));
             }
             let raw = &input[off..end];
-            let seg = decode_segment(tables, raw, tile_w, tile_h, photometric)?;
+            let seg = decode_segment(tables, raw, tile_w, tile_h, photometric, bps)?;
             let visible_w = ((width as i64) - (tx as i64) * (tile_w as i64))
                 .min(tile_w as i64)
                 .max(0) as u32;
@@ -3819,20 +3879,37 @@ fn composite_segment(
     photometric: u16,
 ) -> Result<()> {
     use crate::jpeg::{
-        composite_cmyk_to_rgb, composite_gray, composite_rgb_packed, composite_rgb_planar,
-        composite_yuv_to_rgb, JpegPixelFormat,
+        composite_cmyk_to_rgb, composite_gray, composite_gray16, composite_rgb48_packed,
+        composite_rgb48_planar, composite_rgb_packed, composite_rgb_planar,
+        composite_yuv16_to_rgb48, composite_yuv_to_rgb, JpegPixelFormat,
     };
+    let deep = seg.bits > 8;
     match seg.pixel_format {
-        JpegPixelFormat::Gray8 => composite_gray(
-            seg,
-            visible_w,
-            visible_h,
-            dst,
-            dst_row_stride,
-            dst_x,
-            dst_y,
-            invert,
-        ),
+        JpegPixelFormat::Gray8 => {
+            if deep {
+                composite_gray16(
+                    seg,
+                    visible_w,
+                    visible_h,
+                    dst,
+                    dst_row_stride,
+                    dst_x,
+                    dst_y,
+                    invert,
+                )
+            } else {
+                composite_gray(
+                    seg,
+                    visible_w,
+                    visible_h,
+                    dst,
+                    dst_row_stride,
+                    dst_x,
+                    dst_y,
+                    invert,
+                )
+            }
+        }
         JpegPixelFormat::Yuv444P
         | JpegPixelFormat::Yuv422P
         | JpegPixelFormat::Yuv420P
@@ -3847,10 +3924,43 @@ fn composite_segment(
             // writer mistakenly attached `Sf` factors implying chroma
             // subsampling but kept the photometric tag at 2; we treat
             // that as a writer error.
-            if want_yuv {
-                composite_yuv_to_rgb(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
-            } else {
-                composite_rgb_planar(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+            match (want_yuv, deep) {
+                (true, true) => composite_yuv16_to_rgb48(
+                    seg,
+                    visible_w,
+                    visible_h,
+                    dst,
+                    dst_row_stride,
+                    dst_x,
+                    dst_y,
+                ),
+                (true, false) => composite_yuv_to_rgb(
+                    seg,
+                    visible_w,
+                    visible_h,
+                    dst,
+                    dst_row_stride,
+                    dst_x,
+                    dst_y,
+                ),
+                (false, true) => composite_rgb48_planar(
+                    seg,
+                    visible_w,
+                    visible_h,
+                    dst,
+                    dst_row_stride,
+                    dst_x,
+                    dst_y,
+                ),
+                (false, false) => composite_rgb_planar(
+                    seg,
+                    visible_w,
+                    visible_h,
+                    dst,
+                    dst_row_stride,
+                    dst_x,
+                    dst_y,
+                ),
             }
         }
         JpegPixelFormat::Rgb24 => {
@@ -3859,7 +3969,11 @@ fn composite_segment(
                     "TIFF/JPEG: RGB-output JPEG but TIFF photometric={photometric}"
                 )));
             }
-            composite_rgb_planar(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+            if deep {
+                composite_rgb48_planar(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+            } else {
+                composite_rgb_planar(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+            }
         }
         JpegPixelFormat::Rgb24Packed => {
             if photometric != PHOTO_RGB {
@@ -3867,13 +3981,22 @@ fn composite_segment(
                     "TIFF/JPEG: packed-RGB-output JPEG but TIFF photometric={photometric}"
                 )));
             }
-            composite_rgb_packed(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+            if deep {
+                composite_rgb48_packed(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+            } else {
+                composite_rgb_packed(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+            }
         }
         JpegPixelFormat::Cmyk8 => {
             if photometric != PHOTO_CMYK {
                 return Err(Error::invalid(format!(
                     "TIFF/JPEG: CMYK-output JPEG but TIFF photometric={photometric}"
                 )));
+            }
+            if deep {
+                return Err(Error::Unsupported(
+                    "TIFF/JPEG: deep (>8-bit) CMYK JPEG segments are not supported".into(),
+                ));
             }
             composite_cmyk_to_rgb(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
         }

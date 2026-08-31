@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Deep-precision (9..=16-bit) JPEG-in-TIFF decode: `Compression = 7` segments carrying 12-bit SOF1 (extended sequential) or 9..=16-bit SOF3 (lossless) datastreams now decode for the grayscale, YCbCr and RGB photometrics, per TIFF Tech Note 2's precision rule ("the data precision field of the SOFn marker shall agree with the TIFF BitsPerSample field; ... for SOF1, precision 8 or 12 is permitted; for SOF3, precisions 2 to 16"). Deep grayscale renders to `Gray16Le` and deep YCbCr / RGB to `Rgb48Le`, each raw code value widened onto the full 16-bit display extent by bit replication (the same display map the 4-bit grayscale path applies at 8 bits); WhiteIsZero inverts after the monotone widening; the BT.601 / TN2-default-ReferenceBlackWhite matrix is evaluated at the stream's own precision (chroma midpoint `2^(bits-1)`). The §22 old-style (`Compression = 6`) interchange layout accepts the same deep precisions (§22's lossless process allows 2..16-bit). Strip, multi-strip and tiled layouts all compose. Deep CMYK and sub-8-bit precisions stay precise `Unsupported` errors. Validated black-box against `cjpeg -precision 12/16` bitstreams: lossless (SOF3) round trips are byte-exact against the synthetic source raster, and the DCT (SOF1) paths match `djpeg`'s reference decode within ±1 raw code value (gray) / ±4 (YCbCr via the replication upsampler `-nosmooth`).
+
 ### Changed
 
 - Marked the crate's internal plumbing `#[doc(hidden)]` (byte-cursor / IFD parsing in `ifd`, compression codecs in `compress`, CCITT in `ccitt`, tag constants in `types`, JPEG-in-TIFF internals in `jpeg`, the container demuxer in `container`, and the `metadata` `extract_*` helpers) so API-diff tooling no longer treats these test/fuzz-exposed internals as stable public API. The documented decode/encode entry points, typed tag/IFD accessors, and the §8 metadata/attachment surface remain public and unchanged.

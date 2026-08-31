@@ -912,18 +912,39 @@ fn reject_planar_separate() {
     assert!(matches!(e, TiffError::Unsupported(_)), "{e:?}");
 }
 
-/// Non-8-bit precision → Unsupported (§22 baseline "accepts as input
-/// only those images having 8 bits per component"; this build's JPEG
-/// codec renders 8-bit planes only). 16-bit is used because it passes
-/// the decoder's generic per-width gate and reaches the §22 branch.
+/// §22's lossless process allows 2..16-bit precision and the deep
+/// 9..=16-bit range now decodes (see `tests/decode_jpeg_deep.rs`), so
+/// BitsPerSample=16 must pass the depth gate: in a registry build the
+/// (deliberately bogus) bitstream fails later, inside the JPEG codec;
+/// in a standalone build the decode stops at the registry-feature
+/// stub. Sub-8-bit precisions stay precisely rejected in both builds.
 #[test]
-fn reject_non_8bit_precision() {
+fn deep_precision_passes_gate_sub8_rejected() {
+    // 16-bit: no longer a depth-gate rejection.
     let cfg = Cfg {
         bps: 16,
         ..Cfg::gray(COMPRESSION_JPEG_OLD)
     };
     let tiff = build_jpeg_tiff(&cfg, &fake_jif());
-    let e = expect_err(&tiff, "BitsPerSample=16");
+    let e = match decode_tiff(&tiff) {
+        Ok(_) => panic!("bogus 16-bit bitstream must not decode"),
+        Err(e) => e,
+    };
+    let msg = format!("{e:?}");
+    assert!(
+        !msg.contains("BitsPerSample=16"),
+        "16-bit §22 lossless must pass the depth gate, got {msg}"
+    );
+    #[cfg(not(feature = "registry"))]
+    assert!(msg.contains("registry"), "{msg}");
+
+    // 4-bit: below the supported 8 / 9..=16 range → precise error.
+    let cfg = Cfg {
+        bps: 4,
+        ..Cfg::gray(COMPRESSION_JPEG_OLD)
+    };
+    let tiff = build_jpeg_tiff(&cfg, &fake_jif());
+    let e = expect_err(&tiff, "BitsPerSample=4");
     assert!(matches!(e, TiffError::Unsupported(_)), "{e:?}");
 }
 
