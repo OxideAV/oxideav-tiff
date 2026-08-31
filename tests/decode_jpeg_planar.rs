@@ -323,8 +323,8 @@ fn planar_rgb_lossless_exact() {
     assert_eq!(d.frame.pixel_format, TiffPixelFormat::Rgb24);
     let got = image_bytes(&d.frame, 3);
     let mut want = Vec::with_capacity(w * h * 3);
-    for i in 0..w * h {
-        want.push(planes[0][i]);
+    for (i, &r) in planes[0].iter().enumerate() {
+        want.push(r);
         want.push(planes[1][i]);
         want.push(planes[2][i]);
     }
@@ -503,10 +503,11 @@ fn planar_cmyk_matches_chunky_path() {
     let planes: Vec<Vec<u8>> = (0..4).map(|c| plane_pattern(w, h, c as u8 * 40)).collect();
 
     let mut chunky_samples = Vec::with_capacity(w * h * 4);
-    for i in 0..w * h {
-        for p in &planes {
-            chunky_samples.push(p[i]);
-        }
+    for (i, &c0) in planes[0].iter().enumerate() {
+        chunky_samples.push(c0);
+        chunky_samples.push(planes[1][i]);
+        chunky_samples.push(planes[2][i]);
+        chunky_samples.push(planes[3][i]);
     }
     let chunky = build_tiff(
         &PlanarCfg {

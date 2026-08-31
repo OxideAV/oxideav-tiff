@@ -237,6 +237,7 @@ impl Cfg {
             jif_offset_override: None,
         }
     }
+    #[cfg(feature = "registry")]
     fn ycbcr(compression: u16, sub: (u16, u16)) -> Self {
         Cfg {
             photometric: PHOTO_YCBCR,
@@ -899,17 +900,30 @@ fn reject_jif_not_soi() {
     expect_err(&tiff, "SOI");
 }
 
-/// PlanarConfiguration=2 ("not interleaved") old-style JPEG →
-/// Unsupported, as for Compression=7.
+/// `PlanarConfiguration = 2` no longer blocks the §22 interchange
+/// decode (the complete ISO bitstream declares its own scan
+/// structure — see `tests/decode_jpeg_planar.rs` for the positive
+/// round trip). With a deliberately bogus bitstream the failure must
+/// come from the JPEG codec (registry builds) or the registry-feature
+/// stub (standalone builds) — never from a planar-layout gate.
 #[test]
-fn reject_planar_separate() {
+fn planar_separate_flag_passes_gate() {
     let cfg = Cfg {
         planar: Some(PLANAR_SEPARATE),
-        ..Cfg::ycbcr(COMPRESSION_JPEG_OLD, (1, 1))
+        ..Cfg::gray(COMPRESSION_JPEG_OLD)
     };
     let tiff = build_jpeg_tiff(&cfg, &fake_jif());
-    let e = expect_err(&tiff, "PlanarConfiguration");
-    assert!(matches!(e, TiffError::Unsupported(_)), "{e:?}");
+    let e = match decode_tiff(&tiff) {
+        Ok(_) => panic!("bogus bitstream must not decode"),
+        Err(e) => e,
+    };
+    let msg = format!("{e:?}");
+    assert!(
+        !msg.contains("PlanarConfiguration"),
+        "planar flag must not gate the §22 interchange decode, got {msg}"
+    );
+    #[cfg(not(feature = "registry"))]
+    assert!(msg.contains("registry"), "{msg}");
 }
 
 /// §22's lossless process allows 2..16-bit precision and the deep
