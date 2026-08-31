@@ -1186,53 +1186,155 @@ fn ycbcr_subsampling_factors(
     }
 }
 
-/// Reject a chroma-subsampled YCbCr page that arrives on the *tiled*
-/// `PlanarConfiguration = 2` walker.
+/// Decode tiles for chroma-subsampled YCbCr in `PlanarConfiguration =
+/// 2` (TIFF 6.0 §21 as amended by TIFF Technical Note 2 + §15).
 ///
-/// The generic planar walkers size every component plane at the full
-/// image `width × height` (one sample per pixel per plane). That
-/// accounting is correct only for **4:4:4** YCbCr (`YCbCrSubSampling =
-/// [1, 1]`), where each of the Y / Cb / Cr planes is genuinely
-/// full-resolution and the §21 "Ordering of Component Samples" data
-/// unit collapses to a plain chunky `(Y, Cb, Cr)` triple. Under any
-/// other subsampling the spec (§"PlanarConfiguration" + §21) stores the
-/// Cb and Cr planes at the reduced `width/sh × height/sv` resolution.
-/// The *strip* planar walker routes that shape to
-/// `decode_strips_planar_ycbcr_subsampled`; the tiled planar walker
-/// still rejects it — §15 fixes `TileOffsets` at `SamplesPerPixel ×
-/// TilesPerImage` (the same tile count for every plane), which is
-/// inconsistent with a reduced-size chroma plane under a shared
-/// `TileWidth × TileLength` grid, and §21's tile constraints only
-/// address the chunky data-unit layout. The §22 default when the tag
-/// is absent is `[2, 2]` (subsampled), so an untagged planar tiled
-/// YCbCr page is also rejected here rather than mis-decoded.
-fn reject_subsampled_planar_ycbcr(
+/// The TN2-amended §21 defines the geometry the original §15 text
+/// left open: "each strip or tile covers the same image area despite
+/// subsampling; that is, the total number of strips or tiles in the
+/// image is the same for each component. Therefore strips or tiles of
+/// the subsampled components contain fewer samples than strips or
+/// tiles of the luminance component", with "TileWidth ... an integer
+/// multiple of ChromaSubsampleHoriz and TileLength ... an integer
+/// multiple of ChromaSubsampleVert". So `TileOffsets` still carries
+/// `SamplesPerPixel × TilesPerImage` entries (§15, plane-major), the
+/// tile *grid* comes from the full-resolution dimensions, and a
+/// chroma tile holds `TileWidth/sh × TileLength/sv` samples of the
+/// reduced §21 "chroma image".
+///
+/// The §14 predictor differences per-plane, per-tile, at the plane's
+/// own row width (grayscale rule), matching the strip walker. After
+/// the three planes assemble, each chroma sample is splatted over its
+/// `sh × sv` luma block and the full-resolution `(Y, Cb, Cr)`
+/// interleave is returned for the standard photometric conversion.
+#[allow(clippy::too_many_arguments)]
+fn decode_tiles_planar_ycbcr_subsampled(
+    input: &[u8],
     entries: &[Entry],
     bo: ByteOrder,
-    samples_per_pixel: u16,
-    bps_first: u16,
+    width: u32,
+    height: u32,
     compression: u16,
-) -> Result<()> {
-    let photometric = find(entries, TAG_PHOTOMETRIC_INTERPRETATION)
-        .map(|e| e.as_u32(bo))
-        .transpose()?
-        .unwrap_or(0);
-    if let Some((sh, sv)) = ycbcr_subsampling_factors(
-        entries,
-        bo,
-        photometric,
-        samples_per_pixel,
-        bps_first,
-        compression,
-    )? {
-        return Err(Error::Unsupported(format!(
-            "TIFF: tiled PlanarConfiguration=2 with chroma-subsampled YCbCr \
-             (YCbCrSubSampling=({sh},{sv})) is not supported — §15 TileOffsets fixes the \
-             same tile count for every plane, which has no consistent geometry for the \
-             reduced-resolution §21 chroma planes; strip layout (and tiled 4:4:4) decodes"
+    predictor: u16,
+    sh: usize,
+    sv: usize,
+) -> Result<Vec<u8>> {
+    if width as usize % sh != 0 || height as usize % sv != 0 {
+        return Err(Error::invalid(format!(
+            "TIFF: planar subsampled YCbCr requires ImageWidth ({width}) to be a multiple \
+             of YCbCrSubsampleHoriz ({sh}) and ImageLength ({height}) a multiple of \
+             YCbCrSubsampleVert ({sv}) — TIFF 6.0 §21 page 90"
         )));
     }
-    Ok(())
+    if predictor == PREDICTOR_FLOAT {
+        return Err(Error::Unsupported(
+            "TIFF: Predictor=3 (floating-point) is undefined for YCbCr integer samples".to_string(),
+        ));
+    }
+    let tile_w = find(entries, TAG_TILE_WIDTH)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileWidth"))?
+        .as_u32(bo)? as usize;
+    let tile_h = find(entries, TAG_TILE_LENGTH)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileLength"))?
+        .as_u32(bo)? as usize;
+    if tile_w == 0 || tile_h == 0 {
+        return Err(Error::invalid("TIFF: zero tile dimension"));
+    }
+    // §21 (amended): tile dimensions must be integer multiples of the
+    // subsampling factors so every tile holds whole chroma samples.
+    if tile_w % sh != 0 || tile_h % sv != 0 {
+        return Err(Error::invalid(format!(
+            "TIFF: planar subsampled YCbCr TileWidth/TileLength ({tile_w}x{tile_h}) must \
+             be integer multiples of YCbCrSubSampling ({sh},{sv}) — TIFF 6.0 §21 \
+             (as amended by TN2)"
+        )));
+    }
+    let tile_offsets = find(entries, TAG_TILE_OFFSETS)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileOffsets"))?
+        .as_u64_vec(bo)?;
+    let tile_byte_counts = find(entries, TAG_TILE_BYTE_COUNTS)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileByteCounts"))?
+        .as_u64_vec(bo)?;
+    if tile_offsets.len() != tile_byte_counts.len() {
+        return Err(Error::invalid(
+            "TIFF: TileOffsets / TileByteCounts length mismatch",
+        ));
+    }
+    let tiles_across = (width as usize).div_ceil(tile_w);
+    let tiles_down = (height as usize).div_ceil(tile_h);
+    let tiles_per_plane = tiles_across * tiles_down;
+    if tile_offsets.len() != tiles_per_plane * 3 {
+        return Err(Error::invalid(format!(
+            "TIFF: planar subsampled YCbCr expects {} tile entries \
+             (3 planes × TilesPerImage={tiles_per_plane}), got {}",
+            tiles_per_plane * 3,
+            tile_offsets.len()
+        )));
+    }
+
+    let w = width as usize;
+    let h = height as usize;
+    let (cw, ch) = (w / sh, h / sv);
+    let mut planes: Vec<Vec<u8>> = Vec::with_capacity(3);
+    for plane in 0..3usize {
+        let (pw, ph, tw_c, th_c) = if plane == 0 {
+            (w, h, tile_w, tile_h)
+        } else {
+            (cw, ch, tile_w / sh, tile_h / sv)
+        };
+        let tile_size = tw_c * th_c;
+        let mut plane_buf = vec![0u8; pw * ph];
+        for ty in 0..tiles_down {
+            for tx in 0..tiles_across {
+                let idx = plane * tiles_per_plane + ty * tiles_across + tx;
+                let off = tile_offsets[idx] as usize;
+                let bc = tile_byte_counts[idx] as usize;
+                let end = off.checked_add(bc).ok_or_else(|| {
+                    Error::invalid(format!("TIFF: plane-{plane} tile length overflow"))
+                })?;
+                if end > input.len() {
+                    return Err(Error::invalid(format!(
+                        "TIFF: plane-{plane} tile extends past EOF"
+                    )));
+                }
+                let mut tile =
+                    decompress_block(&input[off..end], tile_size, compression, None, None)?;
+                if tile.len() < tile_size {
+                    return Err(Error::invalid(format!(
+                        "TIFF: plane-{plane} tile short after decompress"
+                    )));
+                }
+                tile.truncate(tile_size);
+                if predictor == PREDICTOR_HORIZONTAL {
+                    // §14: per-plane grayscale differencing, per-tile,
+                    // at the tile's own row width.
+                    apply_horizontal_predictor(&mut tile, tw_c, th_c, 1, 8, tw_c, bo)?;
+                }
+                let visible_w = pw.saturating_sub(tx * tw_c).min(tw_c);
+                let visible_h = ph.saturating_sub(ty * th_c).min(th_c);
+                for r in 0..visible_h {
+                    let src = r * tw_c;
+                    let dst = (ty * th_c + r) * pw + tx * tw_c;
+                    plane_buf[dst..dst + visible_w].copy_from_slice(&tile[src..src + visible_w]);
+                }
+            }
+        }
+        planes.push(plane_buf);
+    }
+
+    // Full-resolution chunky interleave with §21 chroma replication —
+    // identical to the strip planar subsampled walker's tail.
+    let mut out = vec![0u8; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let ci = (y / sv) * cw + (x / sh);
+            let o = (y * w + x) * 3;
+            out[o] = planes[0][y * w + x];
+            out[o + 1] = planes[1][ci];
+            out[o + 2] = planes[2][ci];
+        }
+    }
+    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2187,7 +2289,36 @@ fn decode_tiles_planar(
             "TIFF: planar tiled images at sub-byte bit depths not supported",
         ));
     }
-    reject_subsampled_planar_ycbcr(entries, bo, samples_per_pixel, bps_first, compression)?;
+    // Chroma-subsampled YCbCr planes carry the reduced §21 "chroma
+    // image" geometry; the TN2-amended §21 pins the tiled shape
+    // (same tile count per component, fewer samples per chroma
+    // tile), handled by the dedicated walker.
+    {
+        let photometric = find(entries, TAG_PHOTOMETRIC_INTERPRETATION)
+            .map(|e| e.as_u32(bo))
+            .transpose()?
+            .unwrap_or(0);
+        if let Some((sh, sv)) = ycbcr_subsampling_factors(
+            entries,
+            bo,
+            photometric,
+            samples_per_pixel,
+            bps_first,
+            compression,
+        )? {
+            return decode_tiles_planar_ycbcr_subsampled(
+                input,
+                entries,
+                bo,
+                width,
+                height,
+                compression,
+                predictor,
+                sh,
+                sv,
+            );
+        }
+    }
     let tile_w = find(entries, TAG_TILE_WIDTH)
         .ok_or_else(|| Error::invalid("TIFF: missing TileWidth"))?
         .as_u32(bo)?;

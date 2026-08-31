@@ -380,12 +380,13 @@ fn rejects_wrong_buffer_length() {
 }
 
 #[test]
-fn rejects_chunky_predictor_tiled_planar_and_ccitt() {
+fn rejects_chunky_predictor_and_ccitt() {
     // The §14 predictor over the packed *chunky* data-unit stream and
-    // CCITT remain rejected for subsampled YCbCr, as does the *tiled*
-    // planar layout; the planar *strip* layout now encodes (see
-    // ycbcr_subsampled_planar_roundtrip.rs) and the tiled chunky
-    // layout is supported (`subsampled_tiled_matches_strip` below).
+    // CCITT remain rejected for subsampled YCbCr; the planar *strip*
+    // layout encodes (see ycbcr_subsampled_planar_roundtrip.rs), the
+    // tiled chunky layout is supported
+    // (`subsampled_tiled_matches_strip` below), and the tiled planar
+    // layout encodes per the TN2-amended §21 geometry.
     let (w, h) = (8usize, 4usize);
     let pixels = block_uniform_chroma(w, h, 2, 2);
     let base = |comp, predictor, planar, tiling| EncodePage {
@@ -403,7 +404,8 @@ fn rejects_chunky_predictor_tiled_planar_and_ccitt() {
         extras: PageExtras::default(),
     };
     assert!(encode_tiff(&base(TiffCompression::None, true, false, None)).is_err());
-    assert!(encode_tiff(&base(TiffCompression::None, false, true, Some((16, 16)))).is_err());
+    // Tiled planar subsampled now encodes (TN2-amended §21).
+    assert!(encode_tiff(&base(TiffCompression::None, false, true, Some((16, 16)))).is_ok());
     assert!(encode_tiff(&base(
         TiffCompression::CcittT6 {
             uncompressed: false

@@ -23,8 +23,10 @@
 //!     decodes without consulting our encoder, exercising the
 //!     §"PlanarConfiguration" SamplesPerPixel × StripsPerImage strip
 //!     accounting at reduced chroma geometry;
-//!   * precise rejections for the still-deferred tiled planar subsampled
-//!     shape on both sides.
+//!   * tiled planar subsampled round trips (TN2-amended §21: same tile
+//!     count per component, chroma tiles at the reduced geometry),
+//!     cross-checked against the strip planar encoding of the same
+//!     pixels.
 
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::{
@@ -311,18 +313,59 @@ fn hand_built_multi_strip_planar_subsampled_decodes() {
 // Rejections
 // ---------------------------------------------------------------------------
 
+/// Tiled planar subsampled layout (TN2-amended §21): every plane has
+/// the same tile count; chroma tiles hold `TileWidth/sh ×
+/// TileLength/sv` samples. The tiled encoding of the same pixels must
+/// decode identically to the strip planar encoding, across the
+/// byte-aligned compressors, with and without the per-plane §14
+/// predictor.
 #[test]
-fn tiled_planar_subsampled_encode_rejected() {
-    let pixels = block_constant_ycbcr(32, 32, 2, 2);
-    let page = EncodePage {
+fn tiled_planar_subsampled_roundtrips() {
+    for (sh, sv) in [(2u16, 1u16), (2, 2), (4, 2)] {
+        let (w, h) = (32u32, 32u32);
+        let pixels = block_constant_ycbcr(w, h, sh as u32, sv as u32);
+        let strip = planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false);
+        let want = decode_tiff(&encode_tiff(&strip).unwrap()).unwrap();
+        for compression in [
+            TiffCompression::None,
+            TiffCompression::Lzw,
+            TiffCompression::Zstd,
+        ] {
+            for predictor in [false, true] {
+                let tiled = EncodePage {
+                    tiling: Some((16, 16)),
+                    compression,
+                    predictor,
+                    ..planar_page(&pixels, w, h, (sh, sv), compression, predictor)
+                };
+                let got = decode_tiff(&encode_tiff(&tiled).unwrap()).unwrap();
+                assert_eq!(got.frame.pixel_format, TiffPixelFormat::Rgb24);
+                assert_eq!(
+                    got.frame.planes[0].data, want.frame.planes[0].data,
+                    "tiled planar ({sh},{sv}) compression={compression:?} \
+                     predictor={predictor} must match the strip planar decode"
+                );
+            }
+        }
+    }
+}
+
+/// Partial edge tiles: a 40×24 image over a 16×16 luma grid leaves
+/// right and bottom partial tiles in every plane; §15 edge padding
+/// must be clipped away identically to the strip layout.
+#[test]
+fn tiled_planar_subsampled_partial_edge_tiles() {
+    let (sh, sv) = (2u16, 2u16);
+    let (w, h) = (40u32, 24u32);
+    let pixels = block_constant_ycbcr(w, h, 2, 2);
+    let strip = planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false);
+    let want = decode_tiff(&encode_tiff(&strip).unwrap()).unwrap();
+    let tiled = EncodePage {
         tiling: Some((16, 16)),
-        ..planar_page(&pixels, 32, 32, (2, 2), TiffCompression::None, false)
+        ..planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false)
     };
-    let err = encode_tiff(&page).unwrap_err().to_string();
-    assert!(
-        err.contains("tiled PlanarConfiguration=2"),
-        "unexpected error: {err}"
-    );
+    let got = decode_tiff(&encode_tiff(&tiled).unwrap()).unwrap();
+    assert_eq!(got.frame.planes[0].data, want.frame.planes[0].data);
 }
 
 #[test]

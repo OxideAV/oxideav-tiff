@@ -298,15 +298,15 @@ fn encoder_ycbcr24_444_rejects_ccitt_only() {
 }
 
 #[test]
-fn encoder_ycbcr_subsampled_rejects_chunky_predictor_and_tiled_planar() {
+fn encoder_ycbcr_subsampled_rejects_chunky_predictor_tiled_planar_encodes() {
     // Under non-1:1 subsampling the *chunky* on-disk stream is the
     // packed §21 data-unit sequence (a 2-D luma block then single
     // Cb / Cr samples), over which a §14 per-component horizontal
     // difference has no defined shape — predictor × chunky stays
-    // rejected. The planar strip layout now encodes (see
-    // ycbcr_subsampled_planar_roundtrip.rs), but planar × *tiled*
-    // stays rejected: §15 fixes the same tile count for every plane,
-    // which has no consistent geometry for reduced-size chroma planes.
+    // rejected. The planar strip layout encodes (see
+    // ycbcr_subsampled_planar_roundtrip.rs) and planar × *tiled* now
+    // encodes too, per the TN2-amended §21 geometry (same tile count
+    // per component, chroma tiles at the reduced resolution).
     let pixels = vec![128u8; 8 * 8 * 3];
 
     for (sh, sv) in [(2u16, 1u16), (2, 2), (4, 1), (4, 2)] {
@@ -325,8 +325,8 @@ fn encoder_ycbcr_subsampled_rejects_chunky_predictor_and_tiled_planar() {
             extras: PageExtras::default(),
         };
         assert!(
-            encode_tiff(&tiled_planar_page).is_err(),
-            "subsampled ({sh},{sv}) tiled planar must reject"
+            encode_tiff(&tiled_planar_page).is_ok(),
+            "subsampled ({sh},{sv}) tiled planar must encode (TN2-amended §21)"
         );
 
         let pred_page = EncodePage {

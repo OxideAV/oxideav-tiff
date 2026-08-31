@@ -1645,18 +1645,10 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         // the associated luma image"). One strip per plane; §14
         // differencing runs per-plane ("Differencing works the same as
         // it does for grayscale data") at that plane's own row width.
-        // The *tiled* planar subsampled form stays rejected: §15
-        // TileOffsets fixes the same tile count for every plane, which
-        // has no consistent geometry for a reduced-size chroma plane
-        // under a shared TileWidth × TileLength grid.
-        if p.planar && !is_ycbcr_444 && p.tiling.is_some() {
-            return Err(Error::invalid(
-                "TIFF encode: tiled PlanarConfiguration=2 with chroma-subsampled YCbCr is \
-                 not supported (§15 TileOffsets fixes the same tile count for every plane, \
-                 which has no consistent geometry for the reduced-resolution §21 chroma \
-                 planes); use strip layout, 4:4:4, or chunky tiles",
-            ));
-        }
+        // The *tiled* planar subsampled form follows the TN2-amended
+        // §21 geometry (same tile count per component, chroma tiles
+        // holding TileWidth/sh × TileLength/sv samples of the reduced
+        // "chroma image") — see `build_tiles_planar_ycbcr_subsampled`.
         // Over the *chunky* packed §21 data-unit stream a per-component
         // horizontal difference has no defined shape, so predictor ×
         // chunky × subsampled stays rejected; the planar subsampled
@@ -2267,17 +2259,36 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
             // units packed from the full-resolution pixels (`raw_pixels`
             // holds the unpacked pixels for this case — see the
             // YCbCrSubsampled24 match arm). The decoder reverses this in
-            // `decode_tiles_ycbcr_subsampled`.
-            build_tiles_ycbcr_subsampled(
-                &raw_pixels,
-                p.width as usize,
-                p.height as usize,
-                tile_w as usize,
-                tile_h as usize,
-                sh,
-                sv,
-                p.compression,
-            )?
+            // `decode_tiles_ycbcr_subsampled`; the planar form emits
+            // one tile grid per component with the chroma grids at
+            // the reduced §21 "chroma image" geometry (TN2-amended
+            // §21: same tile count per component, fewer samples per
+            // chroma tile), reversed by
+            // `decode_tiles_planar_ycbcr_subsampled`.
+            if p.planar {
+                build_tiles_planar_ycbcr_subsampled(
+                    &raw_pixels,
+                    p.width as usize,
+                    p.height as usize,
+                    tile_w as usize,
+                    tile_h as usize,
+                    sh,
+                    sv,
+                    p.predictor,
+                    p.compression,
+                )?
+            } else {
+                build_tiles_ycbcr_subsampled(
+                    &raw_pixels,
+                    p.width as usize,
+                    p.height as usize,
+                    tile_w as usize,
+                    tile_h as usize,
+                    sh,
+                    sv,
+                    p.compression,
+                )?
+            }
         } else if p.planar {
             // Tiled PlanarConfiguration=2 (TIFF 6.0 §15 + §"Planar-
             // Configuration"): one row-major tile grid per component
@@ -3520,6 +3531,77 @@ fn build_planes_ycbcr_subsampled(
             )?);
             done += rows_this;
         }
+    }
+    Ok(out)
+}
+
+/// Split a full-resolution chunky `(Y, Cb, Cr)` raster into the
+/// tiled `PlanarConfiguration = 2` chroma-subsampled layout (TIFF 6.0
+/// §21 as amended by TN2 + §15): decimate to a full-resolution Y
+/// plane plus box-filtered `width/sh × height/sv` chroma planes (the
+/// same §21 decimation the strip planar writer applies), then emit
+/// one row-major tile grid per plane — the luma grid at `tile_w ×
+/// tile_h`, the chroma grids at the reduced `tile_w/sh × tile_h/sv`
+/// tile size over the reduced planes, so every plane has the same
+/// tile *count* (§15 TileOffsets: `SamplesPerPixel × TilesPerImage`,
+/// plane-major). The §14 predictor differences per-plane, per-tile.
+#[allow(clippy::too_many_arguments)]
+fn build_tiles_planar_ycbcr_subsampled(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    tile_w: usize,
+    tile_h: usize,
+    sh: usize,
+    sv: usize,
+    predictor: bool,
+    compression: TiffCompression,
+) -> Result<Vec<Vec<u8>>> {
+    let cw = width / sh;
+    let ch = height / sv;
+    // Y plane: full resolution, transported unchanged.
+    let mut y_plane = vec![0u8; width * height];
+    for (i, chunk) in src.chunks_exact(3).enumerate() {
+        y_plane[i] = chunk[0];
+    }
+    // Chroma planes: per-block rounded box-filter mean (§21
+    // decimation, identical to the strip planar writer).
+    let mut cb_plane = vec![0u8; cw * ch];
+    let mut cr_plane = vec![0u8; cw * ch];
+    let n = (sh * sv) as u32;
+    for by in 0..ch {
+        for bx in 0..cw {
+            let mut cb_sum: u32 = 0;
+            let mut cr_sum: u32 = 0;
+            for sy in 0..sv {
+                for sx in 0..sh {
+                    let s = ((by * sv + sy) * width + bx * sh + sx) * 3;
+                    cb_sum += src[s + 1] as u32;
+                    cr_sum += src[s + 2] as u32;
+                }
+            }
+            cb_plane[by * cw + bx] = ((cb_sum + n / 2) / n) as u8;
+            cr_plane[by * cw + bx] = ((cr_sum + n / 2) / n) as u8;
+        }
+    }
+    let mut out = Vec::new();
+    for (plane_buf, pw, ph, tw_c, th_c) in [
+        (&y_plane, width, height, tile_w, tile_h),
+        (&cb_plane, cw, ch, tile_w / sh, tile_h / sv),
+        (&cr_plane, cw, ch, tile_w / sh, tile_h / sv),
+    ] {
+        out.extend(build_tiles(
+            plane_buf,
+            pw,
+            ph,
+            tw_c,
+            th_c,
+            1,
+            8,
+            predictor,
+            false,
+            compression,
+        )?);
     }
     Ok(out)
 }
