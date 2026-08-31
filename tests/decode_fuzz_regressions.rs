@@ -14,6 +14,42 @@
 use oxideav_tiff::{decode_tiff, decode_tiff_all};
 
 #[test]
+fn fuzz_r454_samples_per_pixel_zero_does_not_panic() {
+    // Fuzz r454 finding (crash-1f3b276c…): `SamplesPerPixel = 0`
+    // with the BitsPerSample tag absent made `decode_bits_per_sample`
+    // return an empty vector, and the `bits_per_sample[0]` read
+    // panicked ("index out of bounds: the len is 0"). Minimal
+    // reconstruction: classic-II IFD claiming SPP = 0 and no tag 258.
+    let mut v: Vec<u8> = Vec::new();
+    v.extend_from_slice(b"II");
+    v.extend_from_slice(&42u16.to_le_bytes());
+    v.extend_from_slice(&8u32.to_le_bytes());
+    let entries: &[(u16, u16, u32, u32)] = &[
+        (256, 4, 1, 8),   // ImageWidth
+        (257, 4, 1, 8),   // ImageLength
+        (259, 3, 1, 1),   // Compression = None
+        (262, 3, 1, 1),   // PhotometricInterpretation
+        (273, 4, 1, 100), // StripOffsets
+        (277, 3, 1, 0),   // SamplesPerPixel = 0 (malformed)
+        (278, 4, 1, 8),   // RowsPerStrip
+        (279, 4, 1, 8),   // StripByteCounts
+    ];
+    v.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for &(tag, ty, cnt, val) in entries {
+        v.extend_from_slice(&tag.to_le_bytes());
+        v.extend_from_slice(&ty.to_le_bytes());
+        v.extend_from_slice(&cnt.to_le_bytes());
+        v.extend_from_slice(&val.to_le_bytes());
+    }
+    v.extend_from_slice(&0u32.to_le_bytes());
+    let Err(e) = decode_tiff(&v) else {
+        panic!("SamplesPerPixel=0 must not decode");
+    };
+    assert!(format!("{e:?}").contains("SamplesPerPixel=0"), "{e:?}");
+    let _ = decode_tiff_all(&v);
+}
+
+#[test]
 fn fuzz_r126_bigtiff_first_ifd_offset_u64_max_does_not_panic() {
     // Original fuzz reproducer:
     //   [49 49 2B 00 08 00 00 00 FF FF FF FF FF FF FF FF

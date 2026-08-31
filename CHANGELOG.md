@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fuzz r454 finding: a hostile IFD declaring `SamplesPerPixel = 0` with the BitsPerSample tag absent produced an empty per-sample vector and panicked on its `[0]` read; the decoder now rejects zero-component pixels with a precise `InvalidData` (regression-pinned in `tests/decode_fuzz_regressions.rs`).
+- Fuzz sub-crate lockfile refresh: `fuzz/Cargo.lock` pinned `compcol 0.6.0`, whose Zstandard decoder hangs (>25 s on a 43-byte frame — libFuzzer timeout artifact) on input the workspace's `compcol 0.6.9+` handles in microseconds; the lockfile now resolves `compcol 0.6.10` (and current `oxideav-core`/`oxideav-mjpeg`), curing both recorded timeout artifacts. Classic fuzz-harness dependency drift — the harness resolves its dependencies separately from the library.
+
 ### Added
 
 - README: the Backlog section is rewritten around the r454 closures — deep-precision + planar + tables-form JPEG decode, CCITT uncompressed-mode emission, and tiled planar subsampled YCbCr are now documented in their sections; the remaining gaps are JPEG-in-TIFF *encode*, deep CMYK JPEG / sub-8-bit SOF3 / tiled tables-form (precise errors), the un-staged Exif/GPS/GeoTIFF/DNG tag catalogues, and the spec-undefined chunky-subsampled × Predictor=2 combination.

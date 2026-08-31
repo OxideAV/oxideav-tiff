@@ -196,6 +196,15 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         .map(|e| e.as_u32(bo))
         .transpose()?
         .unwrap_or(1) as u16;
+    // §"SamplesPerPixel" counts the components per pixel (default 1);
+    // zero components is meaningless and, left unchecked, produces an
+    // empty BitsPerSample vector whose `[0]` read panics (fuzz r454
+    // finding: SamplesPerPixel=0 with the BitsPerSample tag absent).
+    if samples_per_pixel == 0 {
+        return Err(Error::invalid(
+            "TIFF: SamplesPerPixel=0 (a pixel must have at least one component)",
+        ));
+    }
     let bits_per_sample =
         decode_bits_per_sample(find(entries, TAG_BITS_PER_SAMPLE), bo, samples_per_pixel)?;
     let planar = find(entries, TAG_PLANAR_CONFIGURATION)
