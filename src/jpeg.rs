@@ -834,6 +834,32 @@ pub fn composite_rgb48_packed(
     Ok(())
 }
 
+/// BT.601 YCbCr → RGB at an arbitrary code precision (`bits`), for
+/// the PlanarConfiguration=2 compositor in `decoder.rs`. `y`, `cb`,
+/// `cr` are raw code values; the chroma midpoint is `2^(bits-1)` and
+/// the result channels are clamped to `0 ..= 2^bits - 1` (still raw —
+/// the caller widens to the display extent). Same Q16 coefficient set
+/// as [`composite_yuv_to_rgb`] / [`composite_yuv16_to_rgb48`],
+/// matching TN2's default `ReferenceBlackWhite`.
+pub(crate) fn ycbcr_to_rgb_raw(y: u16, cb: u16, cr: u16, bits: u16) -> (u16, u16, u16) {
+    let mid = 1i64 << (bits - 1);
+    let maxv = (1i64 << bits) - 1;
+    let y = y as i64;
+    let cb = cb as i64 - mid;
+    let cr = cr as i64 - mid;
+    let r = (y + ((91881 * cr + 32768) >> 16)).clamp(0, maxv) as u16;
+    let g = (y - ((22554 * cb + 46802 * cr + 32768) >> 16)).clamp(0, maxv) as u16;
+    let b = (y + ((116130 * cb + 32768) >> 16)).clamp(0, maxv) as u16;
+    (r, g, b)
+}
+
+/// Widen a raw `bits`-precision code value onto the 16-bit display
+/// extent (crate-internal re-export of [`scale_to_16`] for the
+/// planar compositor in `decoder.rs`).
+pub(crate) fn widen_to_16(v: u16, bits: u16) -> u16 {
+    scale_to_16(v, bits)
+}
+
 fn ycbcr_to_rgb(y: i32, cb: i32, cr: i32) -> (u8, u8, u8) {
     let cb = cb - 128;
     let cr = cr - 128;

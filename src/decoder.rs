@@ -564,15 +564,24 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     #[cfg(feature = "registry")]
     if compression == COMPRESSION_JPEG_NEW {
         // TN2 "Special considerations for PlanarConfiguration 2":
-        // each image segment carries one component plane only, and
-        // chroma-subsampled JPEG segments must restate their
-        // dimensions in absolute pixel terms. Our JPEG path is
-        // chunky-only; reject planar=2 with a precise error so we
-        // don't silently mis-decode.
+        // each image segment carries one component plane only ("we
+        // wish the segments to look like valid single-channel (i.e.
+        // grayscale) JPEG datastreams"), the SOFn dimensions of a
+        // subsampled component are "scaled down by the sampling
+        // factors", and "all SOFn sampling factors shall be given as
+        // 1". The planar walker decodes each per-component grayscale
+        // segment grid and re-composes the photometric downstream.
         if planar == PLANAR_SEPARATE {
-            return Err(Error::Unsupported(
-                "TIFF/JPEG: PlanarConfiguration=2 (separate planes) not supported".into(),
-            ));
+            return decode_ifd_jpeg_planar(
+                input,
+                entries,
+                bo,
+                width,
+                height,
+                samples_per_pixel,
+                bps_first,
+                photometric,
+            );
         }
         return decode_ifd_jpeg(
             input,
@@ -605,15 +614,12 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     if compression == COMPRESSION_JPEG_OLD {
         // §22 "Overview of the JPEG Extension to TIFF": "The
         // PlanarConfiguration Field is used to specify whether or not
-        // the compressed data is interleaved." The non-interleaved
-        // (PlanarConfiguration = 2) arrangement stores one component
-        // per JPEG scan; our JPEG path is chunky-only, as for
-        // Compression=7.
-        if planar == PLANAR_SEPARATE {
-            return Err(Error::Unsupported(
-                "TIFF/JPEG(§22): PlanarConfiguration=2 (not interleaved) is not supported".into(),
-            ));
-        }
+        // the compressed data is interleaved." In the interchange
+        // layout the complete ISO bitstream declares its own scan
+        // structure (one non-interleaved scan per component for
+        // PlanarConfiguration = 2), so the JPEG codec handles either
+        // arrangement from the stream itself — no TIFF-side layout
+        // work depends on the flag, and both values decode.
         return decode_ifd_jpeg_old(
             input,
             entries,
@@ -3543,6 +3549,464 @@ fn decode_ifd_jpeg(
             data: dst,
         }],
     })
+}
+
+/// Decode a `PlanarConfiguration = 2` JPEG-in-TIFF IFD (`Compression
+/// = 7`) per TN2 "Special considerations for PlanarConfiguration 2".
+///
+/// Layout rules implemented from TN2 + its amended §21:
+///
+/// * Each image segment contains data for only one component, as a
+///   single-channel JPEG datastream (SOFn `Nf = 1`, sampling factors
+///   1); segments are stored plane-major (`SamplesPerPixel ×
+///   StripsPerImage` strip entries / `SamplesPerPixel ×
+///   TilesPerImage` tile entries, component 0's segments first).
+/// * "When PlanarConfiguration=2, each strip or tile covers the same
+///   image area despite subsampling ... Therefore strips or tiles of
+///   the subsampled components contain fewer samples": the SOFn
+///   dimensions of a subsampled YCbCr chroma segment are the luma
+///   segment's dimensions divided by the sampling factors ("In strip
+///   TIFF files the computed dimensions may need to be rounded up to
+///   the next integer; in tiled files, the restrictions on tile size
+///   make this case impossible").
+/// * §21 (amended): `RowsPerStrip` must be an integer multiple of
+///   `ChromaSubsampleVert` (unless the image is single-strip), and
+///   `TileWidth` / `TileLength` integer multiples of the horizontal /
+///   vertical factors.
+///
+/// Photometrics: RGB (3 planes), YCbCr (full-res Y + possibly reduced
+/// Cb / Cr), CMYK (4 planes, 8-bit) — grayscale never reaches here
+/// (SamplesPerPixel = 1 collapses to the chunky walker). Deep
+/// (9..=16-bit) RGB / YCbCr compose exactly as in the chunky path;
+/// deep CMYK is rejected upstream.
+#[cfg(feature = "registry")]
+#[allow(clippy::too_many_arguments)]
+fn decode_ifd_jpeg_planar(
+    input: &[u8],
+    entries: &[Entry],
+    bo: ByteOrder,
+    width: u32,
+    height: u32,
+    samples_per_pixel: u16,
+    bps_first: u16,
+    photometric: u16,
+) -> Result<TiffImage> {
+    if bps_first != 8 && !(9..=16).contains(&bps_first) {
+        return Err(Error::Unsupported(format!(
+            "TIFF/JPEG: BitsPerSample={bps_first} (8-bit and 9..=16-bit precisions decode \
+             in this build)"
+        )));
+    }
+    // Component sampling factors: (sh, sv) per plane. Only YCbCr
+    // carries non-1:1 factors (TN2: downsampling "is permissible only
+    // for YCbCr data, and it must correspond to the YCbCrSubSampling
+    // field", whose §21 default is [2, 2]).
+    let (sub_h, sub_v) = if photometric == PHOTO_YCBCR {
+        match find(entries, TAG_YCBCR_SUBSAMPLING) {
+            Some(e) => {
+                let v = e.as_u32_vec(bo)?;
+                if v.len() < 2 || v[0] == 0 || v[1] == 0 {
+                    return Err(Error::invalid("TIFF: malformed YCbCrSubSampling"));
+                }
+                (v[0] as usize, v[1] as usize)
+            }
+            None => (2, 2),
+        }
+    } else {
+        (1, 1)
+    };
+    let comp_factors: Vec<(usize, usize)> = match (photometric, samples_per_pixel) {
+        (PHOTO_RGB, 3) => vec![(1, 1); 3],
+        (PHOTO_YCBCR, 3) => vec![(1, 1), (sub_h, sub_v), (sub_h, sub_v)],
+        (PHOTO_CMYK, 4) => {
+            if bps_first > 8 {
+                return Err(Error::Unsupported(format!(
+                    "TIFF/JPEG: deep ({bps_first}-bit) CMYK JPEG-in-TIFF is not supported \
+                     in this build (8-bit CMYK decodes)"
+                )));
+            }
+            vec![(1, 1); 4]
+        }
+        (p, s) => {
+            return Err(Error::invalid(format!(
+                "TIFF/JPEG: PlanarConfiguration=2 photometric={p} samples_per_pixel={s} \
+                 not supported"
+            )));
+        }
+    };
+    let spp = samples_per_pixel as usize;
+    let tables: Option<&[u8]> = find(entries, TAG_JPEG_TABLES).map(|e| e.data.as_slice());
+
+    // Decode each component's segment grid into a raw-code-value
+    // plane at that component's own (possibly reduced) resolution.
+    let mut comp_planes: Vec<Vec<u16>> = Vec::with_capacity(spp);
+    let mut comp_dims: Vec<(usize, usize)> = Vec::with_capacity(spp);
+    for &(sh, sv) in &comp_factors {
+        let pw = (width as usize).div_ceil(sh);
+        let ph = (height as usize).div_ceil(sv);
+        comp_planes.push(vec![0u16; pw * ph]);
+        comp_dims.push((pw, ph));
+    }
+
+    if find(entries, TAG_TILE_WIDTH).is_some() {
+        let tile_w = find(entries, TAG_TILE_WIDTH)
+            .ok_or_else(|| Error::invalid("TIFF: missing TileWidth"))?
+            .as_u32(bo)?;
+        let tile_h = find(entries, TAG_TILE_LENGTH)
+            .ok_or_else(|| Error::invalid("TIFF: missing TileLength"))?
+            .as_u32(bo)?;
+        if tile_w == 0 || tile_h == 0 {
+            return Err(Error::invalid("TIFF: zero tile dimension"));
+        }
+        // §21 (amended): "TileWidth must be an integer multiple of
+        // ChromaSubsampleHoriz and TileLength must be an integer
+        // multiple of ChromaSubsampleVert."
+        if tile_w as usize % sub_h != 0 || tile_h as usize % sub_v != 0 {
+            return Err(Error::invalid(format!(
+                "TIFF/JPEG: planar tiled YCbCr TileWidth/TileLength ({tile_w}x{tile_h}) \
+                 must be integer multiples of YCbCrSubSampling ({sub_h},{sub_v}) — \
+                 TIFF 6.0 §21 (as amended by TN2)"
+            )));
+        }
+        let tile_offsets = find(entries, TAG_TILE_OFFSETS)
+            .ok_or_else(|| Error::invalid("TIFF: missing TileOffsets"))?
+            .as_u64_vec(bo)?;
+        let tile_byte_counts = find(entries, TAG_TILE_BYTE_COUNTS)
+            .ok_or_else(|| Error::invalid("TIFF: missing TileByteCounts"))?
+            .as_u64_vec(bo)?;
+        if tile_offsets.len() != tile_byte_counts.len() {
+            return Err(Error::invalid(
+                "TIFF/JPEG: TileOffsets / TileByteCounts length mismatch",
+            ));
+        }
+        let tiles_across = (width as u64).div_ceil(tile_w as u64) as usize;
+        let tiles_down = (height as u64).div_ceil(tile_h as u64) as usize;
+        let tiles_per_plane = tiles_across * tiles_down;
+        if tile_offsets.len() != tiles_per_plane * spp {
+            return Err(Error::invalid(format!(
+                "TIFF/JPEG: PlanarConfiguration=2 expects {} tile entries \
+                 (SamplesPerPixel={spp} × TilesPerImage={tiles_per_plane}), got {}",
+                tiles_per_plane * spp,
+                tile_offsets.len()
+            )));
+        }
+        for (c, &(sh, sv)) in comp_factors.iter().enumerate() {
+            let (pw, ph) = comp_dims[c];
+            let seg_w = tile_w as usize / sh;
+            let seg_h = tile_h as usize / sv;
+            for ty in 0..tiles_down {
+                for tx in 0..tiles_across {
+                    let idx = c * tiles_per_plane + ty * tiles_across + tx;
+                    let off = tile_offsets[idx] as usize;
+                    let bc = tile_byte_counts[idx] as usize;
+                    let end = off
+                        .checked_add(bc)
+                        .ok_or_else(|| Error::invalid("TIFF/JPEG: tile length overflow"))?;
+                    if end > input.len() {
+                        return Err(Error::invalid("TIFF/JPEG: tile extends past EOF"));
+                    }
+                    let seg = crate::jpeg::decode_segment(
+                        tables,
+                        &input[off..end],
+                        seg_w as u32,
+                        seg_h as u32,
+                        PHOTO_BLACK_IS_ZERO,
+                        bps_first,
+                    )?;
+                    blit_gray_segment_into(
+                        &seg,
+                        &mut comp_planes[c],
+                        pw,
+                        ph,
+                        tx * seg_w,
+                        ty * seg_h,
+                        bps_first,
+                    )?;
+                }
+            }
+        }
+    } else {
+        let rows_per_strip = find(entries, TAG_ROWS_PER_STRIP)
+            .map(|e| e.as_u32(bo))
+            .transpose()?
+            .unwrap_or(height)
+            .min(height);
+        if rows_per_strip == 0 {
+            return Err(Error::invalid("TIFF: RowsPerStrip=0"));
+        }
+        // §21 (amended): "RowsPerStrip is required to be an integer
+        // multiple of ChromaSubSampleVert (unless RowsPerStrip >=
+        // ImageLength, in which case its exact value is unimportant)."
+        if rows_per_strip < height && rows_per_strip as usize % sub_v != 0 {
+            return Err(Error::invalid(format!(
+                "TIFF/JPEG: planar YCbCr RowsPerStrip ({rows_per_strip}) must be an \
+                 integer multiple of YCbCrSubsampleVert ({sub_v}) — TIFF 6.0 §21 \
+                 (as amended by TN2)"
+            )));
+        }
+        let strip_offsets = find(entries, TAG_STRIP_OFFSETS)
+            .ok_or_else(|| Error::invalid("TIFF: missing StripOffsets"))?
+            .as_u64_vec(bo)?;
+        let strip_byte_counts = find(entries, TAG_STRIP_BYTE_COUNTS)
+            .ok_or_else(|| Error::invalid("TIFF: missing StripByteCounts"))?
+            .as_u64_vec(bo)?;
+        if strip_offsets.len() != strip_byte_counts.len() {
+            return Err(Error::invalid(
+                "TIFF: StripOffsets / StripByteCounts length mismatch",
+            ));
+        }
+        let strips_per_image = (height as u64).div_ceil(rows_per_strip as u64) as usize;
+        if strip_offsets.len() != strips_per_image * spp {
+            return Err(Error::invalid(format!(
+                "TIFF/JPEG: PlanarConfiguration=2 expects {} strip entries \
+                 (SamplesPerPixel={spp} × StripsPerImage={strips_per_image}), got {}",
+                strips_per_image * spp,
+                strip_offsets.len()
+            )));
+        }
+        for (c, &(sh, sv)) in comp_factors.iter().enumerate() {
+            let _ = sh;
+            let (pw, ph) = comp_dims[c];
+            let mut luma_rows_done: u32 = 0;
+            let mut plane_rows_done: usize = 0;
+            for s in 0..strips_per_image {
+                let idx = c * strips_per_image + s;
+                let off = strip_offsets[idx] as usize;
+                let bc = strip_byte_counts[idx] as usize;
+                let end = off
+                    .checked_add(bc)
+                    .ok_or_else(|| Error::invalid("TIFF/JPEG: strip length overflow"))?;
+                if end > input.len() {
+                    return Err(Error::invalid("TIFF/JPEG: strip extends past EOF"));
+                }
+                let luma_rows_this = rows_per_strip.min(height - luma_rows_done);
+                // TN2: "the computed dimensions may need to be
+                // rounded up to the next integer" — only the last
+                // strip can hit the rounding (RowsPerStrip is a
+                // multiple of sv).
+                let seg_h = (luma_rows_this as usize).div_ceil(sv);
+                let seg = crate::jpeg::decode_segment(
+                    tables,
+                    &input[off..end],
+                    pw as u32,
+                    seg_h as u32,
+                    PHOTO_BLACK_IS_ZERO,
+                    bps_first,
+                )?;
+                blit_gray_segment_into(
+                    &seg,
+                    &mut comp_planes[c],
+                    pw,
+                    ph,
+                    0,
+                    plane_rows_done,
+                    bps_first,
+                )?;
+                luma_rows_done += luma_rows_this;
+                plane_rows_done += seg_h;
+                if luma_rows_done >= height {
+                    break;
+                }
+            }
+            if luma_rows_done < height {
+                return Err(Error::invalid(format!(
+                    "TIFF/JPEG: plane-{c} strips did not cover the full image"
+                )));
+            }
+        }
+    }
+
+    // Compose the per-component raw planes into the display image.
+    compose_planar_jpeg(
+        &comp_planes,
+        &comp_dims,
+        &comp_factors,
+        width,
+        height,
+        photometric,
+        bps_first,
+    )
+}
+
+/// Blit the (single) grayscale plane of a decoded planar JPEG segment
+/// into a component plane of raw u16 code values, clipping to the
+/// plane bounds (right / bottom edge tiles).
+#[cfg(feature = "registry")]
+fn blit_gray_segment_into(
+    seg: &crate::jpeg::JpegSegment,
+    plane: &mut [u16],
+    plane_w: usize,
+    plane_h: usize,
+    dst_x: usize,
+    dst_y: usize,
+    bps: u16,
+) -> Result<()> {
+    if seg.pixel_format != crate::jpeg::JpegPixelFormat::Gray8 {
+        return Err(Error::invalid(format!(
+            "TIFF/JPEG: PlanarConfiguration=2 segment is not single-channel \
+             (got {:?}; TN2 requires each planar segment to be a valid \
+             single-channel JPEG datastream)",
+            seg.pixel_format
+        )));
+    }
+    let p = &seg.planes[0];
+    let visible_w = (plane_w.saturating_sub(dst_x)).min(seg.width as usize);
+    let visible_h = (plane_h.saturating_sub(dst_y)).min(seg.height as usize);
+    for y in 0..visible_h {
+        let dst_row = (dst_y + y) * plane_w + dst_x;
+        if bps > 8 {
+            for x in 0..visible_w {
+                let off = y * p.stride + x * 2;
+                plane[dst_row + x] = u16::from_le_bytes([p.data[off], p.data[off + 1]]);
+            }
+        } else {
+            for x in 0..visible_w {
+                plane[dst_row + x] = p.data[y * p.stride + x] as u16;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Compose decoded per-component raw planes (PlanarConfiguration = 2
+/// JPEG) into the final display image: YCbCr replicates each chroma
+/// sample over its `sh × sv` luma block (the same §21 policy the
+/// chunky data-unit walker applies) and matrixes through BT.601; RGB
+/// interleaves; CMYK (8-bit) converts through the §16 additive-RGB
+/// formula.
+#[cfg(feature = "registry")]
+fn compose_planar_jpeg(
+    comp_planes: &[Vec<u16>],
+    comp_dims: &[(usize, usize)],
+    comp_factors: &[(usize, usize)],
+    width: u32,
+    height: u32,
+    photometric: u16,
+    bps: u16,
+) -> Result<TiffImage> {
+    use crate::jpeg::{widen_to_16, ycbcr_to_rgb_raw};
+    let w = width as usize;
+    let h = height as usize;
+    let deep = bps > 8;
+    match photometric {
+        PHOTO_YCBCR => {
+            let (cw, _) = comp_dims[1];
+            let (sh, sv) = comp_factors[1];
+            if deep {
+                let stride = w * 6;
+                let mut dst = vec![0u8; stride * h];
+                for y in 0..h {
+                    for x in 0..w {
+                        let ci = (y / sv) * cw + (x / sh);
+                        let (r, g, b) = ycbcr_to_rgb_raw(
+                            comp_planes[0][y * w + x],
+                            comp_planes[1][ci],
+                            comp_planes[2][ci],
+                            bps,
+                        );
+                        let off = y * stride + x * 6;
+                        dst[off..off + 2].copy_from_slice(&widen_to_16(r, bps).to_le_bytes());
+                        dst[off + 2..off + 4].copy_from_slice(&widen_to_16(g, bps).to_le_bytes());
+                        dst[off + 4..off + 6].copy_from_slice(&widen_to_16(b, bps).to_le_bytes());
+                    }
+                }
+                Ok(TiffImage {
+                    width,
+                    height,
+                    pixel_format: TiffPixelFormat::Rgb48Le,
+                    planes: vec![TiffPlane { stride, data: dst }],
+                })
+            } else {
+                let stride = w * 3;
+                let mut dst = vec![0u8; stride * h];
+                for y in 0..h {
+                    for x in 0..w {
+                        let ci = (y / sv) * cw + (x / sh);
+                        let (r, g, b) = ycbcr_to_rgb_raw(
+                            comp_planes[0][y * w + x],
+                            comp_planes[1][ci],
+                            comp_planes[2][ci],
+                            8,
+                        );
+                        let off = y * stride + x * 3;
+                        dst[off] = r as u8;
+                        dst[off + 1] = g as u8;
+                        dst[off + 2] = b as u8;
+                    }
+                }
+                Ok(TiffImage {
+                    width,
+                    height,
+                    pixel_format: TiffPixelFormat::Rgb24,
+                    planes: vec![TiffPlane { stride, data: dst }],
+                })
+            }
+        }
+        PHOTO_RGB => {
+            if deep {
+                let stride = w * 6;
+                let mut dst = vec![0u8; stride * h];
+                for y in 0..h {
+                    for x in 0..w {
+                        let off = y * stride + x * 6;
+                        for c in 0..3 {
+                            let v = widen_to_16(comp_planes[c][y * w + x], bps);
+                            dst[off + c * 2..off + c * 2 + 2].copy_from_slice(&v.to_le_bytes());
+                        }
+                    }
+                }
+                Ok(TiffImage {
+                    width,
+                    height,
+                    pixel_format: TiffPixelFormat::Rgb48Le,
+                    planes: vec![TiffPlane { stride, data: dst }],
+                })
+            } else {
+                let stride = w * 3;
+                let mut dst = vec![0u8; stride * h];
+                for y in 0..h {
+                    for x in 0..w {
+                        let off = y * stride + x * 3;
+                        for c in 0..3 {
+                            dst[off + c] = comp_planes[c][y * w + x] as u8;
+                        }
+                    }
+                }
+                Ok(TiffImage {
+                    width,
+                    height,
+                    pixel_format: TiffPixelFormat::Rgb24,
+                    planes: vec![TiffPlane { stride, data: dst }],
+                })
+            }
+        }
+        PHOTO_CMYK => {
+            // 8-bit only (deep CMYK rejected upstream). §16 InkSet=1
+            // additive conversion, identical to the chunky CMYK path.
+            let stride = w * 3;
+            let mut dst = vec![0u8; stride * h];
+            for y in 0..h {
+                for x in 0..w {
+                    let i = y * w + x;
+                    let c = comp_planes[0][i] as u32;
+                    let m = comp_planes[1][i] as u32;
+                    let yy = comp_planes[2][i] as u32;
+                    let k = comp_planes[3][i] as u32;
+                    let off = y * stride + x * 3;
+                    dst[off] = ((255 - c) * (255 - k) / 255) as u8;
+                    dst[off + 1] = ((255 - m) * (255 - k) / 255) as u8;
+                    dst[off + 2] = ((255 - yy) * (255 - k) / 255) as u8;
+                }
+            }
+            Ok(TiffImage {
+                width,
+                height,
+                pixel_format: TiffPixelFormat::Rgb24,
+                planes: vec![TiffPlane { stride, data: dst }],
+            })
+        }
+        _ => unreachable!("photometric vetted by caller"),
+    }
 }
 
 // ---------------------------------------------------------------------------
