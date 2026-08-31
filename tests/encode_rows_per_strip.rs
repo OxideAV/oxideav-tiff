@@ -174,8 +174,11 @@ fn bilevel_ccitt_multi_strip() {
         },
         TiffCompression::CcittT4TwoD {
             eol_byte_aligned: false,
+            uncompressed: false,
         },
-        TiffCompression::CcittT6,
+        TiffCompression::CcittT6 {
+            uncompressed: false,
+        },
         TiffCompression::PackBits,
     ] {
         let kind = EncodePixelFormat::Bilevel { pixels: &px };

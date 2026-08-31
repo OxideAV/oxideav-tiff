@@ -814,12 +814,22 @@ pub fn reverse_bits_in_place(buf: &mut [u8]) {
 /// canonical MSB-first stream then optionally reverses bytes in place
 /// — matching exactly what the decoder's `FillOrder` normalisation
 /// undoes on the read side.
+/// `uncompressed` opts in to the optional *uncompressed mode*
+/// extension (Table 5/T.4 = Table 4/T.6) on the 2-D coded rows of the
+/// `T4TwoD` / `T6` variants: each 2-D row is encoded both ways and
+/// the cheaper form is emitted, so pathological (e.g. finely
+/// dithered) rows fall back to literal pixel transmission — the
+/// bit-rate control role the extension was defined for. The caller
+/// must advertise the extension via `T4Options` bit 1 /
+/// `T6Options` bit 1 when enabling it. Ignored for the 1-D variants
+/// (the entrance code is a 2-D mode extension).
 pub fn encode_ccitt(
     input: &[u8],
     width: u32,
     rows: u32,
     variant: CcittVariant,
     fill: FillOrder,
+    uncompressed: bool,
 ) -> Result<Vec<u8>> {
     let row_bytes = (width as usize).div_ceil(8);
     let need = row_bytes * rows as usize;
@@ -885,7 +895,26 @@ pub fn encode_ccitt(
         }
 
         if row_is_two_d {
-            encode_two_d_row(&mut bw, &reference, row, width as usize);
+            if uncompressed {
+                // Opt-in uncompressed mode: encode the row both ways
+                // into scratch writers and commit the cheaper one.
+                // The uncompressed form is entrance + literal
+                // patterns + exit; the coded form is the ordinary
+                // READ row. (The whole row is one segment; the exit
+                // tag is a don't-care at the row boundary — white
+                // keeps the next row's a0 colour convention.)
+                let mut coded = BitWriter::new();
+                encode_two_d_row(&mut coded, &reference, row, width as usize);
+                let mut literal = BitWriter::new();
+                encode_uncompressed_segment(&mut literal, row, 0, width as usize, false);
+                if literal.bit_count < coded.bit_count {
+                    bw.append(&literal);
+                } else {
+                    bw.append(&coded);
+                }
+            } else {
+                encode_two_d_row(&mut bw, &reference, row, width as usize);
+            }
         } else {
             // 1-D row (MH-style runs). White-first per §10; a row
             // beginning with black emits a zero-length white run.
@@ -1016,11 +1045,10 @@ fn encode_two_d_row(bw: &mut BitWriter, reference: &[u8], row: &[u8], width: usi
 /// resumes coded (Pass/H/V) mode at `end`.
 ///
 /// This is the exact dual of [`decode_uncompressed_segment`]. The
-/// production READ encoder ([`encode_two_d_row`]) never selects
-/// uncompressed mode (it is an optional bit-rate-control extension,
-/// not a compression win for facsimile content), so this helper exists
-/// to drive the spec-exact self-roundtrip tests that prove the decode
-/// path against bytes our own writer would otherwise never emit.
+/// production encoder selects it per-row (cheapest form wins) when
+/// the caller opts in via [`encode_ccitt`]'s `uncompressed` flag —
+/// the optional bit-rate-control role T.4 §4.2.1.6 / T.6 §2.3 define
+/// for the extension.
 ///
 /// Pattern emission walks `[a0, end)` run by run. A white run of `w`
 /// pixels followed by a black pixel is `floor(w/5)` make-up codes
@@ -1030,7 +1058,6 @@ fn encode_two_d_row(bw: &mut BitWriter, reference: &[u8], row: &[u8], width: usi
 /// count of 0). The final trailing white run before `end` (which has
 /// no black terminator) is folded into the exit code's `m` value
 /// (0..=4 trailing whites) plus any whole-5 make-ups ahead of it.
-#[cfg(test)]
 fn encode_uncompressed_segment(
     bw: &mut BitWriter,
     row: &[u8],
@@ -1092,7 +1119,6 @@ fn encode_uncompressed_segment(
 /// Emit an uncompressed-mode exit code carrying `m` trailing white
 /// pixels (`m` in `0..=4`) and the tag bit. Exit codes are
 /// `0000001T` … `00000000001T`: `6 + m` zeros, a `1`, then the tag.
-#[cfg(test)]
 fn emit_uncompressed_exit(bw: &mut BitWriter, m: usize, next_run_black: bool) {
     debug_assert!(m <= 4, "exit-code trailing-white count must be 0..=4");
     // (6 + m) zero bits then a 1: that is the value `1` in (6 + m + 1)
@@ -1215,6 +1241,15 @@ impl BitWriter {
         let rem = self.bit_count % 8;
         if rem != 0 {
             self.bit_count += 8 - rem;
+        }
+    }
+    /// Append every bit of `other` (bit-exact, no alignment). Used by
+    /// the per-row coded-vs-uncompressed selector, which encodes a row
+    /// into a scratch writer before committing the cheaper form.
+    fn append(&mut self, other: &BitWriter) {
+        for i in 0..other.bit_count {
+            let bit = (other.buf[i / 8] >> (7 - (i % 8))) & 1;
+            self.write(bit as u32, 1);
         }
     }
     fn finish(mut self) -> Vec<u8> {
@@ -1811,7 +1846,8 @@ mod tests {
 
     fn ccitt_roundtrip(pixels: &[u8], width: u32, rows: u32, variant: CcittVariant) {
         let packed = pack_row_msb(pixels);
-        let encoded = encode_ccitt(&packed, width, rows, variant, FillOrder::MsbFirst).unwrap();
+        let encoded =
+            encode_ccitt(&packed, width, rows, variant, FillOrder::MsbFirst, false).unwrap();
         let decoded = decode_ccitt(&encoded, width, rows, variant, FillOrder::MsbFirst).unwrap();
         assert_eq!(packed, decoded, "round-trip mismatch (variant={variant:?})");
         // Sanity: cross-check the pixel-level expansion too.
@@ -1888,6 +1924,7 @@ mod tests {
                 eol_byte_aligned: false,
             },
             FillOrder::MsbFirst,
+            false,
         )
         .unwrap();
         // The first 12 bits must be 0b0000_0000_0001. Packed
@@ -1945,6 +1982,7 @@ mod tests {
             1,
             CcittVariant::ModifiedHuffman,
             FillOrder::MsbFirst,
+            false,
         )
         .unwrap();
         let lsb_stream = encode_ccitt(
@@ -1953,6 +1991,7 @@ mod tests {
             1,
             CcittVariant::ModifiedHuffman,
             FillOrder::LsbFirst,
+            false,
         )
         .unwrap();
         let lsb_expected: Vec<u8> = msb_stream.iter().map(|&b| b.reverse_bits()).collect();
@@ -1978,6 +2017,7 @@ mod tests {
             2,
             CcittVariant::ModifiedHuffman,
             FillOrder::MsbFirst,
+            false,
         );
         assert!(r.is_err());
     }
@@ -2156,8 +2196,8 @@ mod tests {
         let variant = CcittVariant::T4TwoD {
             eol_byte_aligned: false,
         };
-        let msb_stream = encode_ccitt(&packed, 16, 2, variant, FillOrder::MsbFirst).unwrap();
-        let lsb_stream = encode_ccitt(&packed, 16, 2, variant, FillOrder::LsbFirst).unwrap();
+        let msb_stream = encode_ccitt(&packed, 16, 2, variant, FillOrder::MsbFirst, false).unwrap();
+        let lsb_stream = encode_ccitt(&packed, 16, 2, variant, FillOrder::LsbFirst, false).unwrap();
         let lsb_expected: Vec<u8> = msb_stream.iter().map(|&b| b.reverse_bits()).collect();
         assert_eq!(lsb_stream, lsb_expected);
         let decoded = decode_ccitt(&lsb_stream, 16, 2, variant, FillOrder::LsbFirst).unwrap();

@@ -1321,6 +1321,7 @@ fn encoder_ccitt_t4_2d_decodes_via_tiffcp_to_uncompressed() {
         kind: EncodePixelFormat::Bilevel { pixels: &packed },
         compression: TiffCompression::CcittT4TwoD {
             eol_byte_aligned: false,
+            uncompressed: false,
         },
         predictor: false,
         planar: false,
@@ -1375,7 +1376,9 @@ fn encoder_ccitt_t6_decodes_via_tiffcp_to_uncompressed() {
         width: 64,
         height: 8,
         kind: EncodePixelFormat::Bilevel { pixels: &packed },
-        compression: TiffCompression::CcittT6,
+        compression: TiffCompression::CcittT6 {
+            uncompressed: false,
+        },
         predictor: false,
         planar: false,
         tiling: None,
@@ -1426,6 +1429,7 @@ fn encoder_ccitt_t4_2d_tiffinfo_reports_2d_coding() {
         kind: EncodePixelFormat::Bilevel { pixels: &packed },
         compression: TiffCompression::CcittT4TwoD {
             eol_byte_aligned: false,
+            uncompressed: false,
         },
         predictor: false,
         planar: false,
@@ -1457,7 +1461,9 @@ fn encoder_ccitt_t6_tiffinfo_reports_group4() {
         width: 32,
         height: 8,
         kind: EncodePixelFormat::Bilevel { pixels: &packed },
-        compression: TiffCompression::CcittT6,
+        compression: TiffCompression::CcittT6 {
+            uncompressed: false,
+        },
         predictor: false,
         planar: false,
         tiling: None,

@@ -409,7 +409,9 @@ fn payloads_compose_with_ccitt_bilevel_page() {
         width: 8,
         height: 8,
         kind: EncodePixelFormat::Bilevel { pixels: &px },
-        compression: TiffCompression::CcittT6,
+        compression: TiffCompression::CcittT6 {
+            uncompressed: false,
+        },
         predictor: false,
         planar: false,
         tiling: None,

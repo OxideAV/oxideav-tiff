@@ -818,16 +818,30 @@ pub enum TiffCompression {
     /// row using the Pass / Horizontal / Vertical mode codes from
     /// Table 4/T.4 (docs §1). `eol_byte_aligned` mirrors T4Options
     /// bit 2 just as in [`TiffCompression::CcittT4OneD`].
+    /// `uncompressed` opts in to the optional T.4 *uncompressed
+    /// mode* extension (Table 5/T.4) on the 2-D coded rows: each row
+    /// is encoded both ways and the cheaper form is emitted, so
+    /// finely dithered rows fall back to literal pixel transmission
+    /// (the bit-rate-control role the extension was defined for).
+    /// Advertised in the file via `T4Options` bit 1 ("uncompressed
+    /// data mode is allowed", TIFF 6.0 §11).
     CcittT4TwoD {
         eol_byte_aligned: bool,
+        uncompressed: bool,
     },
     /// Compression=4 — CCITT T.6 / Modified Modified READ (MMR)
     /// (TIFF 6.0 §11). Bilevel only. Every row is 2-D against the
     /// previously coded row; the first row's reference is an
     /// imaginary all-white line per T.6 §2.2.1. No EOL framing
     /// between rows. The decoder stops at `rows` rows so no EOFB
-    /// sentinel is written.
-    CcittT6,
+    /// sentinel is written. `uncompressed` opts in to the optional
+    /// T.6 *uncompressed mode* extension (T.6 §2.3, Table 4/T.6) on
+    /// the coded rows, exactly as for
+    /// [`TiffCompression::CcittT4TwoD`]; advertised via `T6Options`
+    /// bit 1 ("uncompressed data mode is allowed", TIFF 6.0 §11).
+    CcittT6 {
+        uncompressed: bool,
+    },
 }
 
 impl TiffCompression {
@@ -845,7 +859,7 @@ impl TiffCompression {
             TiffCompression::CcittT4OneD { .. } | TiffCompression::CcittT4TwoD { .. } => {
                 COMPRESSION_CCITT_T4
             }
-            TiffCompression::CcittT6 => COMPRESSION_CCITT_T6,
+            TiffCompression::CcittT6 { .. } => COMPRESSION_CCITT_T6,
         }
     }
 
@@ -872,6 +886,7 @@ impl TiffCompression {
                 rows,
                 CcittVariant::ModifiedHuffman,
                 FillOrder::MsbFirst,
+                false,
             ),
             TiffCompression::CcittT4OneD { eol_byte_aligned } => encode_ccitt(
                 raw,
@@ -879,17 +894,27 @@ impl TiffCompression {
                 rows,
                 CcittVariant::T4OneD { eol_byte_aligned },
                 FillOrder::MsbFirst,
+                false,
             ),
-            TiffCompression::CcittT4TwoD { eol_byte_aligned } => encode_ccitt(
+            TiffCompression::CcittT4TwoD {
+                eol_byte_aligned,
+                uncompressed,
+            } => encode_ccitt(
                 raw,
                 width,
                 rows,
                 CcittVariant::T4TwoD { eol_byte_aligned },
                 FillOrder::MsbFirst,
+                uncompressed,
             ),
-            TiffCompression::CcittT6 => {
-                encode_ccitt(raw, width, rows, CcittVariant::T6, FillOrder::MsbFirst)
-            }
+            TiffCompression::CcittT6 { uncompressed } => encode_ccitt(
+                raw,
+                width,
+                rows,
+                CcittVariant::T6,
+                FillOrder::MsbFirst,
+                uncompressed,
+            ),
         }
     }
 
@@ -900,7 +925,7 @@ impl TiffCompression {
             TiffCompression::CcittRle
                 | TiffCompression::CcittT4OneD { .. }
                 | TiffCompression::CcittT4TwoD { .. }
-                | TiffCompression::CcittT6
+                | TiffCompression::CcittT6 { .. }
         )
     }
 }
@@ -2682,9 +2707,9 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
     }
     // 292 T4Options (LONG) — only for Compression=3. Bit 0 (2D
     // coding, T4OPT_2D_CODING) is set for the T.4 2-D variant per
-    // TIFF 6.0 §11; bit 1 (uncompressed mode) is always clear
-    // (uncompressed mode is unsupported on both sides of the codec);
-    // bit 2 (EOL byte-aligned) is set per the variant flag.
+    // TIFF 6.0 §11; bit 1 (uncompressed mode allowed) reflects the
+    // variant's opt-in `uncompressed` flag; bit 2 (EOL byte-aligned)
+    // is set per the variant flag.
     match p.compression {
         TiffCompression::CcittT4OneD { eol_byte_aligned } => {
             let mut flags: u32 = 0;
@@ -2698,10 +2723,18 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 value: IfdValue::Inline(flags.to_le_bytes().to_vec()),
             });
         }
-        TiffCompression::CcittT4TwoD { eol_byte_aligned } => {
+        TiffCompression::CcittT4TwoD {
+            eol_byte_aligned,
+            uncompressed,
+        } => {
             let mut flags: u32 = T4OPT_2D_CODING;
             if eol_byte_aligned {
                 flags |= T4OPT_EOL_BYTE_ALIGNED;
+            }
+            // §11 T4Options bit 1: "uncompressed data mode is
+            // allowed" — set when the opt-in emission is enabled.
+            if uncompressed {
+                flags |= T4OPT_UNCOMPRESSED;
             }
             entries.push(PageIfdEntry {
                 tag: TAG_T4_OPTIONS,
@@ -2710,16 +2743,17 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 value: IfdValue::Inline(flags.to_le_bytes().to_vec()),
             });
         }
-        TiffCompression::CcittT6 => {
+        TiffCompression::CcittT6 { uncompressed } => {
             // 293 T6Options (LONG). Per §11, bit 0 is reserved and
             // bit 1 ("uncompressed mode allowed") is the only
-            // defined option flag; we never emit T.6 uncompressed
-            // extensions so the field is all zeros.
+            // defined option flag — set when the opt-in emission is
+            // enabled.
+            let flags: u32 = if uncompressed { T6OPT_UNCOMPRESSED } else { 0 };
             entries.push(PageIfdEntry {
                 tag: TAG_T6_OPTIONS,
                 field_type: TYPE_LONG,
                 count: 1,
-                value: IfdValue::Inline(0u32.to_le_bytes().to_vec()),
+                value: IfdValue::Inline(flags.to_le_bytes().to_vec()),
             });
         }
         _ => {}

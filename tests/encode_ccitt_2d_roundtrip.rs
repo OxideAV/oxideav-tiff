@@ -106,6 +106,7 @@ fn t4_2d_solid_white_16x8() {
         &bytes,
         TiffCompression::CcittT4TwoD {
             eol_byte_aligned: false,
+            uncompressed: false,
         },
     );
 }
@@ -121,6 +122,7 @@ fn t4_2d_solid_black_16x8() {
         &bytes,
         TiffCompression::CcittT4TwoD {
             eol_byte_aligned: false,
+            uncompressed: false,
         },
     );
 }
@@ -141,6 +143,7 @@ fn t4_2d_two_rectangles_64x8() {
         &bytes,
         TiffCompression::CcittT4TwoD {
             eol_byte_aligned: false,
+            uncompressed: false,
         },
     );
 }
@@ -157,6 +160,7 @@ fn t4_2d_diagonal_32x32() {
         &bytes,
         TiffCompression::CcittT4TwoD {
             eol_byte_aligned: false,
+            uncompressed: false,
         },
     );
 }
@@ -172,6 +176,7 @@ fn t4_2d_byte_aligned_eol_16x4() {
         &bytes,
         TiffCompression::CcittT4TwoD {
             eol_byte_aligned: true,
+            uncompressed: false,
         },
     );
 }
@@ -190,6 +195,7 @@ fn t4_2d_blackiszero_polarity_16x4_via_inverted_input() {
         &inverted,
         TiffCompression::CcittT4TwoD {
             eol_byte_aligned: false,
+            uncompressed: false,
         },
     );
     let file = encode_tiff(&page).expect("encode_tiff");
@@ -209,7 +215,14 @@ fn t6_solid_white_16x8() {
     // All-white image. T.6 emits a single V(0) per row from row 0
     // (reference is imaginary white).
     let (w, h, bytes) = make_bilevel(16, 8, |_, _| false);
-    roundtrip_assert(w, h, &bytes, TiffCompression::CcittT6);
+    roundtrip_assert(
+        w,
+        h,
+        &bytes,
+        TiffCompression::CcittT6 {
+            uncompressed: false,
+        },
+    );
 }
 
 #[test]
@@ -218,7 +231,14 @@ fn t6_solid_black_16x8() {
     // imaginary white) then rows 1..7 emit V(0) against the
     // all-black coding line.
     let (w, h, bytes) = make_bilevel(16, 8, |_, _| true);
-    roundtrip_assert(w, h, &bytes, TiffCompression::CcittT6);
+    roundtrip_assert(
+        w,
+        h,
+        &bytes,
+        TiffCompression::CcittT6 {
+            uncompressed: false,
+        },
+    );
 }
 
 #[test]
@@ -228,13 +248,27 @@ fn t6_two_rectangles_64x8() {
         let in_b = (40..=55).contains(&x) && (2..=4).contains(&y);
         in_a || in_b
     });
-    roundtrip_assert(w, h, &bytes, TiffCompression::CcittT6);
+    roundtrip_assert(
+        w,
+        h,
+        &bytes,
+        TiffCompression::CcittT6 {
+            uncompressed: false,
+        },
+    );
 }
 
 #[test]
 fn t6_diagonal_32x32() {
     let (w, h, bytes) = make_bilevel(32, 32, |x, y| x == y);
-    roundtrip_assert(w, h, &bytes, TiffCompression::CcittT6);
+    roundtrip_assert(
+        w,
+        h,
+        &bytes,
+        TiffCompression::CcittT6 {
+            uncompressed: false,
+        },
+    );
 }
 
 #[test]
@@ -242,7 +276,14 @@ fn t6_wide_pattern_128x4() {
     // Width > 64 forces a make-up code inside any Horizontal-mode
     // emission on row 0 (against imaginary white).
     let (w, h, bytes) = make_bilevel(128, 4, |x, _| x < 100);
-    roundtrip_assert(w, h, &bytes, TiffCompression::CcittT6);
+    roundtrip_assert(
+        w,
+        h,
+        &bytes,
+        TiffCompression::CcittT6 {
+            uncompressed: false,
+        },
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -260,6 +301,7 @@ fn t4_2d_rejects_non_bilevel_input() {
         kind: EncodePixelFormat::Gray8 { pixels: &[0u8; 16] },
         compression: TiffCompression::CcittT4TwoD {
             eol_byte_aligned: false,
+            uncompressed: false,
         },
         predictor: false,
         planar: false,
@@ -276,7 +318,9 @@ fn t6_rejects_non_bilevel_input() {
         width: 4,
         height: 4,
         kind: EncodePixelFormat::Gray8 { pixels: &[0u8; 16] },
-        compression: TiffCompression::CcittT6,
+        compression: TiffCompression::CcittT6 {
+            uncompressed: false,
+        },
         predictor: false,
         planar: false,
         tiling: None,

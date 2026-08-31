@@ -404,7 +404,15 @@ fn rejects_chunky_predictor_tiled_planar_and_ccitt() {
     };
     assert!(encode_tiff(&base(TiffCompression::None, true, false, None)).is_err());
     assert!(encode_tiff(&base(TiffCompression::None, false, true, Some((16, 16)))).is_err());
-    assert!(encode_tiff(&base(TiffCompression::CcittT6, false, false, None)).is_err());
+    assert!(encode_tiff(&base(
+        TiffCompression::CcittT6 {
+            uncompressed: false
+        },
+        false,
+        false,
+        None
+    ))
+    .is_err());
     // Planar *strips* now encode.
     assert!(encode_tiff(&base(TiffCompression::None, false, true, None)).is_ok());
     // A tile geometry that is not a multiple of the subsampling factors
