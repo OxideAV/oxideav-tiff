@@ -803,9 +803,15 @@ fn expect_err(tiff: &[u8], needle: &str) -> TiffError {
 }
 
 /// §22 tables-form baseline layout (all three table fields present,
-/// entropy-coded strips, no interchange stream) → precise Unsupported.
+/// entropy-coded strips, no interchange stream): the layout now
+/// decodes via T.81 Annex B marker synthesis (see
+/// `tests/decode_oldstyle_tables_form.rs` for the positive round
+/// trips), so a well-formed field set must never produce the old
+/// blanket layout rejection — with these junk table payloads the
+/// failure comes from the payload validation / JPEG codec (registry
+/// builds) or the registry-feature stub (standalone builds).
 #[test]
-fn reject_tables_form_baseline() {
+fn tables_form_baseline_passes_layout_gate() {
     let cfg = Cfg {
         jif: false,
         extra_long: vec![
@@ -816,8 +822,17 @@ fn reject_tables_form_baseline() {
         ..Cfg::gray(COMPRESSION_JPEG_OLD)
     };
     let tiff = build_jpeg_tiff(&cfg, &fake_jif());
-    let e = expect_err(&tiff, "tables-form");
-    assert!(matches!(e, TiffError::Unsupported(_)), "{e:?}");
+    let e = match decode_tiff(&tiff) {
+        Ok(_) => panic!("junk table payloads must not decode"),
+        Err(e) => e,
+    };
+    let msg = format!("{e:?}");
+    assert!(
+        !msg.contains("not supported in this build"),
+        "well-formed tables-form must pass the layout gate, got {msg}"
+    );
+    #[cfg(not(feature = "registry"))]
+    assert!(msg.contains("registry"), "{msg}");
 }
 
 /// Baseline tables-form with a *missing* mandatory table field →
@@ -834,9 +849,11 @@ fn reject_tables_form_missing_ac_tables() {
     expect_err(&tiff, "JPEGACTables");
 }
 
-/// Lossless (JPEGProc=14) tables-form → precise Unsupported.
+/// Lossless (JPEGProc=14) tables-form: same premise update as the
+/// baseline case — the well-formed field set passes the layout gate
+/// and fails only on the junk payloads / registry stub.
 #[test]
-fn reject_tables_form_lossless() {
+fn tables_form_lossless_passes_layout_gate() {
     let cfg = Cfg {
         jif: false,
         proc: Some(JPEG_PROC_LOSSLESS),
@@ -845,8 +862,17 @@ fn reject_tables_form_lossless() {
         ..Cfg::gray(COMPRESSION_JPEG_OLD)
     };
     let tiff = build_jpeg_tiff(&cfg, &fake_jif());
-    let e = expect_err(&tiff, "lossless");
-    assert!(matches!(e, TiffError::Unsupported(_)), "{e:?}");
+    let e = match decode_tiff(&tiff) {
+        Ok(_) => panic!("junk table payloads must not decode"),
+        Err(e) => e,
+    };
+    let msg = format!("{e:?}");
+    assert!(
+        !msg.contains("not supported in this build"),
+        "well-formed lossless tables-form must pass the layout gate, got {msg}"
+    );
+    #[cfg(not(feature = "registry"))]
+    assert!(msg.contains("registry"), "{msg}");
 }
 
 /// Lossless without its mandatory JPEGLosslessPredictors → invalid.

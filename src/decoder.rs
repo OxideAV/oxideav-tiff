@@ -4041,12 +4041,22 @@ fn decode_ifd_jpeg_old(
 ) -> Result<TiffImage> {
     let fields = crate::jpeg_old::parse_old_jpeg_fields(entries, bo, samples_per_pixel)?;
 
-    // Locate the interchange-format bitstream first: an IFD with no
-    // JPEG bitstream at all (the tables-form layout, or a bare
-    // Compression=6 with no §22 fields) gets its precise layout error
-    // ahead of the photometric / bit-depth gates below.
+    // Locate the interchange-format bitstream first: without one the
+    // IFD is in the §22 tables-form layout (raw table payloads +
+    // entropy-coded strips), which decodes through the T.81 Annex B
+    // marker synthesis below.
     let Some(stream) = fields.interchange_stream(input)? else {
-        return Err(fields.tables_form_error());
+        return decode_ifd_jpeg_old_tables_form(
+            input,
+            entries,
+            bo,
+            width,
+            height,
+            samples_per_pixel,
+            bps_first,
+            photometric,
+            &fields,
+        );
     };
 
     // §22 "Overview of the JPEG Extension to TIFF": "JPEG is
@@ -4148,6 +4158,386 @@ fn decode_jpeg_old_interchange(
             data: dst,
         }],
     })
+}
+
+/// Decode a §22 tables-form IFD (`Compression = 6` without an
+/// interchange bitstream): per strip, wrap the raw §22 table payloads
+/// and the strip's entropy-coded data in the ISO 10918-1 / T.81
+/// Annex B marker syntax
+/// ([`crate::jpeg_old::OldJpegFields::synthesize_tables_form_stream`])
+/// and route the synthesized datastream through the same segment
+/// decode + composite machinery the Compression=7 path uses.
+///
+/// Layout notes:
+/// * §22 "Strips and Tiles" stores strips of entropy data ("points
+///   directly to the start of the entropy coded data"); the
+///   strip-oriented layout is what §22 writers produced, so the tiled
+///   tables-form stays a precise `Unsupported` error.
+/// * Chunky (`PlanarConfiguration = 1`): each strip is one
+///   interleaved frame of all components; for YCbCr the luma SOF
+///   sampling factors come from `YCbCrSubSampling` (§21 default
+///   `[2, 2]`), chroma 1×1.
+/// * Planar (`PlanarConfiguration = 2`, "one JPEG scan per
+///   component"): `SamplesPerPixel × StripsPerImage` strips,
+///   plane-major, each a single-component frame; subsampled chroma
+///   planes carry the reduced §21 "chroma image" geometry.
+#[cfg(feature = "registry")]
+#[allow(clippy::too_many_arguments)]
+fn decode_ifd_jpeg_old_tables_form(
+    input: &[u8],
+    entries: &[Entry],
+    bo: ByteOrder,
+    width: u32,
+    height: u32,
+    samples_per_pixel: u16,
+    bps_first: u16,
+    photometric: u16,
+    fields: &crate::jpeg_old::OldJpegFields,
+) -> Result<TiffImage> {
+    use crate::jpeg_old::TablesFormComponent;
+
+    // §22 continuous-tone photometric gate (same set as the
+    // interchange path).
+    match (photometric, samples_per_pixel) {
+        (PHOTO_BLACK_IS_ZERO, 1) | (PHOTO_WHITE_IS_ZERO, 1) => {}
+        (PHOTO_RGB, 3) | (PHOTO_YCBCR, 3) => {}
+        (PHOTO_CMYK, 4) => {}
+        (p, s) => {
+            return Err(Error::invalid(format!(
+                "TIFF/JPEG(§22): photometric={p} samples_per_pixel={s} is not a §22 \
+                 continuous-tone layout"
+            )));
+        }
+    }
+    // The synthesized SOFn carries P = 8: §22 baseline is 8-bit by
+    // definition and the deployed §22 lossless writers were 8-bit
+    // too. Deeper precisions never shipped in tables-form files;
+    // reject precisely rather than synthesize an unverifiable frame.
+    if bps_first != 8 {
+        return Err(Error::Unsupported(format!(
+            "TIFF/JPEG(§22): tables-form BitsPerSample={bps_first} (only 8-bit tables-form \
+             streams are synthesized)"
+        )));
+    }
+    if find(entries, TAG_TILE_WIDTH).is_some() {
+        return Err(Error::Unsupported(
+            "TIFF/JPEG(§22): tiled tables-form layout is not supported (§22 writers \
+             produced strip-oriented files); the strip layout decodes"
+                .into(),
+        ));
+    }
+    // Missing mandatory table fields surface through the established
+    // precise-error builder before any synthesis is attempted.
+    match fields.proc {
+        Some(JPEG_PROC_BASELINE) => {
+            if fields.q_tables.is_none() || fields.dc_tables.is_none() || fields.ac_tables.is_none()
+            {
+                return Err(fields.tables_form_error());
+            }
+        }
+        Some(_) => {
+            if fields.lossless_predictors.is_none() || fields.dc_tables.is_none() {
+                return Err(fields.tables_form_error());
+            }
+        }
+        None => return Err(fields.tables_form_error()),
+    }
+
+    let planar = find(entries, TAG_PLANAR_CONFIGURATION)
+        .map(|e| e.as_u32(bo))
+        .transpose()?
+        .unwrap_or(PLANAR_CHUNKY as u32) as u16;
+    let (sub_h, sub_v) = if photometric == PHOTO_YCBCR {
+        match find(entries, TAG_YCBCR_SUBSAMPLING) {
+            Some(e) => {
+                let v = e.as_u32_vec(bo)?;
+                if v.len() < 2 || v[0] == 0 || v[1] == 0 || v[0] > 4 || v[1] > 4 {
+                    return Err(Error::invalid("TIFF: malformed YCbCrSubSampling"));
+                }
+                (v[0] as usize, v[1] as usize)
+            }
+            None => (2, 2),
+        }
+    } else {
+        (1, 1)
+    };
+
+    let rows_per_strip = find(entries, TAG_ROWS_PER_STRIP)
+        .map(|e| e.as_u32(bo))
+        .transpose()?
+        .unwrap_or(height)
+        .min(height);
+    if rows_per_strip == 0 {
+        return Err(Error::invalid("TIFF: RowsPerStrip=0"));
+    }
+    let strip_offsets = find(entries, TAG_STRIP_OFFSETS)
+        .ok_or_else(|| Error::invalid("TIFF: missing StripOffsets"))?
+        .as_u64_vec(bo)?;
+    let strip_byte_counts = find(entries, TAG_STRIP_BYTE_COUNTS)
+        .ok_or_else(|| Error::invalid("TIFF: missing StripByteCounts"))?
+        .as_u64_vec(bo)?;
+    if strip_offsets.len() != strip_byte_counts.len() {
+        return Err(Error::invalid(
+            "TIFF: StripOffsets / StripByteCounts length mismatch",
+        ));
+    }
+    let strips_per_image = (height as u64).div_ceil(rows_per_strip as u64) as usize;
+    let strip_slice = |idx: usize| -> Result<&[u8]> {
+        let off = strip_offsets[idx] as usize;
+        let bc = strip_byte_counts[idx] as usize;
+        let end = off
+            .checked_add(bc)
+            .filter(|&e| e <= input.len())
+            .ok_or_else(|| Error::invalid("TIFF/JPEG(§22): strip extends past EOF"))?;
+        Ok(&input[off..end])
+    };
+    let dim16 = |v: usize, what: &str| -> Result<u16> {
+        u16::try_from(v).map_err(|_| {
+            Error::invalid(format!(
+                "TIFF/JPEG(§22): {what} {v} exceeds the 65535 SOF field limit"
+            ))
+        })
+    };
+
+    if planar == PLANAR_SEPARATE && samples_per_pixel > 1 {
+        // Planar tables-form: single-component frames, plane-major.
+        if strip_offsets.len() != strips_per_image * samples_per_pixel as usize {
+            return Err(Error::invalid(format!(
+                "TIFF/JPEG(§22): PlanarConfiguration=2 expects {} strip entries \
+                 (SamplesPerPixel={samples_per_pixel} × StripsPerImage={strips_per_image}), \
+                 got {}",
+                strips_per_image * samples_per_pixel as usize,
+                strip_offsets.len()
+            )));
+        }
+        if rows_per_strip < height && rows_per_strip as usize % sub_v != 0 {
+            return Err(Error::invalid(format!(
+                "TIFF/JPEG(§22): planar YCbCr RowsPerStrip ({rows_per_strip}) must be an \
+                 integer multiple of YCbCrSubsampleVert ({sub_v}) — TIFF 6.0 §21"
+            )));
+        }
+        let spp = samples_per_pixel as usize;
+        let comp_factors: Vec<(usize, usize)> = (0..spp)
+            .map(|c| {
+                if c == 1 || c == 2 {
+                    (sub_h, sub_v)
+                } else {
+                    (1, 1)
+                }
+            })
+            .collect();
+        let comp_factors: Vec<(usize, usize)> = if photometric == PHOTO_YCBCR {
+            comp_factors
+        } else {
+            vec![(1, 1); spp]
+        };
+        let mut comp_planes: Vec<Vec<u16>> = Vec::with_capacity(spp);
+        let mut comp_dims: Vec<(usize, usize)> = Vec::with_capacity(spp);
+        for &(sh, sv) in &comp_factors {
+            let pw = (width as usize).div_ceil(sh);
+            let ph = (height as usize).div_ceil(sv);
+            comp_planes.push(vec![0u16; pw * ph]);
+            comp_dims.push((pw, ph));
+        }
+        for (c, &(sh, sv)) in comp_factors.iter().enumerate() {
+            let _ = sh;
+            let (pw, ph) = comp_dims[c];
+            let mut luma_rows_done: u32 = 0;
+            let mut plane_rows_done: usize = 0;
+            for s in 0..strips_per_image {
+                let entropy = strip_slice(c * strips_per_image + s)?;
+                let luma_rows_this = rows_per_strip.min(height - luma_rows_done);
+                let seg_h = (luma_rows_this as usize).div_ceil(sv);
+                let stream = fields.synthesize_tables_form_stream(
+                    input,
+                    &[TablesFormComponent {
+                        index: c,
+                        h: 1,
+                        v: 1,
+                    }],
+                    dim16(pw, "plane width")?,
+                    dim16(seg_h, "strip rows")?,
+                    entropy,
+                )?;
+                let seg = crate::jpeg::decode_segment(
+                    None,
+                    &stream,
+                    pw as u32,
+                    seg_h as u32,
+                    PHOTO_BLACK_IS_ZERO,
+                    bps_first,
+                )?;
+                blit_gray_segment_into(
+                    &seg,
+                    &mut comp_planes[c],
+                    pw,
+                    ph,
+                    0,
+                    plane_rows_done,
+                    bps_first,
+                )?;
+                luma_rows_done += luma_rows_this;
+                plane_rows_done += seg_h;
+                if luma_rows_done >= height {
+                    break;
+                }
+            }
+            if luma_rows_done < height {
+                return Err(Error::invalid(format!(
+                    "TIFF/JPEG(§22): plane-{c} strips did not cover the full image"
+                )));
+            }
+        }
+        if samples_per_pixel == 1 {
+            unreachable!("SPP=1 collapses to chunky in decode_ifd");
+        }
+        return compose_planar_jpeg(
+            &comp_planes,
+            &comp_dims,
+            &comp_factors,
+            width,
+            height,
+            photometric,
+            bps_first,
+        );
+    }
+
+    // Chunky: each strip is one interleaved frame of all components.
+    if strip_offsets.len() != strips_per_image {
+        return Err(Error::invalid(format!(
+            "TIFF/JPEG(§22): expected {strips_per_image} strip entries, got {}",
+            strip_offsets.len()
+        )));
+    }
+    let components: Vec<TablesFormComponent> = match photometric {
+        PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO => vec![TablesFormComponent {
+            index: 0,
+            h: 1,
+            v: 1,
+        }],
+        PHOTO_YCBCR => vec![
+            TablesFormComponent {
+                index: 0,
+                h: sub_h as u8,
+                v: sub_v as u8,
+            },
+            TablesFormComponent {
+                index: 1,
+                h: 1,
+                v: 1,
+            },
+            TablesFormComponent {
+                index: 2,
+                h: 1,
+                v: 1,
+            },
+        ],
+        PHOTO_RGB | PHOTO_CMYK => (0..samples_per_pixel as usize)
+            .map(|index| TablesFormComponent { index, h: 1, v: 1 })
+            .collect(),
+        _ => unreachable!("photometric vetted above"),
+    };
+
+    let (pixel_format, dst_row_stride, dst_size) = match photometric {
+        PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO => (
+            TiffPixelFormat::Gray8,
+            width as usize,
+            width as usize * height as usize,
+        ),
+        PHOTO_RGB | PHOTO_YCBCR | PHOTO_CMYK => (
+            TiffPixelFormat::Rgb24,
+            width as usize * 3,
+            width as usize * 3 * height as usize,
+        ),
+        _ => unreachable!("photometric vetted above"),
+    };
+    let mut dst = vec![0u8; dst_size];
+    let invert = photometric == PHOTO_WHITE_IS_ZERO;
+    let want_yuv = photometric == PHOTO_YCBCR;
+
+    let mut rows_done: u32 = 0;
+    for s in 0..strips_per_image {
+        let entropy = strip_slice(s)?;
+        let rows_this_strip = rows_per_strip.min(height - rows_done);
+        let stream = fields.synthesize_tables_form_stream(
+            input,
+            &components,
+            dim16(width as usize, "image width")?,
+            dim16(rows_this_strip as usize, "strip rows")?,
+            entropy,
+        )?;
+        let seg = crate::jpeg::decode_segment(
+            None,
+            &stream,
+            width,
+            rows_this_strip,
+            photometric,
+            bps_first,
+        )?;
+        composite_segment(
+            &seg,
+            width,
+            rows_this_strip,
+            &mut dst,
+            dst_row_stride,
+            0,
+            rows_done,
+            invert,
+            want_yuv,
+            photometric,
+        )?;
+        rows_done += rows_this_strip;
+        if rows_done >= height {
+            break;
+        }
+    }
+    if rows_done < height {
+        return Err(Error::invalid(
+            "TIFF/JPEG(§22): strips did not cover the full image",
+        ));
+    }
+    Ok(TiffImage {
+        width,
+        height,
+        pixel_format,
+        planes: vec![TiffPlane {
+            stride: dst_row_stride,
+            data: dst,
+        }],
+    })
+}
+
+/// Without the `registry` feature the JPEG codec is unavailable for
+/// the tables-form layout too — but the §22 field validation still
+/// runs first, so malformed tables-form IFDs keep their precise
+/// errors in both build modes (only a well-formed tables-form IFD
+/// reaches the registry-feature stub).
+#[cfg(not(feature = "registry"))]
+#[allow(clippy::too_many_arguments)]
+fn decode_ifd_jpeg_old_tables_form(
+    _input: &[u8],
+    _entries: &[Entry],
+    _bo: ByteOrder,
+    _width: u32,
+    _height: u32,
+    _samples_per_pixel: u16,
+    _bps_first: u16,
+    _photometric: u16,
+    fields: &crate::jpeg_old::OldJpegFields,
+) -> Result<TiffImage> {
+    let malformed = match fields.proc {
+        None => true,
+        Some(JPEG_PROC_BASELINE) => {
+            fields.q_tables.is_none() || fields.dc_tables.is_none() || fields.ac_tables.is_none()
+        }
+        Some(_) => fields.lossless_predictors.is_none() || fields.dc_tables.is_none(),
+    };
+    if malformed {
+        return Err(fields.tables_form_error());
+    }
+    Err(Error::Unsupported(
+        "TIFF/JPEG(§22): Compression=6 tables-form decode requires the `registry` feature".into(),
+    ))
 }
 
 /// Without the `registry` feature the JPEG codec (`oxideav-mjpeg`) is

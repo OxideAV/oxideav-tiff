@@ -24,14 +24,18 @@
 //!    tables; Huffman tables as "16 BYTES of 'BITS'" + "VALUES") and
 //!    each strip / tile "points directly to the start of the entropy
 //!    coded data (not to a JPEG marker)". Turning that back into a
-//!    decodable stream requires synthesizing ISO 10918-1 marker
-//!    segments (DQT / DHT / SOF / SOS) around the raw tables — the
-//!    marker byte syntax is defined by ISO 10918-1, not by the TIFF
-//!    spec, so this build reports the layout as unsupported with a
-//!    precise error instead of guessing. (TIFF Technical Note 2
-//!    deprecates the whole §22 design for exactly this reason: "the
-//!    TIFF control logic must ... synthesize JPEG markers from the
-//!    TIFF fields to feed the codec".)
+//!    decodable stream means synthesizing ISO 10918-1 marker segments
+//!    (DQT / DHT / DRI / SOFn / SOS) around the raw tables — exactly
+//!    the job TN2 lamented ("the TIFF control logic must ...
+//!    synthesize JPEG markers from the TIFF fields to feed the
+//!    codec"). The marker byte syntax is normatively staged in
+//!    `docs/image/jpeg/T-REC-T.81-199209-I.pdf` (ITU-T T.81 =
+//!    ISO/IEC 10918-1, Annex B), so
+//!    [`OldJpegFields::synthesize_tables_form_stream`] rebuilds one
+//!    complete datastream per strip and the layout now decodes for
+//!    both §22 processes (baseline DCT and lossless Huffman), chunky
+//!    and planar; the strip-oriented layout is the one §22 writers
+//!    produced, so the tiled tables-form stays a precise error.
 //!
 //! Field-presence rules implemented from the §22 "JPEGProc" table
 //! ("The following table specifies the fields that are applicable to
@@ -397,6 +401,284 @@ impl OldJpegFields {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §22 tables-form → ISO 10918-1 datastream synthesis.
+// ---------------------------------------------------------------------------
+//
+// The §22 tables-form layout stores *raw* table payloads —
+// quantization tables as "64 BYTES of compressed quantization values"
+// in zigzag order (§22 JPEGQTables), Huffman tables as "16 BYTES of
+// 'BITS', then up to 256 BYTES of 'VALUES'" (§22 JPEGDCTables /
+// JPEGACTables) — and each strip "points directly to the start of the
+// entropy coded data (not to a JPEG marker)". Rebuilding a decodable
+// datastream means wrapping those payloads in the ISO 10918-1 /
+// ITU-T T.81 marker syntax staged in `docs/image/jpeg/`:
+//
+// * DQT (T.81 B.2.4.1): `FF DB`, Lq, then per table `Pq<<4 | Tq` and
+//   64 Qk bytes in zigzag order (Pq = 0 → 8-bit elements, mandatory
+//   for 8-bit sample precision).
+// * DHT (T.81 B.2.4.2): `FF C4`, Lh, then per table `Tc<<4 | Th`,
+//   the 16 BITS counts L1..L16, and the sum(BITS) VALUES bytes —
+//   byte-identical to the §22 raw payload after the Tc/Th prefix.
+// * DRI (T.81 B.2.4.4): `FF DD`, Lr = 4, Ri (§22 JPEGRestartInterval).
+// * SOF0 / SOF3 (T.81 B.2.2): `FF C0` / `FF C3`, Lf = 8 + 3·Nf, P, Y,
+//   X, Nf, then (Ci, Hi<<4|Vi, Tqi) per component. §22 JPEGProc = 1
+//   selects the baseline DCT process (SOF0) and JPEGProc = 14 the
+//   lossless Huffman process (SOF3).
+// * SOS (T.81 B.2.3): `FF DA`, Ls = 6 + 2·Ns, Ns, (Csj, Tdj<<4|Taj)
+//   per component, then Ss / Se / Ah / Al — for the baseline DCT
+//   0 / 63 / 0 / 0; for lossless Ss is the §22 predictor
+//   selection-value (JPEGLosslessPredictors), Se = 0, and Al is the
+//   §22 point transform (JPEGPointTransforms).
+//
+// All multi-byte marker parameters are MSB-first per T.81 B.1.1.4
+// regardless of the TIFF byte order.
+
+/// One synthesized-frame description: the components of one §22
+/// tables-form strip (all components for `PlanarConfiguration = 1`,
+/// exactly one for `PlanarConfiguration = 2`).
+#[derive(Debug, Clone)]
+pub struct TablesFormComponent {
+    /// Index into the §22 per-component table arrays (0-based; also
+    /// used as the JPEG component identifier `Ci`).
+    pub index: usize,
+    /// SOF horizontal / vertical sampling factor (`Hi`, `Vi`).
+    pub h: u8,
+    pub v: u8,
+}
+
+/// Read one §22 raw quantization table (64 zigzag bytes) at `offset`.
+fn read_q_table(input: &[u8], offset: u64) -> Result<[u8; 64]> {
+    let start = usize::try_from(offset)
+        .map_err(|_| Error::invalid("TIFF/JPEG(§22): JPEGQTables offset overflow"))?;
+    let end = start
+        .checked_add(64)
+        .filter(|&e| e <= input.len())
+        .ok_or_else(|| Error::invalid("TIFF/JPEG(§22): JPEGQTables payload past EOF"))?;
+    let mut t = [0u8; 64];
+    t.copy_from_slice(&input[start..end]);
+    Ok(t)
+}
+
+/// Read one §22 raw Huffman table (16 BITS bytes + sum(BITS) VALUES
+/// bytes) at `offset`; returns the raw payload slice.
+fn read_huff_table(input: &[u8], offset: u64, what: &str) -> Result<Vec<u8>> {
+    let start = usize::try_from(offset)
+        .map_err(|_| Error::invalid(format!("TIFF/JPEG(§22): {what} offset overflow")))?;
+    let bits_end = start
+        .checked_add(16)
+        .filter(|&e| e <= input.len())
+        .ok_or_else(|| Error::invalid(format!("TIFF/JPEG(§22): {what} BITS past EOF")))?;
+    let bits = &input[start..bits_end];
+    let n: usize = bits.iter().map(|&b| b as usize).sum();
+    // T.81 B.2.4.2: at most 256 VALUES; zero codes total is malformed
+    // (a table that can code nothing).
+    if n == 0 || n > 256 {
+        return Err(Error::invalid(format!(
+            "TIFF/JPEG(§22): {what} BITS sum {n} out of range 1..=256"
+        )));
+    }
+    let end = bits_end
+        .checked_add(n)
+        .filter(|&e| e <= input.len())
+        .ok_or_else(|| Error::invalid(format!("TIFF/JPEG(§22): {what} VALUES past EOF")))?;
+    Ok(input[start..end].to_vec())
+}
+
+/// Deduplicate per-component table offsets into up to four table
+/// destinations (T.81 limits Tq / Td / Ta to 0..=3): returns
+/// `(unique_offsets, per_component_destination)`.
+fn assign_destinations(offsets: &[u64], what: &str) -> Result<(Vec<u64>, Vec<u8>)> {
+    let mut uniq: Vec<u64> = Vec::new();
+    let mut dest = Vec::with_capacity(offsets.len());
+    for &o in offsets {
+        let d = match uniq.iter().position(|&u| u == o) {
+            Some(d) => d,
+            None => {
+                uniq.push(o);
+                uniq.len() - 1
+            }
+        };
+        if d > 3 {
+            return Err(Error::invalid(format!(
+                "TIFF/JPEG(§22): more than 4 distinct {what} tables (T.81 allows \
+                 destinations 0..=3)"
+            )));
+        }
+        dest.push(d as u8);
+    }
+    Ok((uniq, dest))
+}
+
+impl OldJpegFields {
+    /// Synthesize a complete ISO 10918-1 datastream for one §22
+    /// tables-form strip: marker wrapping per the staged T.81 Annex B
+    /// syntax around the raw §22 table payloads and the strip's
+    /// entropy-coded data.
+    ///
+    /// `components` describes the components stored in this strip (in
+    /// §22 field order); `(width, height)` are the strip's SOF
+    /// dimensions (luma-scale for chunky, component-scale for
+    /// planar); `entropy` is the strip payload (tag 273 "points
+    /// directly to the start of the entropy coded data").
+    pub fn synthesize_tables_form_stream(
+        &self,
+        input: &[u8],
+        components: &[TablesFormComponent],
+        width: u16,
+        height: u16,
+        entropy: &[u8],
+    ) -> Result<Vec<u8>> {
+        let proc = self.proc.ok_or_else(|| {
+            Error::invalid(
+                "TIFF/JPEG(§22): Compression=6 without JPEGProc (tag 512 is mandatory, \
+                 no default) and without a JPEGInterchangeFormat bitstream",
+            )
+        })?;
+        let lossless = proc == JPEG_PROC_LOSSLESS;
+        let nf = components.len();
+        let mut out = Vec::with_capacity(1024 + entropy.len());
+        out.extend_from_slice(&[0xFF, 0xD8]); // SOI
+
+        // DQT (baseline only; §22's applicability table marks the
+        // quantization tables "not used" for the lossless process).
+        let q_dest: Vec<u8>;
+        if !lossless {
+            let q_offsets = self
+                .q_tables
+                .as_ref()
+                .ok_or_else(|| self.tables_form_missing("JPEGQTables"))?;
+            let (uniq, dest) = assign_destinations(q_offsets, "JPEGQTables")?;
+            q_dest = dest;
+            for (tq, &off) in uniq.iter().enumerate() {
+                let table = read_q_table(input, off)?;
+                // Lq = 2 + (1 + 64) per table; one table per segment
+                // keeps the arithmetic trivial.
+                out.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, tq as u8]);
+                out.extend_from_slice(&table);
+            }
+        } else {
+            q_dest = vec![0; nf];
+        }
+
+        // DHT: DC tables always; AC tables for the DCT process only
+        // (§22: for lossless "the JPEGACTables field is not used").
+        let dc_offsets = self
+            .dc_tables
+            .as_ref()
+            .ok_or_else(|| self.tables_form_missing("JPEGDCTables"))?;
+        let (dc_uniq, dc_dest) = assign_destinations(dc_offsets, "JPEGDCTables")?;
+        for (th, &off) in dc_uniq.iter().enumerate() {
+            let payload = read_huff_table(input, off, "JPEGDCTables")?;
+            let lh = 2 + 1 + payload.len();
+            out.extend_from_slice(&[0xFF, 0xC4]);
+            out.extend_from_slice(&(lh as u16).to_be_bytes());
+            out.push(th as u8); // Tc = 0 (DC / lossless), Th
+            out.extend_from_slice(&payload);
+        }
+        let ac_dest: Vec<u8>;
+        if !lossless {
+            let ac_offsets = self
+                .ac_tables
+                .as_ref()
+                .ok_or_else(|| self.tables_form_missing("JPEGACTables"))?;
+            let (ac_uniq, dest) = assign_destinations(ac_offsets, "JPEGACTables")?;
+            ac_dest = dest;
+            for (th, &off) in ac_uniq.iter().enumerate() {
+                let payload = read_huff_table(input, off, "JPEGACTables")?;
+                let lh = 2 + 1 + payload.len();
+                out.extend_from_slice(&[0xFF, 0xC4]);
+                out.extend_from_slice(&(lh as u16).to_be_bytes());
+                out.push(0x10 | th as u8); // Tc = 1 (AC), Th
+                out.extend_from_slice(&payload);
+            }
+        } else {
+            ac_dest = vec![0; nf];
+        }
+
+        // DRI (T.81 B.2.4.4) when the §22 restart interval is set.
+        if self.restart_interval != 0 {
+            out.extend_from_slice(&[0xFF, 0xDD, 0x00, 0x04]);
+            out.extend_from_slice(&self.restart_interval.to_be_bytes());
+        }
+
+        // SOFn (T.81 B.2.2): Lf = 8 + 3·Nf, P = 8 (§22 baseline is
+        // 8-bit; §22 lossless streams in the wild are 8-bit too — the
+        // caller's BitsPerSample gate enforces the depth), Y, X, Nf.
+        out.extend_from_slice(&[0xFF, if lossless { 0xC3 } else { 0xC0 }]);
+        out.extend_from_slice(&((8 + 3 * nf) as u16).to_be_bytes());
+        out.push(8);
+        out.extend_from_slice(&height.to_be_bytes());
+        out.extend_from_slice(&width.to_be_bytes());
+        out.push(nf as u8);
+        for (slot, c) in components.iter().enumerate() {
+            out.push(c.index as u8); // Ci
+            out.push((c.h << 4) | c.v);
+            out.push(if lossless { 0 } else { q_dest[c.index] });
+            let _ = slot;
+        }
+
+        // SOS (T.81 B.2.3): Ls = 6 + 2·Ns.
+        // For the lossless process Ss carries the §22 predictor
+        // selection-value and Al the point transform; JPEG has one
+        // Ss / Al per scan, so all components stored in this strip
+        // must agree (per-component §22 values that differ would need
+        // one scan per component — reject precisely).
+        let (ss, se, al) = if lossless {
+            let preds = self
+                .lossless_predictors
+                .as_ref()
+                .ok_or_else(|| self.tables_form_missing("JPEGLosslessPredictors"))?;
+            let pick = |vals: &[u16], name: &str| -> Result<u16> {
+                let vals: Vec<u16> = components.iter().map(|c| vals[c.index]).collect();
+                if vals.windows(2).any(|w| w[0] != w[1]) {
+                    return Err(Error::Unsupported(format!(
+                        "TIFF/JPEG(§22): per-component {name} values differ within one \
+                         interleaved scan (one scan per component is not synthesized)"
+                    )));
+                }
+                Ok(vals[0])
+            };
+            let ss = pick(preds, "JPEGLosslessPredictors")?;
+            let al = match &self.point_transforms {
+                Some(pt) => pick(pt, "JPEGPointTransforms")?,
+                // "The default value of this Field is 0 for each
+                // component."
+                None => 0,
+            };
+            (ss as u8, 0u8, al as u8)
+        } else {
+            (0u8, 63u8, 0u8)
+        };
+        out.extend_from_slice(&[0xFF, 0xDA]);
+        out.extend_from_slice(&((6 + 2 * nf) as u16).to_be_bytes());
+        out.push(nf as u8);
+        for c in components {
+            out.push(c.index as u8); // Csj = Ci
+            out.push((dc_dest[c.index] << 4) | if lossless { 0 } else { ac_dest[c.index] });
+        }
+        // Ah occupies the high nibble and is always 0 for both §22
+        // processes, so the third byte is just Al.
+        out.extend_from_slice(&[ss, se, al]);
+
+        out.extend_from_slice(entropy);
+        // The entropy data ends at the strip boundary; terminate the
+        // synthesized frame.
+        out.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        Ok(out)
+    }
+
+    /// Invalid-data error naming a mandatory-but-absent §22 field
+    /// (mirrors [`OldJpegFields::tables_form_error`]'s missing-field
+    /// arm for the synthesis path).
+    fn tables_form_missing(&self, field: &str) -> Error {
+        Error::invalid(format!(
+            "TIFF/JPEG(§22): tables-form layout without {field} (mandatory per the §22 \
+             JPEGProc applicability table)"
+        ))
     }
 }
 
