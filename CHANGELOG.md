@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.5...v0.0.6) - 2026-08-31
+
+### Other
+
+- cap total assembled decode bytes (fuzz r454 OOM)
+- reject SamplesPerPixel=0 (fuzz r454); refresh stale fuzz lockfile
+- burn down the Backlog — deep/planar/tables-form JPEG, CCITT uncompressed emission, tiled planar subsampled YCbCr
+- layout-gate premises must not assume JPEG-codec strictness
+- tiled planar chroma-subsampled layout, decode + encode (TN2-amended Section 21)
+- opt-in uncompressed-mode emission (T4Options/T6Options bit 1)
+- §22 tables-form decode via T.81 Annex B marker synthesis
+- planar-flag premise updates for the §22 planar decode + clippy lints
+- PlanarConfiguration=2 JPEG-in-TIFF decode (Compression=7 planar segments; §22 planar flag)
+- deep-precision (9..=16-bit) JPEG-in-TIFF decode
+- Mark internal plumbing #[doc(hidden)] so API-diff tooling skips it
+- demuxer exposes §8 metadata + ICC/XMP attachments through the core Demuxer accessors
+- independently-written ICC/XMP carriage fixtures (classic + BigTIFF) with SHA-256 pins
+- ICC/XMP carriage — README section + crate-doc + metadata module doc
+- black-box ICC/XMP interop — magick both directions, tiffcp rewrite, tiffdump structural listing
+- write XMP (700) + InterColorProfile (34675) via PageExtras — byte-exact round-trip across all layouts
+- ICC profile (34675) + XMP packet (700) extraction — TiffMetadata surfaces both payloads verbatim
+- metadata & format-introspection API — README + crate-doc
+- write DocumentName / Make / Model / PageName / HostComputer
+- hostile-input hardening + fuzz coverage for the extractors
+- TiffFormatInfo — raw structural / codec tag introspection
+- decode_tiff_all_pages — per-page TiffMetadata over the IFD chain
+- expose TiffMetadata — §8 ASCII + resolution + page tags
+- WebP-in-TIFF (Compression=50001) coverage — README section + crate-doc + CHANGELOG
+- Compression=50001 (WebP-in-TIFF): decode + encode codec-in-container carriage
+- add CI / crates.io / docs.rs / MIT-license badges
+- Orientation (274) write — PageExtras::orientation
+- refresh crate-doc encode coverage (multi-strip, Predictor 3, PageExtras tree) + PageNumber doc-link fix
+- resolution + §8 ASCII metadata writes (PageExtras)
+- multi-strip write — PageExtras::rows_per_strip (TIFF 6.0 §RowsPerStrip)
+- accept field type 13 (IFD offset) + fuzz decode_tiff_at hostile offsets
+- PageExtras — PageNumber/NewSubfileType bits + Exif/GPS child IFDs + SubIFDs tree
+- chroma-subsampled YCbCr PlanarConfiguration=2 strips — encode + decode
+- f16 (binary16) SampleFormat=3 write — GrayF16/RgbF16 + f32<->f16 helpers
+
 ### Fixed
 
 - Fuzz r454 finding: `MAX_IMAGE_PIXELS` bounds `width × height` only, so a hostile IFD claiming a huge `SamplesPerPixel` (an unbounded SHORT) at 16-bit depth drove a multi-gibibyte strip-buffer reservation before the photometric dispatch could reject the shape; a 1 GiB total-assembled-bytes gate (`width × height × SamplesPerPixel × ceil(BitsPerSample/8)`) now fires first (regression-pinned).
