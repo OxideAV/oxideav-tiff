@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fuzz r454 finding: `MAX_IMAGE_PIXELS` bounds `width × height` only, so a hostile IFD claiming a huge `SamplesPerPixel` (an unbounded SHORT) at 16-bit depth drove a multi-gibibyte strip-buffer reservation before the photometric dispatch could reject the shape; a 1 GiB total-assembled-bytes gate (`width × height × SamplesPerPixel × ceil(BitsPerSample/8)`) now fires first (regression-pinned).
 - Fuzz r454 finding: a hostile IFD declaring `SamplesPerPixel = 0` with the BitsPerSample tag absent produced an empty per-sample vector and panicked on its `[0]` read; the decoder now rejects zero-component pixels with a precise `InvalidData` (regression-pinned in `tests/decode_fuzz_regressions.rs`).
 - Fuzz sub-crate lockfile refresh: `fuzz/Cargo.lock` pinned `compcol 0.6.0`, whose Zstandard decoder hangs (>25 s on a 43-byte frame — libFuzzer timeout artifact) on input the workspace's `compcol 0.6.9+` handles in microseconds; the lockfile now resolves `compcol 0.6.10` (and current `oxideav-core`/`oxideav-mjpeg`), curing both recorded timeout artifacts. Classic fuzz-harness dependency drift — the harness resolves its dependencies separately from the library.
 

@@ -490,6 +490,25 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             "TIFF: BitsPerSample={bps_first} not supported"
         )));
     }
+    // Total-allocation gate (fuzz r454 finding): `MAX_IMAGE_PIXELS`
+    // bounds `width × height`, but the assembled pixel buffer scales
+    // with SamplesPerPixel × BitsPerSample too, and SamplesPerPixel is
+    // an unbounded SHORT — a crafted IFD (spp in the hundreds at 16
+    // bits) drove a multi-gibibyte `Vec::with_capacity` before the
+    // photometric dispatch could reject the shape. Cap the worst-case
+    // assembled size up front; every legitimate photometric this crate
+    // decodes fits comfortably (≤ 4 samples + a few §ExtraSamples).
+    const MAX_DECODE_BYTES: u64 = 1 << 30; // 1 GiB assembled buffer
+    let total_bytes = (width as u64)
+        .saturating_mul(height as u64)
+        .saturating_mul(samples_per_pixel as u64)
+        .saturating_mul((bps_first as u64).div_ceil(8));
+    if total_bytes > MAX_DECODE_BYTES {
+        return Err(Error::invalid(format!(
+            "TIFF: image too large ({width}x{height} x {samples_per_pixel} samples x \
+             {bps_first} bits = {total_bytes} bytes > {MAX_DECODE_BYTES})"
+        )));
+    }
 
     // Predictor = 3 (the IEEE floating-point predictor) is validated here,
     // before any strip/tile is decompressed, because the per-strip /
