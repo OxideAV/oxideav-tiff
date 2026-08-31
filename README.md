@@ -32,13 +32,15 @@ Spec-only clean-room: no external library source was consulted.
 | RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb48Le` |
 | RGB (3 chan / 4 chan + §ExtraSamples) | 8 | **WebP-in-TIFF** (Compression=50001; VP8L lossless + VP8 lossy segments) | `Rgb24` |
 | CMYK (4 chan)  | 8              | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` |
-| YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **ZSTD** (incl. **§21 chroma subsampling** `[2,1]`/`[2,2]`/`[4,1]`/`[4,2]`) / **JPEG-in-TIFF** (Compression=7) | `Rgb24` |
-| RGB (3 chan)   | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
+| YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **ZSTD** (incl. **§21 chroma subsampling** `[2,1]`/`[2,2]`/`[4,1]`/`[4,2]`, chunky + planar, strip + tiled) / **JPEG-in-TIFF** (Compression=7, chunky + **TN2 planar**) | `Rgb24` |
+| RGB (3 chan)   | 8              | **JPEG-in-TIFF** (Compression=7, chunky + planar) | `Rgb24`      |
 | BlackIsZero / WhiteIsZero | 8   | **JPEG-in-TIFF** (Compression=7)   | `Gray8`      |
-| CMYK (4 chan)  | 8              | **JPEG-in-TIFF** (Compression=7)   | `Rgb24`      |
+| CMYK (4 chan)  | 8              | **JPEG-in-TIFF** (Compression=7, chunky + planar) | `Rgb24`      |
+| BlackIsZero / WhiteIsZero | **9..=16 (12-bit SOF1, 9..16-bit SOF3)** | **JPEG-in-TIFF** (Compression=7) + **old-style Compression=6 interchange** | `Gray16Le` (bit-replication widening) |
+| YCbCr / RGB (3 chan) | **9..=16** | **JPEG-in-TIFF** (Compression=7, chunky + planar) | `Rgb48Le` |
 | **CIELab (3 chan)** | 8         | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` (Lab→XYZ@D65→linear NTSC→sRGB) |
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
-| BlackIsZero / WhiteIsZero / RGB / YCbCr / CMYK | 8 | **Old-style JPEG** (Compression=6, TIFF 6.0 §22 **interchange-format layout**) | `Gray8` / `Rgb24` |
+| BlackIsZero / WhiteIsZero / RGB / YCbCr / CMYK | 8 | **Old-style JPEG** (Compression=6, TIFF 6.0 §22 — **both layouts**: interchange-format, and **tables-form** via T.81 Annex B marker synthesis; chunky + planar) | `Gray8` / `Rgb24` |
 
 `Predictor = 1` (no prediction), `Predictor = 2` (horizontal
 differencing, per-component for `SamplesPerPixel > 1`) and
@@ -74,9 +76,11 @@ stores `StripOffsets` / `StripByteCounts` (and `TileOffsets` /
 `TileByteCounts`) as `SamplesPerPixel × StripsPerImage` entries with
 component 0 first, then component 1, etc.; the decoder re-interleaves
 the planes into chunky order downstream so every photometric path
-(RGB / CMYK / YCbCr) sees the same input shape. JPEG-in-TIFF
-(`Compression = 7`) remains chunky-only — TN2's planar-2 rules are
-not yet supported. Multi-page files walk the next-IFD chain
+(RGB / CMYK / YCbCr) sees the same input shape — including
+JPEG-in-TIFF (`Compression = 7`), whose planar form follows TN2's
+"Special considerations for PlanarConfiguration 2" (single-channel
+segments, subsampled chroma segments at scaled-down SOF dimensions).
+Multi-page files walk the next-IFD chain
 via [`decode_tiff_all`]. Both `II` (little-endian) and `MM`
 (big-endian) byte orders are accepted, and both classic
 32-bit-offset TIFF and BigTIFF (8-byte offsets, magic 43) parse.
@@ -131,12 +135,22 @@ right/bottom edge tiles to the image bounds. RGB, grayscale and YCbCr
 tiled JPEG are exercised against ImageMagick-written fixtures (incl. a
 partial-edge 48×40 / 16×16 grid).
 
-Not supported (return precise `Error::Unsupported`):
-12-bit (SOF1 with `P = 12`), arithmetic (SOF9 / SOF11), and
-`PlanarConfiguration = 2` (`Compression = 7` and `= 6` only; the
-non-JPEG compressors do accept planar layout — see above).
+**Deep precisions** decode per TN2's rule that the SOFn `P` field
+"shall agree with the TIFF BitsPerSample field" (SOF1 permits 8 or
+12; SOF3 lossless permits 2..=16): the 9..=16-bit range decodes for
+grayscale (→ `Gray16Le`) and YCbCr / RGB (→ `Rgb48Le`), each raw code
+value widened onto the 16-bit display extent by bit replication (the
+4-bit grayscale display map generalised), the BT.601 matrix evaluated
+at the stream's own precision. **`PlanarConfiguration = 2`** decodes
+per TN2's "Special considerations for PlanarConfiguration 2": each
+segment is a single-channel JPEG datastream, segments run plane-major
+(`SamplesPerPixel × StripsPerImage` / `× TilesPerImage`), and a
+subsampled chroma segment's SOF dimensions are scaled down by the
+sampling factors (last strip rounded up; tile dimensions must divide).
+Still precise `Error::Unsupported`: deep (>8-bit) CMYK and sub-8-bit
+lossless precisions.
 The deprecated TIFF 6.0 §22 "old-style" JPEG (`Compression = 6`)
-decodes in its interchange-format layout — see the next section.
+decodes in both §22 layouts — see the next section.
 JPEG-in-TIFF requires the default-on `registry` Cargo feature; with
 `default-features = false` the JPEG decode paths return
 `Error::Unsupported` (the §22 field validation and its precise
@@ -177,27 +191,37 @@ Two §22 layouts exist:
   `Compression = 7` wrapping of the identical bitstream is asserted in
   `tests/decode_oldstyle_jpeg.rs`.
 
-* **Tables-form layout — recognised, precisely rejected.** Without an
-  interchange stream, §22 stores *raw* table payloads (64-byte
-  zigzag-order quantization tables; Huffman tables as "16 BYTES of
-  'BITS'" + "VALUES") behind per-component offset arrays
-  (`JPEGQTables` / `JPEGDCTables` / `JPEGACTables`), and each strip
-  "points directly to the start of the entropy coded data (not to a
-  JPEG marker)". Reconstructing a decodable datastream from those
-  fields requires synthesizing ISO 10918-1 marker segments
-  (DQT / DHT / SOF / SOS), whose byte syntax the TIFF spec does not
-  define — TN2 calls this out as the §22 design's core failure ("the
-  TIFF control logic must ... synthesize JPEG markers from the TIFF
-  fields to feed the codec"). This build reports the layout as
-  `Error::Unsupported` with a message naming the missing capability.
-  Malformed tables-form IFDs get `Error::InvalidData` first: the §22
+* **Tables-form layout — decodes** (via ISO 10918-1 marker
+  synthesis). Without an interchange stream, §22 stores *raw* table
+  payloads (64-byte zigzag-order quantization tables; Huffman tables
+  as "16 BYTES of 'BITS'" + "VALUES") behind per-component offset
+  arrays (`JPEGQTables` / `JPEGDCTables` / `JPEGACTables`), and each
+  strip "points directly to the start of the entropy coded data (not
+  to a JPEG marker)". The decoder rebuilds one complete datastream
+  per strip using the T.81 / ISO 10918-1 Annex B marker syntax staged
+  in `docs/image/jpeg/` — DQT / DHT / DRI / SOFn / SOS around the raw
+  payloads and the strip's entropy data (SOF0 for `JPEGProc = 1`
+  baseline; SOF3 for `JPEGProc = 14` lossless with the
+  `JPEGLosslessPredictors` selection-value as `Ss` and
+  `JPEGPointTransforms` as `Al`), deduping per-component table
+  offsets onto the four T.81 destinations and synthesizing DRI from
+  `JPEGRestartInterval`. Chunky (interleaved, YCbCr sampling factors
+  from `YCbCrSubSampling`) and planar ("one JPEG scan per component",
+  reduced chroma geometry) both decode, single- and multi-strip;
+  every synthesized stream then routes through the same segment
+  decode + composite machinery as `Compression = 7`. Tables-form
+  round trips are pinned by decomposing black-box `cjpeg` bitstreams
+  into §22 raw payloads and requiring byte-identical output against
+  the `Compression = 7` wrap of the same bitstream. Still precise
+  errors: the tiled tables-form layout (§22 writers produced
+  strip-oriented files), per-component `Ss` / `Al` divergence within
+  one interleaved scan, and the malformed-field set — the §22
   JPEGProc applicability table is enforced (baseline requires
   Q/DC/AC tables; lossless requires JPEGLosslessPredictors +
-  JPEGDCTables), `JPEGProc` values other than 1 (baseline) / 14
-  (lossless Huffman) are rejected per "will be defined in the
-  future", lossless predictor selection-values are range-checked
-  (1..=7), and out-of-bounds / non-SOI interchange offsets are typed
-  errors.
+  JPEGDCTables), `JPEGProc` values other than 1 / 14 are rejected per
+  "will be defined in the future", lossless predictor
+  selection-values are range-checked (1..=7), and out-of-bounds /
+  non-SOI interchange offsets are typed errors.
 
 ### CIELab (PhotometricInterpretation = 8)
 
@@ -586,7 +610,7 @@ processes.
 
 | Photometric    | Bit depth | Compression                                                 | API call                |
 | -------------- | --------- | ----------------------------------------------------------- | ----------------------- |
-| WhiteIsZero    | 1         | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `EncodePixelFormat::Bilevel` |
+| WhiteIsZero    | 1         | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** (both with **opt-in uncompressed-mode emission**, §11 options bit 1) / PackBits / LZW / Deflate / **ZSTD** | `EncodePixelFormat::Bilevel` |
 | **Transparency Mask** | 1  | None / CCITT-MH / T.4-1D / PackBits / LZW / Deflate / **ZSTD** | `EncodePixelFormat::TransparencyMask` (sets PhotometricInterpretation = 4 and NewSubfileType bit 2) |
 | BlackIsZero    | 8 / 16    | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Gray8` / `::Gray16Le` |
 | **BlackIsZero** | 4        | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled** (nibble-granularity edge replication), **`Predictor = 2`** (§14 nibble differencing mod 16), BigTIFF | `EncodePixelFormat::Gray4` (packed high-nibble-first raster, rows byte-padded) |
@@ -603,7 +627,7 @@ processes.
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**             | `EncodePixelFormat::CieLabL8` (writes PhotometricInterpretation = 8, SamplesPerPixel = 1) |
 | **CMYK (4 chan)** | 8     | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Cmyk32` (writes PhotometricInterpretation = 5, SamplesPerPixel = 4, BitsPerSample = [8,8,8,8], plus optional `InkSet = 1` / `NumberOfInks = 4`) |
 | **YCbCr (3 chan, 4:4:4)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, **`PlanarConfiguration = 2`** / **`Predictor = 2`** | `EncodePixelFormat::YCbCr24` (writes PhotometricInterpretation = 6, SamplesPerPixel = 3, BitsPerSample = [8,8,8], `YCbCrSubSampling = [1, 1]`, `YCbCrPositioning = 1`, `ReferenceBlackWhite = [0,255,128,255,128,255]` no-headroom full-range) |
-| **YCbCr (3 chan, subsampled)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled** | `EncodePixelFormat::YCbCrSubsampled24` (§21 data-unit packing for `[2,1]`/`[2,2]`/`[4,1]`/`[4,2]`; tiles per §21 page 90 multiple-of-subsampling-factor geometry) |
+| **YCbCr (3 chan, subsampled)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, chunky or **`PlanarConfiguration = 2`** (strip + **tiled**, per-plane `Predictor = 2`) | `EncodePixelFormat::YCbCrSubsampled24` (§21 data-unit packing for `[2,1]`/`[2,2]`/`[4,1]`/`[4,2]`; planar per the TN2-amended §21 reduced chroma-plane geometry) |
 
 `TiffCompression::CcittRle` selects Modified Huffman
 (`Compression = 2`, TIFF 6.0 §10), `TiffCompression::CcittT4OneD`
@@ -612,8 +636,15 @@ selects T.4 1-D (`Compression = 3`, §11) with an optional
 `TiffCompression::CcittT4TwoD` selects T.4 2-D / Modified READ
 (`Compression = 3` with `T4Options` bit 0 set) and
 `TiffCompression::CcittT6` selects T.6 / MMR / Group 4
-(`Compression = 4`, `T6Options` written as LONG zero — bit 1
-"uncompressed mode allowed" is never set). The 1-D writers all
+(`Compression = 4`). Both 2-D variants carry an opt-in
+`uncompressed` flag: when set, every 2-D coded row is encoded both
+as an ordinary READ row and as a Table 5/T.4 (= Table 4/T.6)
+*uncompressed-mode* segment (entrance code + literal image patterns
++ exit code) and the cheaper form is emitted — the bit-rate-control
+role the optional extension was defined for, so finely dithered rows
+fall back to literal pixel transmission — and the file advertises the
+extension via `T4Options` bit 1 / `T6Options` bit 1 per §11 (the
+options tags are all-zero-bits otherwise). The 1-D writers all
 share the `WHITE` / `BLACK` MH run-length tables transcribed from
 the TIFF 6.0 PDF; the 2-D writers additionally emit the Pass /
 Horizontal / Vertical mode codes from
@@ -830,11 +861,17 @@ splats each chroma sample back over its `sh × sv` block. `Predictor =
 2` composes per-plane (§14: "Differencing works the same as it does
 for grayscale data" — each plane differences at its own row width);
 the *chunky* subsampled predictor stays rejected (no defined shape
-over the packed data-unit stream), as does **tiled** planar subsampled
-on both sides (§15 fixes `TileOffsets` at `SamplesPerPixel ×
-TilesPerImage` — the same tile count for every plane — which has no
-consistent geometry for a reduced-size chroma plane under a shared
-`TileWidth × TileLength` grid). Luma round-trips bit-exact; chroma
+over the packed data-unit stream). **Tiled planar subsampled encodes
+and decodes too**, on the geometry the TN2 "Changes to Section 21"
+pin down: "each strip or tile covers the same image area despite
+subsampling ... the total number of strips or tiles in the image is
+the same for each component. Therefore strips or tiles of the
+subsampled components contain fewer samples" — `TileOffsets` keeps
+its `SamplesPerPixel × TilesPerImage` plane-major count, the tile
+grid comes from the full-resolution dimensions, and a chroma tile
+holds `TileWidth/sh × TileLength/sv` samples of the reduced chroma
+plane (tile dimensions must be integer multiples of the factors; §14
+predictor per-plane per-tile). Luma round-trips bit-exact; chroma
 round-trips exactly when block-constant, matching the chunky
 subsampled paths. On the
 decode side a planar 4:4:4 YCbCr page re-interleaves the three planes
@@ -941,35 +978,26 @@ The compression schemes, photometrics, and layout features described
 above are all implemented on both decode and encode where stated. The
 remaining gaps are:
 
-- **Old-style JPEG `Compression = 6` tables-form layout** — the §22
-  interchange-format layout now **decodes** (see the Old-style JPEG
-  section above); the tables-form layout (raw table payloads +
-  entropy-coded strips) is recognised and precisely rejected because
-  rebuilding a datastream from the raw tables needs the ISO 10918-1
-  marker byte syntax, which is outside the TIFF spec material. The
-  new-style `Compression = 7` path does not support 12-bit precision
-  (SOF1 `P = 12`), arithmetic coding (SOF9 / SOF11), or
-  `PlanarConfiguration = 2` JPEG segments (the same planar limit
-  applies to `Compression = 6`).
-- **CCITT uncompressed-mode *emission*** — the decoder reads the
-  optional uncompressed-mode extension, but the encoder never emits it
-  (it is a bit-rate control extension, not a compression win for
-  facsimile content).
+- **JPEG-in-TIFF *encode*** — `Compression = 7` (and the deprecated
+  `= 6`) is decode-only; the crate writes no JPEG-compressed pages.
+- **Deep (>8-bit) CMYK JPEG-in-TIFF and sub-8-bit SOF3 precisions** —
+  precise `Error::Unsupported` (no deployed layout to validate
+  against); likewise the **tiled §22 tables-form** layout (§22
+  writers produced strip-oriented files) and per-component `Ss` / `Al`
+  divergence within one interleaved tables-form scan (would need one
+  synthesized scan per component).
 - **DNG / GeoTIFF / Exif tag semantics.** The child-IFD *mechanics* are
   in (write side via `PageExtras::exif_ifd` / `gps_ifd` / `sub_ifds`;
   read side via `parse_ifd` at the pointer offset + `decode_tiff_at`
   for SubIFD images), but the crate interprets no Exif/GPS/DNG/GeoTIFF
-  tag meanings.
-- **Subsampled-YCbCr residual combinations** — chunky subsampled YCbCr
-  encodes and decodes in both strip and tiled layouts (TIFF 6.0 §21),
-  4:4:4 composes with `PlanarConfiguration = 2` and `Predictor = 2`,
-  and the genuinely chroma-subsampled **separate-planes strip layout**
-  now encodes and decodes too (reduced §21 "chroma image" planes,
-  per-plane §14 predictor — see the YCbCr write note above). Still
-  deferred: §14 differencing over the packed *chunky* data-unit stream
-  (no defined shape) and **tiled** planar subsampled (§15's fixed
-  `SamplesPerPixel × TilesPerImage` TileOffsets count has no consistent
-  geometry for reduced-size chroma planes).
+  tag meanings — the defining tag catalogues (JEITA/CIPA Exif, OGC
+  GeoTIFF, Adobe DNG) are not in the staged spec material.
+- **Chunky-subsampled YCbCr × `Predictor = 2`** — §14 differencing has
+  no defined shape over the packed §21 data-unit stream (a 2-D luma
+  block then single Cb / Cr samples per unit), so the combination
+  stays a precise rejection on both sides; every other subsampled
+  layout combination (chunky/planar × strip/tiled, per-plane
+  predictor) is implemented.
 - **Float (`SampleFormat = 3`) grayscale and 3-channel RGB** decode **and
   encode** (`EncodePixelFormat::{GrayF16, GrayF32, GrayF64, RgbF16,
   RgbF32, RgbF64}`, 16-/32-/64-bit), and the **floating-point predictor

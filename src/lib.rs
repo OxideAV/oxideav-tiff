@@ -21,7 +21,9 @@
 //!   YCbCr / TransparencyMask / CIELab (3-sample L*a*b* and 1-sample
 //!   L*-only, TIFF 6.0 §23, decoded to display Rgb24 / Gray8 via
 //!   Lab → XYZ@D65 → linear NTSC RGB → sRGB)
-//! * Bit depths: 1, 4, 8, 16 (per-strip and per-tile)
+//! * Bit depths: 1, 4, 8, 16 (per-strip and per-tile), plus the deep
+//!   9..=16-bit JPEG-in-TIFF precisions (12-bit SOF1, 9..16-bit SOF3
+//!   lossless) rendered to `Gray16Le` / `Rgb48Le`
 //! * Compression: 1 None / 2 CCITT Modified Huffman / 3 CCITT T.4
 //!   (1-D and 2-D) / 4 CCITT T.6 / 32773 PackBits / 5 LZW /
 //!   8 Deflate (zlib) / 50000 Zstandard (de-facto registry
@@ -30,7 +32,8 @@
 //!   VP8L lossless or VP8 lossy, 8-bit chunky RGB / RGBA; routed
 //!   through `oxideav-webp`) /
 //!   7 JPEG-in-TIFF (TIFF Tech Note 2; routes each strip/tile through
-//!   `oxideav-mjpeg`)
+//!   `oxideav-mjpeg`; chunky and TN2 `PlanarConfiguration = 2`
+//!   single-channel segments)
 //! * Predictor: 1 (none) and 2 (horizontal differencing,
 //!   per-component for SamplesPerPixel > 1)
 //! * Strip OR tile layout
@@ -74,7 +77,9 @@
 //!   lossless VP8L file per strip / tile, Rgb24 / Rgba32 input only) /
 //!   CCITT Modified Huffman (Compression=2) /
 //!   CCITT T.4 1-D and 2-D (Compression=3, with optional T4Options
-//!   bit 2 byte-aligned EOLs) / CCITT T.6 (Compression=4)
+//!   bit 2 byte-aligned EOLs) / CCITT T.6 (Compression=4) — the 2-D
+//!   variants with opt-in uncompressed-mode emission (§11 options
+//!   bit 1; per-row cheapest-form selection)
 //! * Layout: strips (single or multi via
 //!   [`encoder::PageExtras::rows_per_strip`], TIFF 6.0 §"RowsPerStrip"),
 //!   `PlanarConfiguration = 2` (separate planes, chunky-source), or
@@ -94,20 +99,20 @@
 //!   exposes round-trips
 //!
 //! The deprecated TIFF 6.0 §22 old-style JPEG (Compression=6) decodes
-//! in its interchange-format layout (`JPEGInterchangeFormat`, tag 513,
-//! points at a complete SOI..EOI bitstream); the §22 tables-form
-//! layout (raw JPEGQTables/JPEGDCTables/JPEGACTables + entropy-coded
-//! strips) is recognised and rejected with a precise error — see
-//! [`jpeg_old`]. Encode-side JPEG-in-TIFF (Compression=7) remains out
-//! of scope. YCbCr encodes chunky 4:4:4, chroma-subsampled chunky
-//! (§21 data-unit packing, strip + tiled) and chroma-subsampled
-//! `PlanarConfiguration = 2` strips (full-resolution Y plane +
-//! reduced §21 "chroma image" Cb / Cr planes, per-plane §14
-//! predictor); still deferred are the §14 predictor over the packed
-//! *chunky* data-unit stream and *tiled* planar subsampled layout
-//! (no consistent per-plane tile geometry under §15's fixed
-//! TileOffsets count). Decode-side Compression=7 (new-style
-//! JPEG-in-TIFF, per TIFF Tech Note 2) is implemented as of round 92.
+//! in **both** §22 layouts: the interchange-format layout
+//! (`JPEGInterchangeFormat`, tag 513, points at a complete SOI..EOI
+//! bitstream) and the tables-form layout (raw
+//! JPEGQTables/JPEGDCTables/JPEGACTables + entropy-coded strips),
+//! rebuilt per strip through the ISO 10918-1 / T.81 Annex B marker
+//! syntax — see [`jpeg_old`]. Encode-side JPEG-in-TIFF
+//! (Compression=7) remains out of scope. YCbCr encodes chunky 4:4:4,
+//! chroma-subsampled chunky (§21 data-unit packing, strip + tiled)
+//! and chroma-subsampled `PlanarConfiguration = 2` in both strip and
+//! tiled layouts (full-resolution Y plane + reduced §21 "chroma
+//! image" Cb / Cr planes per the TN2-amended §21 tile geometry,
+//! per-plane §14 predictor); the §14 predictor over the packed
+//! *chunky* data-unit stream stays rejected (no defined shape across
+//! §21 data-unit boundaries).
 //!
 //! ## Standalone vs registry-integrated
 //!
