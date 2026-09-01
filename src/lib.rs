@@ -164,6 +164,8 @@ pub mod jpeg;
 // recognition / rejection semantics have no `oxideav-mjpeg`
 // dependency; only the actual interchange-stream decode (in
 // `decoder`) does.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod jpeg_old;
 
 #[cfg(feature = "registry")]
