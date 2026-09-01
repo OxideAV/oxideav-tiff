@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.6...v0.0.7) - 2026-09-01
+
+### Other
+
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.5...v0.0.6) - 2026-08-31
 
 ### Other
