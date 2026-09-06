@@ -40,6 +40,8 @@
 use crate::ccitt::{encode_ccitt, CcittVariant, FillOrder};
 use crate::compress::{pack_deflate, pack_lzw, pack_packbits, pack_zstd};
 use crate::error::{Result, TiffError as Error};
+pub use crate::jpeg_wrap::JpegOptions;
+use crate::jpeg_wrap::{build_jpeg_segments, JpegPageInput};
 use crate::types::*;
 
 /// One palette entry as stored in the on-disk `ColorMap` tag (each
@@ -754,6 +756,23 @@ pub enum EncodePixelFormat<'a> {
         pixels: &'a [u8],
         subsampling: (u16, u16),
     },
+    /// 12-bit greyscale (BlackIsZero, `BitsPerSample = 12`), one
+    /// `u16` per sample holding a value in `0..=4095`
+    /// (`pixels.len() == width * height`). Only
+    /// [`TiffCompression::Jpeg`] writes this depth — TN2's "for SOF1,
+    /// precision 8 or 12 is permitted; for SOF3, precisions 2 to 16"
+    /// — so it pairs with the 12-bit extended-sequential DCT or the
+    /// lossless process; every other compressor is rejected with a
+    /// precise error (the crate writes no 12-bit packed uncompressed
+    /// layout). The decoder renders the page as `Gray16Le` with each
+    /// code widened onto the 16-bit extent by bit replication.
+    Gray12 { pixels: &'a [u16] },
+    /// 12-bit packed RGB (`PhotometricInterpretation = 2`,
+    /// `BitsPerSample = [12, 12, 12]`), interleaved `(R, G, B)` `u16`
+    /// samples in `0..=4095` (`pixels.len() == width * height * 3`).
+    /// JPEG-only, exactly like [`Self::Gray12`]; decodes to `Rgb48Le`
+    /// by bit replication. Composes with `PlanarConfiguration = 2`.
+    Rgb36 { pixels: &'a [u16] },
 }
 
 /// Compression scheme for an [`EncodePage`].
@@ -842,6 +861,26 @@ pub enum TiffCompression {
     CcittT6 {
         uncompressed: bool,
     },
+    /// JPEG-in-TIFF (`Compression = 7`, TIFF Technical Note 2): every
+    /// strip / tile is one ISO/IEC 10918-1 datastream produced by the
+    /// in-crate T.81 encoder (`SOF0` baseline at 8 bits, `SOF1`
+    /// extended sequential at 12 bits, `SOF3` lossless at 8 / 12 /
+    /// 16 bits per [`JpegOptions::process`]). Accepted inputs:
+    /// `Gray8` / `Rgb24` / `YCbCr24` / `YCbCrSubsampled24` / `Cmyk32`
+    /// (8-bit), `Gray12` / `Rgb36` (12-bit, DCT or lossless) and
+    /// `Gray16Le` / `Rgb48` (16-bit, lossless only). Composes with
+    /// strips (`RowsPerStrip` must be a multiple of the MCU height
+    /// `8 × YCbCrSubsampleVert` for the DCT processes unless
+    /// single-strip), §15 tiles (multiples of the MCU width / height),
+    /// `PlanarConfiguration = 2` (one single-component datastream per
+    /// plane, subsampled chroma planes at their scaled-down size) and
+    /// BigTIFF. `Predictor` never composes (TN2 defines none) and is
+    /// rejected; so are the bilevel / palette / CIELab / float inputs
+    /// ("PhotometricInterpretation … shall not be 3 (palette color)
+    /// nor 4 (transparency mask)"; the bit-depth rules restrict the
+    /// rest). The `JPEGTables` field (tag 347) is written under the
+    /// default [`JpegTablesLayout::Shared`].
+    Jpeg(JpegOptions),
 }
 
 impl TiffCompression {
@@ -860,7 +899,12 @@ impl TiffCompression {
                 COMPRESSION_CCITT_T4
             }
             TiffCompression::CcittT6 { .. } => COMPRESSION_CCITT_T6,
+            TiffCompression::Jpeg(_) => COMPRESSION_JPEG_NEW,
         }
+    }
+
+    fn is_jpeg(self) -> bool {
+        matches!(self, TiffCompression::Jpeg(_))
     }
 
     /// Compress `raw` per this scheme. For bilevel CCITT schemes the
@@ -915,6 +959,13 @@ impl TiffCompression {
                 FillOrder::MsbFirst,
                 uncompressed,
             ),
+            // JPEG segments need the component / sampling geometry,
+            // not just a byte run; `plan_page_full` routes them
+            // through `jpeg_wrap::build_jpeg_segments` instead.
+            TiffCompression::Jpeg(_) => Err(Error::invalid(
+                "TIFF encode: internal — JPEG segments are built by the TN2 segment \
+                 planner, not the byte-run packer",
+            )),
         }
     }
 
@@ -1552,6 +1603,19 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
     // multi-sample float RGB is deferred (the §14 float predictor's planar
     // form needs per-plane byte-plane geometry), so float RGB is excluded
     // from the planar allow-list below and rejected with a precise error.
+    if let TiffCompression::Jpeg(opts) = p.compression {
+        jpeg_plan_gate(p, opts)?;
+    } else if matches!(
+        p.kind,
+        EncodePixelFormat::Gray12 { .. } | EncodePixelFormat::Rgb36 { .. }
+    ) {
+        return Err(Error::invalid(
+            "TIFF encode: the 12-bit Gray12 / Rgb36 inputs are written only under \
+             Compression=7 (JPEG-in-TIFF, TN2 SOF1 / SOF3 precision 12); the crate emits \
+             no 12-bit packed uncompressed / byte-run-compressed layout",
+        ));
+    }
+
     let is_float = matches!(
         p.kind,
         EncodePixelFormat::GrayF16 { .. }
@@ -1587,6 +1651,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 | EncodePixelFormat::Cmyk32 { .. }
                 | EncodePixelFormat::YCbCr24 { .. }
                 | EncodePixelFormat::YCbCrSubsampled24 { .. }
+                | EncodePixelFormat::Rgb36 { .. }
                 | EncodePixelFormat::RgbF16 { .. }
                 | EncodePixelFormat::RgbF32 { .. }
                 | EncodePixelFormat::RgbF64 { .. }
@@ -2119,6 +2184,38 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 }
                 (4u16, vec![8u16, 8, 8, 8], PHOTO_CMYK, pixels.to_vec(), None)
             }
+            EncodePixelFormat::Gray12 { pixels } => {
+                let want = (p.width as usize) * (p.height as usize);
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/Gray12: pixel buffer is {} samples, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                if let Some(bad) = pixels.iter().find(|&&v| v > 4095) {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/Gray12: sample value {bad} exceeds the 12-bit range"
+                    )));
+                }
+                let bytes: Vec<u8> = pixels.iter().flat_map(|v| v.to_le_bytes()).collect();
+                (1u16, vec![12u16], PHOTO_BLACK_IS_ZERO, bytes, None)
+            }
+            EncodePixelFormat::Rgb36 { pixels } => {
+                let want = (p.width as usize) * (p.height as usize) * 3;
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/Rgb36: pixel buffer is {} samples, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                if let Some(bad) = pixels.iter().find(|&&v| v > 4095) {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/Rgb36: sample value {bad} exceeds the 12-bit range"
+                    )));
+                }
+                let bytes: Vec<u8> = pixels.iter().flat_map(|v| v.to_le_bytes()).collect();
+                (3u16, vec![12u16, 12, 12], PHOTO_RGB, bytes, None)
+            }
             EncodePixelFormat::YCbCr24 { pixels } => {
                 // TIFF 6.0 §21 "YCbCr Images" (page 89) — 3-sample
                 // chunky `(Y, Cb, Cr)` at 8 bits per sample under the
@@ -2191,7 +2288,10 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 // (`build_planes_ycbcr_subsampled` below), both directly
                 // from the full-resolution pixels — leave those unpacked
                 // here.
-                let buf = if p.tiling.is_some() || (p.planar && (sh, sv) != (1, 1)) {
+                let buf = if p.tiling.is_some()
+                    || (p.planar && (sh, sv) != (1, 1))
+                    || p.compression.is_jpeg()
+                {
                     pixels.to_vec()
                 } else {
                     pack_ycbcr_data_units(
@@ -2252,7 +2352,51 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
     };
 
     let bps = bits_per_sample[0] as usize;
-    let strips: Vec<Vec<u8>> = if let Some((tile_w, tile_h)) = p.tiling {
+    let mut jpeg_tables: Option<Vec<u8>> = None;
+    let strips: Vec<Vec<u8>> = if let TiffCompression::Jpeg(opts) = p.compression {
+        // TN2 MCU-alignment rules (DCT processes only; "Lossless JPEG
+        // does not impose these constraints"): RowsPerStrip a multiple
+        // of 8 × Vmax unless single-strip; TileWidth / TileLength
+        // multiples of 8 × Hmax / 8 × Vmax.
+        let (sh, sv) = ycbcr_subsampling_nontrivial.unwrap_or((1, 1));
+        if matches!(opts.process, crate::jpeg_enc::JpegProcess::Dct) {
+            if rows_per_strip < p.height && rows_per_strip as usize % (8 * sv) != 0 {
+                return Err(Error::invalid(format!(
+                    "TIFF encode/JPEG: rows_per_strip ({rows_per_strip}) must be a multiple \
+                     of the MCU height 8 × YCbCrSubsampleVert = {} for the DCT processes \
+                     (TN2; single-strip pages are exempt)",
+                    8 * sv
+                )));
+            }
+            if let Some((tw, th)) = p.tiling {
+                if tw as usize % (8 * sh) != 0 || th as usize % (8 * sv) != 0 {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/JPEG: TileWidth/TileLength ({tw}x{th}) must be multiples \
+                         of the MCU size {}x{} (8 × YCbCrSubSampling) for the DCT processes \
+                         (TN2)",
+                        8 * sh,
+                        8 * sv
+                    )));
+                }
+            }
+        }
+        let input = JpegPageInput {
+            raw: &raw_pixels,
+            width: p.width as usize,
+            height: p.height as usize,
+            spp: samples_per_pixel as usize,
+            bits: bps as u16,
+            photometric,
+            subsampling: (sh, sv),
+            planar: p.planar,
+            tiling: p.tiling.map(|(tw, th)| (tw as usize, th as usize)),
+            rows_per_strip: rows_per_strip as usize,
+            opts,
+        };
+        let built = build_jpeg_segments(&input)?;
+        jpeg_tables = built.tables;
+        built.segments
+    } else if let Some((tile_w, tile_h)) = p.tiling {
         if let Some((sh, sv)) = ycbcr_subsampling_nontrivial {
             // Tiled chroma-subsampled YCbCr (TIFF 6.0 §15 + §21). Each
             // tile carries a whole tile_w/sh × tile_h/sv grid of §21 data
@@ -3014,6 +3158,22 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         }
     }
 
+    // 347 JPEGTables (UNDEFINED × N) — TN2 "JPEGTables field": the
+    // abbreviated table-specification datastream shared by every
+    // segment under the `JpegTablesLayout::Shared` layout. "Notice
+    // that the JPEGTables field is required to have type code
+    // UNDEFINED, not type code BYTE." Sits between 339 (SampleFormat)
+    // and 530 (YCbCrSubSampling) in ascending tag order.
+    if let Some(tables) = &jpeg_tables {
+        entries.push(opaque_entry(
+            TAG_JPEG_TABLES,
+            TYPE_UNDEFINED,
+            tables,
+            inline_threshold,
+            &mut externals,
+        ));
+    }
+
     // 530 YCbCrSubSampling (SHORT × 2), 531 YCbCrPositioning (SHORT),
     // 532 ReferenceBlackWhite (RATIONAL × 6) — TIFF 6.0 §21 "YCbCr
     // Images" pages 91 / 92 + §20 "ReferenceBlackWhite" page 87.
@@ -3194,6 +3354,126 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         externals,
         children,
     })
+}
+
+/// Convert an interleaved 8-bit `(R, G, B)` raster to the interleaved
+/// `(Y, Cb, Cr)` raster the [`EncodePixelFormat::YCbCr24`] /
+/// [`EncodePixelFormat::YCbCrSubsampled24`] inputs expect, using the
+/// TIFF 6.0 §21 transformation with the default `YCbCrCoefficients`
+/// (CCIR 601-1 `LumaRed = 299/1000`, `LumaGreen = 587/1000`,
+/// `LumaBlue = 114/1000`):
+///
+/// ```text
+/// Y  = LumaRed × R + LumaGreen × G + LumaBlue × B
+/// Cb = (B − Y) / (2 − 2 × LumaBlue)
+/// Cr = (R − Y) / (2 − 2 × LumaRed)
+/// ```
+///
+/// coded against the `ReferenceBlackWhite = [0, 255, 128, 255, 128,
+/// 255]` "no headroom / footroom" ranges the encoder writes for every
+/// YCbCr page (§20): `Y` occupies `0..=255` as is and the zero-centred
+/// `Cb` / `Cr` are offset by 128. Values are rounded to nearest and
+/// clamped. This is the inverse of the matrix the decoder's YCbCr →
+/// RGB compositor applies, so an RGB image routed through this
+/// helper, [`TiffCompression::Jpeg`] and `decode_tiff` returns to RGB
+/// with only the codec's own loss.
+pub fn rgb24_to_ycbcr24(rgb: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgb.len());
+    for px in rgb.chunks_exact(3) {
+        let (r, g, b) = (px[0] as f64, px[1] as f64, px[2] as f64);
+        let y = 0.299 * r + 0.587 * g + 0.114 * b;
+        let cb = (b - y) / (2.0 - 2.0 * 0.114) + 128.0;
+        let cr = (r - y) / (2.0 - 2.0 * 0.299) + 128.0;
+        out.push(y.round().clamp(0.0, 255.0) as u8);
+        out.push(cb.round().clamp(0.0, 255.0) as u8);
+        out.push(cr.round().clamp(0.0, 255.0) as u8);
+    }
+    out
+}
+
+/// Plan-stage acceptance rules for [`TiffCompression::Jpeg`]
+/// (TIFF Technical Note 2, "Replacement TIFF/JPEG specification").
+fn jpeg_plan_gate(p: &EncodePage<'_>, opts: JpegOptions) -> Result<()> {
+    use crate::jpeg_enc::JpegProcess;
+    if p.predictor {
+        return Err(Error::invalid(
+            "TIFF encode/JPEG: Predictor cannot combine with Compression=7 — TN2 defines \
+             no §14 differencing over JPEG datastreams",
+        ));
+    }
+    if !(1..=100).contains(&opts.quality) {
+        return Err(Error::invalid(format!(
+            "TIFF encode/JPEG: quality {} out of range 1..=100",
+            opts.quality
+        )));
+    }
+    let bits: u16 = match &p.kind {
+        EncodePixelFormat::Gray8 { .. }
+        | EncodePixelFormat::Rgb24 { .. }
+        | EncodePixelFormat::YCbCr24 { .. }
+        | EncodePixelFormat::YCbCrSubsampled24 { .. }
+        | EncodePixelFormat::Cmyk32 { .. } => 8,
+        EncodePixelFormat::Gray12 { .. } | EncodePixelFormat::Rgb36 { .. } => 12,
+        EncodePixelFormat::Gray16Le { .. } | EncodePixelFormat::Rgb48 { .. } => 16,
+        other => {
+            return Err(Error::invalid(format!(
+                "TIFF encode/JPEG: {} is not a JPEG-in-TIFF input — TN2 restricts \
+                 Compression=7 to continuous-tone greyscale / RGB / YCbCr / CMYK data at \
+                 8 or 12 bits (DCT) or 2..=16 bits (lossless); bilevel, palette, \
+                 transparency-mask, CIELab and floating-point pages are rejected",
+                match other {
+                    EncodePixelFormat::Bilevel { .. } => "Bilevel",
+                    EncodePixelFormat::TransparencyMask { .. } => "TransparencyMask",
+                    EncodePixelFormat::Gray4 { .. } => "Gray4",
+                    EncodePixelFormat::Rgba32 { .. } => "Rgba32",
+                    EncodePixelFormat::Palette8 { .. } => "Palette8",
+                    EncodePixelFormat::Palette4 { .. } => "Palette4",
+                    EncodePixelFormat::GrayI8 { .. } => "GrayI8",
+                    EncodePixelFormat::GrayI16 { .. } => "GrayI16",
+                    EncodePixelFormat::GrayF16 { .. }
+                    | EncodePixelFormat::GrayF32 { .. }
+                    | EncodePixelFormat::GrayF64 { .. }
+                    | EncodePixelFormat::RgbF16 { .. }
+                    | EncodePixelFormat::RgbF32 { .. }
+                    | EncodePixelFormat::RgbF64 { .. } => "float",
+                    EncodePixelFormat::CieLab8 { .. } | EncodePixelFormat::CieLabL8 { .. } => {
+                        "CIELab"
+                    }
+                    _ => "this pixel format",
+                }
+            )));
+        }
+    };
+    match opts.process {
+        JpegProcess::Dct => {
+            if bits == 16 {
+                return Err(Error::invalid(
+                    "TIFF encode/JPEG: 16-bit input (Gray16Le / Rgb48) is written only by \
+                     the lossless process (JpegProcess::Lossless) — TN2 permits SOF1 \
+                     precision 8 or 12 only",
+                ));
+            }
+        }
+        JpegProcess::Lossless { predictor } => {
+            if !(1..=7).contains(&predictor) {
+                return Err(Error::invalid(format!(
+                    "TIFF encode/JPEG: lossless predictor {predictor} — T.81 Table H.1 \
+                     defines selection values 1..=7"
+                )));
+            }
+            if let EncodePixelFormat::YCbCrSubsampled24 { subsampling, .. } = &p.kind {
+                if *subsampling != (1, 1) {
+                    return Err(Error::invalid(
+                        "TIFF encode/JPEG: the lossless process is written for \
+                         non-subsampled data only (YCbCrSubSampling = [1, 1]); \
+                         chroma-subsampled YCbCr pairs with the DCT process",
+                    ));
+                }
+            }
+        }
+    }
+    let _ = bits;
+    Ok(())
 }
 
 /// Build an opaque byte-payload entry (XMP packet / ICC profile): the

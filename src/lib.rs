@@ -169,6 +169,8 @@ pub mod jpeg;
 pub mod jpeg_enc;
 #[doc(hidden)]
 pub mod jpeg_old;
+#[doc(hidden)]
+pub mod jpeg_wrap;
 
 #[cfg(feature = "registry")]
 pub mod registry;
@@ -182,11 +184,14 @@ pub use decoder::{
     decode_tiff, decode_tiff_all, decode_tiff_all_pages, decode_tiff_at, DecodedTiff,
 };
 pub use encoder::{
-    encode_tiff, encode_tiff_multi, f16_bits_to_f32, f32_to_f16_bits, AuxIfdEntry, EncodePage,
-    EncodePixelFormat, ExtraSampleKind, PageExtras, PageResolution, RgbColor, TiffCompression,
+    encode_tiff, encode_tiff_multi, f16_bits_to_f32, f32_to_f16_bits, rgb24_to_ycbcr24,
+    AuxIfdEntry, EncodePage, EncodePixelFormat, ExtraSampleKind, PageExtras, PageResolution,
+    RgbColor, TiffCompression,
 };
 pub use error::{Result, TiffError};
 pub use image::{TiffImage, TiffPixelFormat, TiffPlane};
+pub use jpeg_enc::JpegProcess;
+pub use jpeg_wrap::{JpegOptions, JpegTablesLayout};
 pub use metadata::{ResolutionUnit, TiffFormatInfo, TiffMetadata};
 
 // Framework-integrated API (`oxideav-core`-dependent). Gated behind
