@@ -115,6 +115,7 @@ fuzz_target!(|data: &[u8]| {
             tables,
             process,
             optimize_huffman,
+            restart_interval: (byte(data, 7) >> 4) as u16,
         }),
         predictor: false,
         planar,
@@ -195,6 +196,7 @@ fuzz_target!(|data: &[u8]| {
         height: height as u16,
         precision,
         process,
+        restart_interval: 0,
     };
     let comp_w = (byte(data, 5) % 41) as usize + 1;
     let comp_h = (byte(data, 6) % 41) as usize + 1;

@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PlanarConfiguration = 2` (scaled chroma planes per TN2), BigTIFF
   and multi-page; tables shared through `JPEGTables` (tag 347) or
   written per segment (`JpegTablesLayout`).
+- `JpegOptions::restart_interval`: `DRI` / `RSTm` restart intervals
+  (T.81 B.2.4.4, E.1.3 / E.1.4) for the DCT processes; the engine
+  also writes H.1.1 row-aligned lossless restarts (`djpeg`-exact) but
+  the TIFF level rejects lossless + restart until the crate's reader
+  restores the H.1.2.1 start-of-interval prediction rule.
 - `rgb24_to_ycbcr24`: TIFF 6.0 §21 RGB → YCbCr with the default CCIR
   601-1 coefficients and the encoder's no-headroom
   `ReferenceBlackWhite`.

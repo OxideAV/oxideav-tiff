@@ -235,6 +235,7 @@ fn baseline_gray_roundtrips_through_own_decoder_and_djpeg() {
             height: h as u16,
             precision: 8,
             process: JpegProcess::Dct,
+            restart_interval: 0,
         };
         let comps = [gray_comp(&src, w, h)];
         for quality in [50u8, 90, 100] {
@@ -295,6 +296,7 @@ fn baseline_ycbcr_subsampled_roundtrips() {
             height: h as u16,
             precision: 8,
             process: JpegProcess::Dct,
+            restart_interval: 0,
         };
         let comps = [
             JpegComponent {
@@ -372,6 +374,7 @@ fn extended_12bit_gray_roundtrips() {
         height: h as u16,
         precision: 12,
         process: JpegProcess::Dct,
+        restart_interval: 0,
     };
     let comps = [gray_comp(&src, w, h)];
     let tables = optimal_tables(&frame, &comps, 95);
@@ -420,6 +423,7 @@ fn lossless_gray_is_sample_exact_for_every_predictor() {
                 height: h as u16,
                 precision: bits as u8,
                 process: JpegProcess::Lossless { predictor },
+                restart_interval: 0,
             };
             let comps = [gray_comp(&src, w, h)];
             let tables = optimal_tables(&frame, &comps, 50);
@@ -479,6 +483,7 @@ fn lossless_rgb_interleaved_is_sample_exact() {
         height: h as u16,
         precision: 16,
         process: JpegProcess::Lossless { predictor: 1 },
+        restart_interval: 0,
     };
     let comps = [
         gray_comp(&r, w, h),
@@ -543,6 +548,7 @@ fn abbreviated_segment_decodes_with_tables_stream() {
         height: h as u16,
         precision: 8,
         process: JpegProcess::Dct,
+        restart_interval: 0,
     };
     let comps = [gray_comp(&src, w, h)];
     let tables = baseline_tables(85, 8);
@@ -571,4 +577,209 @@ fn abbreviated_segment_decodes_with_tables_stream() {
         })
         .collect();
     assert!(psnr(&src, &got, 255.0) >= 35.0);
+}
+
+// ---------------------------------------------------------------------------
+// Restart intervals (B.2.4.4 DRI, E.1.3 RSTm).
+// ---------------------------------------------------------------------------
+
+/// Count `RSTm` markers (`FF D0`..`FF D7`) in the entropy-coded
+/// segment and check the modulo-8 sequence.
+fn rst_markers(stream: &[u8]) -> usize {
+    let sos = stream.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
+    let mut n = 0usize;
+    let mut expect = 0u8;
+    let mut i = sos + 2;
+    while i + 1 < stream.len() {
+        if stream[i] == 0xFF && (0xD0..=0xD7).contains(&stream[i + 1]) {
+            assert_eq!(stream[i + 1] - 0xD0, expect, "RSTm modulo-8 sequence");
+            expect = (expect + 1) & 7;
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+#[test]
+fn restart_intervals_dct_gray_and_420() {
+    let (w, h) = (40usize, 24usize);
+    let src = smooth(w, h, 8, 2);
+    // 15 MCUs, Ri = 4 → intervals of 4,4,4,3 → 3 RST markers.
+    let frame = JpegFrame {
+        width: w as u16,
+        height: h as u16,
+        precision: 8,
+        process: JpegProcess::Dct,
+        restart_interval: 4,
+    };
+    let comps = [gray_comp(&src, w, h)];
+    let bytes = encode_frame(&frame, &comps, &baseline_tables(90, 8), true).unwrap();
+    let dri = bytes.windows(2).position(|x| x == [0xFF, 0xDD]).unwrap();
+    assert_eq!(&bytes[dri + 2..dri + 6], &[0, 4, 0, 4], "DRI Lr=4 Ri=4");
+    assert_eq!(rst_markers(&bytes), 3);
+    let seg = decode_segment(None, &bytes, w as u32, h as u32, PHOTO_BLACK_IS_ZERO, 8).unwrap();
+    let plane = &seg.planes[0];
+    let got: Vec<u16> = (0..h)
+        .flat_map(|y| {
+            plane.data[y * plane.stride..y * plane.stride + w]
+                .iter()
+                .map(|&b| b as u16)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(psnr(&src, &got, 255.0) >= 38.0);
+    if let Some(pnm) = djpeg(&bytes, &["-pnm"]) {
+        let (_, _, _, _, s) = parse_pnm(&pnm);
+        assert!(psnr(&src, &s, 255.0) >= 38.0);
+        assert!(psnr(&got, &s, 255.0) >= 45.0);
+    }
+
+    // Interleaved 4:2:0: 3 × 2 MCUs of 16×16, Ri = 2 → 2 RST markers.
+    let y = smooth(48, 32, 8, 1);
+    let cb = smooth(48, 32, 8, 7);
+    let cr = smooth(48, 32, 8, 13);
+    let (cbd, cw, ch) = decimate(&cb, 48, 32, 2, 2);
+    let (crd, _, _) = decimate(&cr, 48, 32, 2, 2);
+    let frame = JpegFrame {
+        width: 48,
+        height: 32,
+        precision: 8,
+        process: JpegProcess::Dct,
+        restart_interval: 2,
+    };
+    let comps = [
+        JpegComponent {
+            samples: &y,
+            width: 48,
+            height: 32,
+            h: 2,
+            v: 2,
+            quant_id: 0,
+            huff_id: 0,
+        },
+        JpegComponent {
+            samples: &cbd,
+            width: cw,
+            height: ch,
+            h: 1,
+            v: 1,
+            quant_id: 1,
+            huff_id: 1,
+        },
+        JpegComponent {
+            samples: &crd,
+            width: cw,
+            height: ch,
+            h: 1,
+            v: 1,
+            quant_id: 1,
+            huff_id: 1,
+        },
+    ];
+    let bytes = encode_frame(&frame, &comps, &baseline_tables(90, 8), true).unwrap();
+    assert_eq!(rst_markers(&bytes), 2);
+    let seg = decode_segment(None, &bytes, 48, 32, PHOTO_YCBCR, 8).unwrap();
+    assert_eq!(seg.pixel_format, JpegPixelFormat::Yuv420P);
+    if let Some(pnm) = djpeg(&bytes, &["-pnm"]) {
+        let (c, pw, ph, _, _) = parse_pnm(&pnm);
+        assert_eq!((c, pw, ph), (3, 48, 32));
+    }
+}
+
+/// 8-bit lossless with one MCU-row per interval and predictor 2
+/// (`Rb`): after every restart the first line must switch back to the
+/// `Ra` predictor (H.1.2.1). djpeg is the arbiter — the crate's own
+/// reader does not implement that rule yet (the TIFF layer rejects
+/// the combination until it does).
+#[test]
+fn restart_intervals_lossless_8bit_per_row_predictor_rb_djpeg_exact() {
+    let (w, h) = (48usize, 12usize);
+    let src = smooth(w, h, 8, 8);
+    let comps = [gray_comp(&src, w, h)];
+    let frame = JpegFrame {
+        width: w as u16,
+        height: h as u16,
+        precision: 8,
+        process: JpegProcess::Lossless { predictor: 2 },
+        restart_interval: 48,
+    };
+    let tables = optimal_tables(&frame, &comps, 50);
+    let bytes = encode_frame(&frame, &comps, &tables, true).unwrap();
+    assert_eq!(rst_markers(&bytes), 11);
+    if let Some(pnm) = djpeg(&bytes, &["-pnm"]) {
+        let (_, _, _, _, s) = parse_pnm(&pnm);
+        assert_eq!(s, src);
+    } else {
+        eprintln!("note: djpeg unavailable — encoder-side restart check not arbitrated");
+    }
+}
+
+#[test]
+fn restart_intervals_lossless_are_row_aligned_and_exact() {
+    let (w, h) = (19usize, 11usize);
+    let src = smooth(w, h, 16, 5);
+    let comps = [gray_comp(&src, w, h)];
+    // H.1.1: Ri must be a multiple of the MCUs per row (19 here).
+    let bad = JpegFrame {
+        width: w as u16,
+        height: h as u16,
+        precision: 16,
+        process: JpegProcess::Lossless { predictor: 4 },
+        restart_interval: 7,
+    };
+    let tables = optimal_tables(
+        &JpegFrame {
+            restart_interval: 0,
+            ..bad
+        },
+        &comps,
+        50,
+    );
+    assert!(encode_frame(&bad, &comps, &tables, true).is_err());
+    for predictor in [1u8, 4, 7] {
+        let frame = JpegFrame {
+            width: w as u16,
+            height: h as u16,
+            precision: 16,
+            process: JpegProcess::Lossless { predictor },
+            restart_interval: 38,
+        };
+        let tables = optimal_tables(&frame, &comps, 50);
+        let bytes = encode_frame(&frame, &comps, &tables, true).unwrap();
+        // 11 rows / 2 rows per interval → 6 intervals → 5 markers.
+        assert_eq!(rst_markers(&bytes), 5);
+        // djpeg arbitrates the H.1.2.1 start-of-interval rule.
+        if let Some(pnm) = djpeg(&bytes, &["-pnm", "-precision", "16"]) {
+            let (_, _, _, _, s) = parse_pnm(&pnm);
+            assert_eq!(s, src, "djpeg predictor {predictor}");
+        }
+        let seg =
+            decode_segment(None, &bytes, w as u32, h as u32, PHOTO_BLACK_IS_ZERO, 16).unwrap();
+        let plane = &seg.planes[0];
+        let got: Vec<u16> = (0..h)
+            .flat_map(|y| {
+                plane.data[y * plane.stride..y * plane.stride + w * 2]
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        // The first interval never depends on the restart rule and
+        // predictor 1 *is* the first-line predictor, so those must be
+        // exact through our own reader too. For the 2-D predictors the
+        // crate's reader does not yet switch back to `Ra` on the first
+        // line of a new interval (the TIFF layer rejects lossless +
+        // restart until it does), so only the first interval is
+        // pinned here.
+        let first_interval = 2 * w;
+        assert_eq!(
+            &got[..first_interval],
+            &src[..first_interval],
+            "predictor {predictor}"
+        );
+        if predictor == 1 {
+            assert_eq!(got, src, "predictor 1 is restart-invariant");
+        }
+    }
 }

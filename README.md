@@ -935,7 +935,14 @@ let tiff = encode_tiff(&page)?;
   scales the Annex K.1 / K.2 tables (50 = as printed, 75 = halved per
   the K.1 note, 100 = all ones); `optimize_huffman` derives per-image
   tables via the K.2 procedure (always on for 12-bit DCT and
-  lossless).
+  lossless); `restart_interval` (MCUs) writes a `DRI` segment into
+  every strip / tile and `RSTm` markers between intervals (T.81
+  E.1.3 / E.1.4 — DC predictions reset, 1-bit padding before the
+  marker). Restarts are DCT-only at the TIFF level: the engine also
+  writes H.1.1 row-aligned lossless restarts (exact under `djpeg`,
+  libtiff and ImageMagick), but the crate's own `Compression = 7`
+  reader does not restore the H.1.2.1 start-of-interval prediction
+  rule yet, so lossless + restart is a precise `Unsupported`.
 * **Colour** follows TN2's "color blind" rule: the JPEG components
   are whatever the TIFF fields say — `Rgb24` is stored as three
   untransformed R/G/B components under `PhotometricInterpretation =
@@ -1070,9 +1077,11 @@ remaining gaps are:
 - **JPEG-in-TIFF encode gaps** — the deprecated `Compression = 6`
   (§22) layouts are decode-only (TN2 discourages writing them);
   `[4,2]` chroma subsampling writes but the crate's own reader
-  (`oxideav-mjpeg`) rejects 4×2 luma sampling; restart intervals
-  (`DRI` / `RSTn`) and arithmetic coding are not written (TN2
-  discourages the latter).
+  (`oxideav-mjpeg`) rejects 4×2 luma sampling and does not apply the
+  T.81 H.1.2.1 restart rule to 2-D lossless predictors (so lossless +
+  `restart_interval` stays a precise `Unsupported` while DCT restarts
+  write and read back); arithmetic coding is not written (TN2
+  discourages it).
 - **Deep (>8-bit) CMYK JPEG-in-TIFF and sub-8-bit SOF3 precisions** —
   precise `Error::Unsupported` (no deployed layout to validate
   against); likewise per-component `Ss` / `Al` divergence within one

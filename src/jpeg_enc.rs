@@ -60,10 +60,12 @@ const SOF0: u8 = 0xC0;
 const SOF1: u8 = 0xC1;
 const SOF3: u8 = 0xC3;
 const DHT: u8 = 0xC4;
+const RST0: u8 = 0xD0;
 const SOI: u8 = 0xD8;
 const EOI: u8 = 0xD9;
 const SOS: u8 = 0xDA;
 const DQT: u8 = 0xDB;
+const DRI: u8 = 0xDD;
 
 // ---------------------------------------------------------------------------
 // Zig-zag sequence — T.81 Figure A.6 (A.3.6). `NATURAL[k]` is the
@@ -568,6 +570,14 @@ pub struct JpegFrame {
     /// for [`JpegProcess::Lossless`].
     pub precision: u8,
     pub process: JpegProcess,
+    /// Restart interval `Ri` in MCUs (B.2.4.4); 0 disables restarts.
+    /// When enabled a `DRI` segment precedes the scan and an `RSTm`
+    /// marker (`m` cycling 0..=7) terminates every interval but the
+    /// last (E.1.3 / E.1.4: the entropy-coded segment is padded with
+    /// 1-bits, the DC predictions — or the lossless predictor state —
+    /// are reset). For the lossless process H.1.1 requires `Ri` to be
+    /// an integer multiple of the number of MCUs in an MCU-row.
+    pub restart_interval: u16,
 }
 
 // ---------------------------------------------------------------------------
@@ -609,13 +619,24 @@ impl BitWriter {
         self.acc &= (1u32 << self.nbits).wrapping_sub(1);
     }
 
-    /// F.1.2.3: pad the final byte with 1-bits (stuffing a zero after
-    /// an `X'FF'` produced by the padding).
-    fn finish(mut self) -> Vec<u8> {
+    /// F.1.2.3: pad the current byte with 1-bits (stuffing a zero
+    /// after an `X'FF'` produced by the padding) — E.1.4
+    /// "Prepare_for_marker".
+    fn pad_to_byte(&mut self) {
         if self.nbits > 0 {
             let pad = 8 - self.nbits;
             self.put((1u32 << pad) - 1, pad);
         }
+    }
+
+    /// Terminate the current restart interval with `RSTm` (E.1.3).
+    fn restart(&mut self, m: u8) {
+        self.pad_to_byte();
+        self.out.extend_from_slice(&[0xFF, RST0 + (m & 7)]);
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        self.pad_to_byte();
         self.out
     }
 }
@@ -658,6 +679,14 @@ impl Sink<'_> {
             Sink::Count { dc, .. } => dc[table as usize].count(symbol),
         }
         Ok(())
+    }
+
+    /// E.1.3: end the current restart interval with `RSTm` (the
+    /// statistics sink has nothing to emit).
+    fn restart(&mut self, m: u8) {
+        if let Sink::Emit { writer, .. } = self {
+            writer.restart(m);
+        }
     }
 
     /// Code one AC-class composite symbol (`RRRRSSSS`) plus additional
@@ -979,8 +1008,19 @@ fn code_scan_dct(
         .collect::<Result<_>>()?;
     let mut pred: Vec<i32> = vec![0; comps.len()];
     let mut block = [0f64; 64];
+    let ri = frame.restart_interval as usize;
+    let mut mcus_done = 0usize;
+    let mut rst_m: u8 = 0;
     for my in 0..mcus_y {
         for mx in 0..mcus_x {
+            // E.1.3 / E.1.4: after `Ri` MCUs (and more to come) close
+            // the interval with RSTm and reset the DC predictions.
+            if ri > 0 && mcus_done > 0 && mcus_done % ri == 0 {
+                sink.restart(rst_m);
+                rst_m = (rst_m + 1) & 7;
+                pred.fill(0);
+            }
+            mcus_done += 1;
             for (ci, c) in comps.iter().enumerate() {
                 let (bh, bv) = if interleaved {
                     (c.h as usize, c.v as usize)
@@ -1065,8 +1105,27 @@ fn code_scan_lossless(
         (comps[0].width, comps[0].height)
     };
     let initial = 1i32 << (frame.precision - 1);
+    let ri = frame.restart_interval as usize;
+    if ri > 0 && ri % mcus_x != 0 {
+        return Err(Error::invalid(format!(
+            "JPEG encode: lossless restart interval {ri} is not a multiple of the {mcus_x} \
+             MCUs per MCU-row (T.81 H.1.1)"
+        )));
+    }
+    let mut mcus_done = 0usize;
+    let mut rst_m: u8 = 0;
+    // The MCU row that opened the current restart interval: its first
+    // sample line predicts from `Ra` / the `2^(P-1)` start value
+    // (H.1.2.1), exactly like the first line of the scan.
+    let mut interval_first_my = 0usize;
     for my in 0..mcus_y {
         for mx in 0..mcus_x {
+            if ri > 0 && mcus_done > 0 && mcus_done % ri == 0 {
+                sink.restart(rst_m);
+                rst_m = (rst_m + 1) & 7;
+                interval_first_my = my;
+            }
+            mcus_done += 1;
             for c in comps.iter() {
                 let (bh, bv) = if interleaved {
                     (c.h as usize, c.v as usize)
@@ -1077,6 +1136,7 @@ fn code_scan_lossless(
                     for h in 0..bh {
                         let x = mx * bh + h;
                         let y = my * bv + v;
+                        let first_line = my == interval_first_my && v == 0;
                         // A.2.4: samples appended to complete a partial
                         // MCU replicate the edge sample.
                         let sample = |xx: usize, yy: usize| -> i32 {
@@ -1086,7 +1146,7 @@ fn code_scan_lossless(
                         };
                         let cur = sample(x, y);
                         // H.1.2.1 prediction.
-                        let px = if y == 0 {
+                        let px = if first_line {
                             if x == 0 {
                                 initial
                             } else {
@@ -1183,6 +1243,11 @@ pub fn encode_frame(
         tables.write_tables(&mut out, dct);
     }
     write_sof(&mut out, frame, comps);
+    if frame.restart_interval > 0 {
+        // B.2.4.4: DRI, Lr = 4, Ri.
+        out.extend_from_slice(&[0xFF, DRI, 0, 4]);
+        out.extend_from_slice(&frame.restart_interval.to_be_bytes());
+    }
     write_sos(&mut out, frame, comps);
     let mut writer = BitWriter::new();
     {
@@ -1365,6 +1430,7 @@ mod tests {
                 height: h,
                 precision: 8,
                 process: JpegProcess::Dct,
+                restart_interval: 0,
             },
         )
     }

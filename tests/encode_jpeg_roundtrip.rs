@@ -1338,6 +1338,95 @@ fn lossless_ycbcr_444_composites_packed_segments() {
     }
 }
 
+/// `JpegOptions::restart_interval`: every segment carries `DRI` and
+/// `RSTm` markers; TIFF-level readers (libtiff / ImageMagick) and our
+/// own decoder must all accept them, and lossless stays exact with the
+/// H.1.1 row-aligned rounding.
+#[test]
+fn restart_intervals_compose_with_strips_tiles_and_lossless() {
+    fn rst_count(stream: &[u8]) -> usize {
+        let sos = stream.windows(2).position(|x| x == [0xFF, 0xDA]).unwrap();
+        stream[sos + 2..]
+            .windows(2)
+            .filter(|x| x[0] == 0xFF && (0xD0..=0xD7).contains(&x[1]))
+            .count()
+    }
+    let (w, h) = (48u32, 40u32);
+    let gray = smooth_gray(w as usize, h as usize, 8);
+    let opts = JpegOptions {
+        quality: 90,
+        restart_interval: 4,
+        ..JpegOptions::default()
+    };
+    let mut p = page(
+        w,
+        h,
+        EncodePixelFormat::Gray8 { pixels: &gray },
+        TiffCompression::Jpeg(opts),
+    );
+    p.extras.rows_per_strip = Some(16);
+    let tiff = encode_tiff(&p).unwrap();
+    let segs = extract_segments(&tiff);
+    assert_eq!(segs.len(), 3);
+    // 6 × 2 = 12 MCUs per full strip, Ri = 4 → 2 markers; the last strip
+    // (8 rows = 6 MCUs) → 1 marker.
+    assert_eq!(rst_count(&segs[0]), 2);
+    assert_eq!(rst_count(&segs[2]), 1);
+    assert!(segs[0].windows(2).any(|x| x == [0xFF, 0xDD]), "DRI present");
+    validate_8bit(&tiff, &gray, false, 38.0, "gray8 strips DRI=4");
+
+    let ycc = smooth_ycc(w as usize, h as usize);
+    let mut p = page(
+        w,
+        h,
+        EncodePixelFormat::YCbCrSubsampled24 {
+            pixels: &ycc,
+            subsampling: (2, 2),
+        },
+        TiffCompression::Jpeg(JpegOptions {
+            restart_interval: 1,
+            ..opts
+        }),
+    );
+    p.tiling = Some((32, 32));
+    let tiff = encode_tiff(&p).unwrap();
+    let segs = extract_segments(&tiff);
+    // 32×32 tile = 4 MCUs of 16×16 at Ri = 1 → 3 markers per tile.
+    assert_eq!(rst_count(&segs[0]), 3);
+    let reference = splat_reference_rgb(&ycc, w as usize, h as usize, 2, 2);
+    validate_8bit_agree(
+        &tiff,
+        &reference,
+        true,
+        36.0,
+        33.0,
+        "ycbcr 4:2:0 tiles DRI=1",
+    );
+
+    // Lossless + restarts: the engine writes them (row-aligned per
+    // H.1.1, exact under djpeg / libtiff / ImageMagick — see the
+    // engine suite), but the crate's own reader does not restore the
+    // H.1.2.1 start-of-interval prediction rule, so the TIFF level
+    // rejects the combination precisely rather than emit pages it
+    // cannot read back.
+    let err = encode_tiff(&page(
+        w,
+        h,
+        EncodePixelFormat::Gray8 { pixels: &gray },
+        TiffCompression::Jpeg(JpegOptions {
+            process: JpegProcess::Lossless { predictor: 2 },
+            restart_interval: 5,
+            ..JpegOptions::default()
+        }),
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(err, oxideav_tiff::TiffError::Unsupported(_)),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("restart intervals"), "{err}");
+}
+
 #[test]
 fn bigtiff_and_multipage_compose_with_jpeg() {
     let (w, h) = (20u32, 18u32);

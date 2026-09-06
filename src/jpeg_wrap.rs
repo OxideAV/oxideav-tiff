@@ -89,6 +89,16 @@ pub struct JpegOptions {
     /// K.3 tables cannot code the extended categories) and for the
     /// lossless process. Default off.
     pub optimize_huffman: bool,
+    /// Restart interval in MCUs (T.81 B.2.4.4 `DRI` / `RSTm` markers,
+    /// E.1.3); 0 (default) writes no restart markers. Every segment
+    /// carries its own `DRI` (TN2: `DRI` inside `JPEGTables` is a
+    /// no-op since `SOI` resets it). DCT processes only for now: the
+    /// engine writes H.1.1 row-aligned lossless restarts (validated
+    /// against `djpeg`), but the crate's own `Compression = 7` reader
+    /// does not restore the H.1.2.1 start-of-interval prediction rule,
+    /// so lossless + restart is a precise `Unsupported` at the TIFF
+    /// level until it does.
+    pub restart_interval: u16,
 }
 
 impl Default for JpegOptions {
@@ -98,6 +108,7 @@ impl Default for JpegOptions {
             tables: JpegTablesLayout::Shared,
             process: JpegProcess::Dct,
             optimize_huffman: false,
+            restart_interval: 0,
         }
     }
 }
@@ -467,11 +478,23 @@ fn install_optimal(
 /// the shared layout is in use.
 pub(crate) fn build_jpeg_segments(inp: &JpegPageInput<'_>) -> Result<JpegSegments> {
     let segs = plan_segments(inp)?;
-    let frame_of = |s: &Segment| JpegFrame {
-        width: s.width,
-        height: s.height,
-        precision: inp.bits as u8,
-        process: inp.opts.process,
+    let frame_of = |s: &Segment| {
+        let mut ri = inp.opts.restart_interval as usize;
+        if ri > 0 && matches!(inp.opts.process, JpegProcess::Lossless { .. }) {
+            // H.1.1: a lossless restart interval covers whole MCU-rows.
+            // Every segment the wrapper plans has all-ones sampling
+            // factors under the lossless process, so an MCU-row is
+            // `width` MCUs wide.
+            let per_row = s.width as usize;
+            ri = ri.div_ceil(per_row) * per_row;
+        }
+        JpegFrame {
+            width: s.width,
+            height: s.height,
+            precision: inp.bits as u8,
+            process: inp.opts.process,
+            restart_interval: ri.min(u16::MAX as usize) as u16,
+        }
     };
     let dct = matches!(inp.opts.process, JpegProcess::Dct);
     match inp.opts.tables {

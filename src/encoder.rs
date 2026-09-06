@@ -3455,6 +3455,14 @@ fn jpeg_plan_gate(p: &EncodePage<'_>, opts: JpegOptions) -> Result<()> {
             }
         }
         JpegProcess::Lossless { predictor } => {
+            if opts.restart_interval > 0 {
+                return Err(Error::unsupported(
+                    "TIFF encode/JPEG: restart intervals with the lossless process are not \
+                     written yet — the crate's Compression=7 reader does not restore the \
+                     T.81 H.1.2.1 start-of-interval prediction rule, so such pages would \
+                     not round-trip (the DCT processes accept restart_interval)",
+                ));
+            }
             if !(1..=7).contains(&predictor) {
                 return Err(Error::invalid(format!(
                     "TIFF encode/JPEG: lossless predictor {predictor} — T.81 Table H.1 \
