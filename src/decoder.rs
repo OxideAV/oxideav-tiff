@@ -4378,13 +4378,6 @@ fn decode_ifd_jpeg_old_tables_form(
              streams are synthesized)"
         )));
     }
-    if find(entries, TAG_TILE_WIDTH).is_some() {
-        return Err(Error::Unsupported(
-            "TIFF/JPEG(§22): tiled tables-form layout is not supported (§22 writers \
-             produced strip-oriented files); the strip layout decodes"
-                .into(),
-        ));
-    }
     // Missing mandatory table fields surface through the established
     // precise-error builder before any synthesis is attempted.
     match fields.proc {
@@ -4420,6 +4413,22 @@ fn decode_ifd_jpeg_old_tables_form(
     } else {
         (1, 1)
     };
+
+    if find(entries, TAG_TILE_WIDTH).is_some() {
+        return decode_ifd_jpeg_old_tables_form_tiled(
+            input,
+            entries,
+            bo,
+            width,
+            height,
+            samples_per_pixel,
+            bps_first,
+            photometric,
+            fields,
+            planar,
+            (sub_h, sub_v),
+        );
+    }
 
     let rows_per_strip = find(entries, TAG_ROWS_PER_STRIP)
         .map(|e| e.as_u32(bo))
@@ -4671,6 +4680,249 @@ fn decode_ifd_jpeg_old_tables_form(
 /// runs first, so malformed tables-form IFDs keep their precise
 /// errors in both build modes (only a well-formed tables-form IFD
 /// reaches the registry-feature stub).
+/// §22 tables-form layout over **tiles** (TIFF 6.0 §15 + §22 "Strips
+/// and Tiles": "each tile ... points directly to the start of the
+/// entropy coded data"). Every tile is rebuilt into one datastream
+/// of `TileWidth × TileLength` (the SOF dimensions include the §15
+/// edge padding; the visible region is clipped when compositing —
+/// the same policy the Compression = 7 tile walker applies), with
+/// the §22 per-component tables shared by every tile.
+/// `PlanarConfiguration = 2` runs plane-major (`SamplesPerPixel ×
+/// TilesPerImage` entries); a subsampled chroma plane's tiles are
+/// `TileWidth / sh × TileLength / sv` (§21 as amended by TN2
+/// constrains the tile size to a multiple of the factors).
+#[cfg(feature = "registry")]
+#[allow(clippy::too_many_arguments)]
+fn decode_ifd_jpeg_old_tables_form_tiled(
+    input: &[u8],
+    entries: &[Entry],
+    bo: ByteOrder,
+    width: u32,
+    height: u32,
+    samples_per_pixel: u16,
+    bps_first: u16,
+    photometric: u16,
+    fields: &crate::jpeg_old::OldJpegFields,
+    planar: u16,
+    (sub_h, sub_v): (usize, usize),
+) -> Result<TiffImage> {
+    use crate::jpeg_old::TablesFormComponent;
+
+    let tile_w = find(entries, TAG_TILE_WIDTH)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileWidth"))?
+        .as_u32(bo)?;
+    let tile_h = find(entries, TAG_TILE_LENGTH)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileLength"))?
+        .as_u32(bo)?;
+    if tile_w == 0 || tile_h == 0 {
+        return Err(Error::invalid("TIFF: zero tile dimension"));
+    }
+    let tile_offsets = find(entries, TAG_TILE_OFFSETS)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileOffsets"))?
+        .as_u64_vec(bo)?;
+    let tile_byte_counts = find(entries, TAG_TILE_BYTE_COUNTS)
+        .ok_or_else(|| Error::invalid("TIFF: missing TileByteCounts"))?
+        .as_u64_vec(bo)?;
+    if tile_offsets.len() != tile_byte_counts.len() {
+        return Err(Error::invalid(
+            "TIFF/JPEG(§22): TileOffsets / TileByteCounts length mismatch",
+        ));
+    }
+    let tiles_across = (width as u64).div_ceil(tile_w as u64) as usize;
+    let tiles_down = (height as u64).div_ceil(tile_h as u64) as usize;
+    let tiles_per_image = tiles_across * tiles_down;
+    let tile_slice = |idx: usize| -> Result<&[u8]> {
+        let off = tile_offsets[idx] as usize;
+        let bc = tile_byte_counts[idx] as usize;
+        let end = off
+            .checked_add(bc)
+            .filter(|&e| e <= input.len())
+            .ok_or_else(|| Error::invalid("TIFF/JPEG(§22): tile extends past EOF"))?;
+        Ok(&input[off..end])
+    };
+    let dim16 = |v: usize, what: &str| -> Result<u16> {
+        u16::try_from(v).map_err(|_| {
+            Error::invalid(format!(
+                "TIFF/JPEG(§22): {what} {v} exceeds the 65535 SOF field limit"
+            ))
+        })
+    };
+
+    if planar == PLANAR_SEPARATE && samples_per_pixel > 1 {
+        let spp = samples_per_pixel as usize;
+        if tile_offsets.len() != tiles_per_image * spp {
+            return Err(Error::invalid(format!(
+                "TIFF/JPEG(§22): PlanarConfiguration=2 expects {} tile entries \
+                 (SamplesPerPixel={spp} × TilesPerImage={tiles_per_image}), got {}",
+                tiles_per_image * spp,
+                tile_offsets.len()
+            )));
+        }
+        if photometric == PHOTO_YCBCR
+            && (tile_w as usize % sub_h != 0 || tile_h as usize % sub_v != 0)
+        {
+            return Err(Error::invalid(format!(
+                "TIFF/JPEG(§22): planar tiled YCbCr TileWidth/TileLength ({tile_w}x{tile_h}) \
+                 must be integer multiples of YCbCrSubSampling ({sub_h},{sub_v}) — \
+                 TIFF 6.0 §21 (as amended by TN2)"
+            )));
+        }
+        let comp_factors: Vec<(usize, usize)> = (0..spp)
+            .map(|c| {
+                if photometric == PHOTO_YCBCR && (c == 1 || c == 2) {
+                    (sub_h, sub_v)
+                } else {
+                    (1, 1)
+                }
+            })
+            .collect();
+        let mut comp_planes: Vec<Vec<u16>> = Vec::with_capacity(spp);
+        let mut comp_dims: Vec<(usize, usize)> = Vec::with_capacity(spp);
+        for &(sh, sv) in &comp_factors {
+            let pw = (width as usize).div_ceil(sh);
+            let ph = (height as usize).div_ceil(sv);
+            comp_planes.push(vec![0u16; pw * ph]);
+            comp_dims.push((pw, ph));
+        }
+        for (c, &(sh, sv)) in comp_factors.iter().enumerate() {
+            let (pw, ph) = comp_dims[c];
+            let seg_w = tile_w as usize / sh;
+            let seg_h = tile_h as usize / sv;
+            for ty in 0..tiles_down {
+                for tx in 0..tiles_across {
+                    let entropy = tile_slice(c * tiles_per_image + ty * tiles_across + tx)?;
+                    let stream = fields.synthesize_tables_form_stream(
+                        input,
+                        &[TablesFormComponent {
+                            index: c,
+                            h: 1,
+                            v: 1,
+                        }],
+                        dim16(seg_w, "plane tile width")?,
+                        dim16(seg_h, "plane tile height")?,
+                        entropy,
+                    )?;
+                    let seg = crate::jpeg::decode_segment(
+                        None,
+                        &stream,
+                        seg_w as u32,
+                        seg_h as u32,
+                        PHOTO_BLACK_IS_ZERO,
+                        bps_first,
+                    )?;
+                    blit_gray_segment_into(
+                        &seg,
+                        &mut comp_planes[c],
+                        pw,
+                        ph,
+                        tx * seg_w,
+                        ty * seg_h,
+                        bps_first,
+                    )?;
+                }
+            }
+        }
+        return compose_planar_jpeg(
+            &comp_planes,
+            &comp_dims,
+            &comp_factors,
+            width,
+            height,
+            photometric,
+            bps_first,
+        );
+    }
+
+    if tile_offsets.len() != tiles_per_image {
+        return Err(Error::invalid(format!(
+            "TIFF/JPEG(§22): expected {tiles_per_image} tile entries, got {}",
+            tile_offsets.len()
+        )));
+    }
+    let components: Vec<TablesFormComponent> = match photometric {
+        PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO => vec![TablesFormComponent {
+            index: 0,
+            h: 1,
+            v: 1,
+        }],
+        PHOTO_YCBCR => vec![
+            TablesFormComponent {
+                index: 0,
+                h: sub_h as u8,
+                v: sub_v as u8,
+            },
+            TablesFormComponent {
+                index: 1,
+                h: 1,
+                v: 1,
+            },
+            TablesFormComponent {
+                index: 2,
+                h: 1,
+                v: 1,
+            },
+        ],
+        PHOTO_RGB | PHOTO_CMYK => (0..samples_per_pixel as usize)
+            .map(|index| TablesFormComponent { index, h: 1, v: 1 })
+            .collect(),
+        _ => unreachable!("photometric vetted above"),
+    };
+    let (pixel_format, dst_row_stride, dst_size) = match photometric {
+        PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO => (
+            TiffPixelFormat::Gray8,
+            width as usize,
+            width as usize * height as usize,
+        ),
+        PHOTO_RGB | PHOTO_YCBCR | PHOTO_CMYK => (
+            TiffPixelFormat::Rgb24,
+            width as usize * 3,
+            width as usize * 3 * height as usize,
+        ),
+        _ => unreachable!("photometric vetted above"),
+    };
+    let mut dst = vec![0u8; dst_size];
+    let invert = photometric == PHOTO_WHITE_IS_ZERO;
+    let want_yuv = photometric == PHOTO_YCBCR;
+    let tw16 = dim16(tile_w as usize, "tile width")?;
+    let th16 = dim16(tile_h as usize, "tile height")?;
+    for ty in 0..tiles_down {
+        for tx in 0..tiles_across {
+            let entropy = tile_slice(ty * tiles_across + tx)?;
+            let stream =
+                fields.synthesize_tables_form_stream(input, &components, tw16, th16, entropy)?;
+            let seg =
+                crate::jpeg::decode_segment(None, &stream, tile_w, tile_h, photometric, bps_first)?;
+            let visible_w = ((width as i64) - (tx as i64) * (tile_w as i64))
+                .min(tile_w as i64)
+                .max(0) as u32;
+            let visible_h = ((height as i64) - (ty as i64) * (tile_h as i64))
+                .min(tile_h as i64)
+                .max(0) as u32;
+            composite_segment(
+                &seg,
+                visible_w,
+                visible_h,
+                &mut dst,
+                dst_row_stride,
+                tx as u32 * tile_w,
+                ty as u32 * tile_h,
+                invert,
+                want_yuv,
+                photometric,
+            )?;
+        }
+    }
+    Ok(TiffImage {
+        width,
+        height,
+        pixel_format,
+        planes: vec![TiffPlane {
+            stride: dst_row_stride,
+            data: dst,
+        }],
+    })
+}
+
 #[cfg(not(feature = "registry"))]
 #[allow(clippy::too_many_arguments)]
 fn decode_ifd_jpeg_old_tables_form(

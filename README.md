@@ -207,14 +207,18 @@ Two §22 layouts exist:
   offsets onto the four T.81 destinations and synthesizing DRI from
   `JPEGRestartInterval`. Chunky (interleaved, YCbCr sampling factors
   from `YCbCrSubSampling`) and planar ("one JPEG scan per component",
-  reduced chroma geometry) both decode, single- and multi-strip;
-  every synthesized stream then routes through the same segment
-  decode + composite machinery as `Compression = 7`. Tables-form
-  round trips are pinned by decomposing black-box `cjpeg` bitstreams
-  into §22 raw payloads and requiring byte-identical output against
-  the `Compression = 7` wrap of the same bitstream. Still precise
-  errors: the tiled tables-form layout (§22 writers produced
-  strip-oriented files), per-component `Ss` / `Al` divergence within
+  reduced chroma geometry) both decode, single- and multi-strip and
+  **tiled** (§22 "Strips and Tiles": each tile "points directly to the
+  start of the entropy coded data"; every tile is rebuilt at
+  `TileWidth × TileLength` with the §15 edge padding clipped on
+  composite — chunky, planar, and planar subsampled-chroma tiles at
+  their reduced size); every synthesized stream then routes through
+  the same segment decode + composite machinery as `Compression = 7`.
+  Tables-form round trips are pinned by decomposing black-box `cjpeg`
+  bitstreams (strips) and the crate's own tiled `Compression = 7`
+  output (tiles) into §22 raw payloads and requiring byte-identical
+  output against the `Compression = 7` wrap of the same bitstream.
+  Still precise errors: per-component `Ss` / `Al` divergence within
   one interleaved scan, and the malformed-field set — the §22
   JPEGProc applicability table is enforced (baseline requires
   Q/DC/AC tables; lossless requires JPEGLosslessPredictors +
@@ -1071,10 +1075,9 @@ remaining gaps are:
   discourages the latter).
 - **Deep (>8-bit) CMYK JPEG-in-TIFF and sub-8-bit SOF3 precisions** —
   precise `Error::Unsupported` (no deployed layout to validate
-  against); likewise the **tiled §22 tables-form** layout (§22
-  writers produced strip-oriented files) and per-component `Ss` / `Al`
-  divergence within one interleaved tables-form scan (would need one
-  synthesized scan per component).
+  against); likewise per-component `Ss` / `Al` divergence within one
+  interleaved §22 tables-form scan (would need one synthesized scan
+  per component).
 - **DNG / GeoTIFF / Exif tag semantics.** The child-IFD *mechanics* are
   in (write side via `PageExtras::exif_ifd` / `gps_ifd` / `sub_ifds`;
   read side via `parse_ifd` at the pointer offset + `decode_tiff_at`

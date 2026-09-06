@@ -32,10 +32,11 @@
 //!    `docs/image/jpeg/T-REC-T.81-199209-I.pdf` (ITU-T T.81 =
 //!    ISO/IEC 10918-1, Annex B), so
 //!    [`OldJpegFields::synthesize_tables_form_stream`] rebuilds one
-//!    complete datastream per strip and the layout now decodes for
+//!    complete datastream per strip (or per tile — §22 "Strips and
+//!    Tiles" applies the same "points directly to the start of the
+//!    entropy coded data" rule to both) and the layout decodes for
 //!    both §22 processes (baseline DCT and lossless Huffman), chunky
-//!    and planar; the strip-oriented layout is the one §22 writers
-//!    produced, so the tiled tables-form stays a precise error.
+//!    and planar, strip- and tile-organised.
 //!
 //! Field-presence rules implemented from the §22 "JPEGProc" table
 //! ("The following table specifies the fields that are applicable to

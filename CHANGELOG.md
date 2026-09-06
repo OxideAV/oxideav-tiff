@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rgb24_to_ycbcr24`: TIFF 6.0 §21 RGB → YCbCr with the default CCIR
   601-1 coefficients and the encoder's no-headroom
   `ReferenceBlackWhite`.
+- §22 old-style JPEG (`Compression = 6`) **tables-form layout over
+  tiles** decodes (chunky, planar, planar subsampled chroma); pinned
+  byte-identical against the `Compression = 7` tiled wrap of the same
+  per-tile entropy data.
 - `jpeg_enc` engine + `encode_jpeg_roundtrip` suites: every layout is
   decoded by our reader and black-box by ImageMagick, `tiffcp`,
   `tiffinfo` and `djpeg` (PSNR reported; lossless byte-exact).
