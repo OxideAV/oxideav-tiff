@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- JPEG-in-TIFF **encode** (`Compression = 7`, TIFF Technical Note 2):
+  `TiffCompression::Jpeg(JpegOptions)` writes one ISO/IEC 10918-1
+  datastream per strip / tile from the crate's own T.81 encoder
+  (`jpeg_enc`): baseline `SOF0` (Annex K.3 typical or K.2 optimal
+  Huffman tables, K.1 / K.2 quantisation tables scaled by a quality
+  knob), 12-bit extended sequential `SOF1` (new `EncodePixelFormat::
+  Gray12` / `::Rgb36` inputs), and sample-exact lossless `SOF3`
+  (predictors 1..=7; 8 / 12 / 16 bits — `Gray16Le` / `Rgb48` are
+  lossless-only). Grayscale, RGB, YCbCr (4:4:4 and every §21
+  subsampling pair, SOF factors = `YCbCrSubSampling`) and CMYK
+  photometrics; strips (MCU-aligned `RowsPerStrip`), §15 tiles,
+  `PlanarConfiguration = 2` (scaled chroma planes per TN2), BigTIFF
+  and multi-page; tables shared through `JPEGTables` (tag 347) or
+  written per segment (`JpegTablesLayout`).
+- `rgb24_to_ycbcr24`: TIFF 6.0 §21 RGB → YCbCr with the default CCIR
+  601-1 coefficients and the encoder's no-headroom
+  `ReferenceBlackWhite`.
+- `jpeg_enc` engine + `encode_jpeg_roundtrip` suites: every layout is
+  decoded by our reader and black-box by ImageMagick, `tiffcp`,
+  `tiffinfo` and `djpeg` (PSNR reported; lossless byte-exact).
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.5...v0.0.6) - 2026-08-31
 
 ### Other

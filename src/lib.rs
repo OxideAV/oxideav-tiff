@@ -75,6 +75,9 @@
 //! * Compression: None / PackBits / LZW / Deflate / Zstandard
 //!   (Compression=50000) / WebP-in-TIFF (Compression=50001 — one
 //!   lossless VP8L file per strip / tile, Rgb24 / Rgba32 input only) /
+//!   JPEG-in-TIFF (Compression=7, TN2 — in-crate T.81 writer; 8-bit
+//!   baseline, 12-bit extended sequential via the `Gray12` / `Rgb36`
+//!   inputs, lossless at 8 / 12 / 16 bits) /
 //!   CCITT Modified Huffman (Compression=2) /
 //!   CCITT T.4 1-D and 2-D (Compression=3, with optional T4Options
 //!   bit 2 byte-aligned EOLs) / CCITT T.6 (Compression=4) — the 2-D
@@ -105,7 +108,10 @@
 //! JPEGQTables/JPEGDCTables/JPEGACTables + entropy-coded strips),
 //! rebuilt per strip through the ISO 10918-1 / T.81 Annex B marker
 //! syntax — see [`jpeg_old`]. Encode-side JPEG-in-TIFF
-//! (Compression=7) remains out of scope. YCbCr encodes chunky 4:4:4,
+//! (Compression=7) is written by the crate's own T.81 encoder
+//! ([`TiffCompression::Jpeg`]: baseline `SOF0`, 12-bit `SOF1`,
+//! lossless `SOF3`; strips / tiles / planar; `JPEGTables` shared or
+//! per-segment tables). YCbCr encodes chunky 4:4:4,
 //! chroma-subsampled chunky (§21 data-unit packing, strip + tiled)
 //! and chroma-subsampled `PlanarConfiguration = 2` in both strip and
 //! tiled layouts (full-resolution Y plane + reduced §21 "chroma

@@ -628,6 +628,9 @@ processes.
 | **CMYK (4 chan)** | 8     | None / PackBits / LZW / Deflate / **ZSTD**                  | `EncodePixelFormat::Cmyk32` (writes PhotometricInterpretation = 5, SamplesPerPixel = 4, BitsPerSample = [8,8,8,8], plus optional `InkSet = 1` / `NumberOfInks = 4`) |
 | **YCbCr (3 chan, 4:4:4)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, **`PlanarConfiguration = 2`** / **`Predictor = 2`** | `EncodePixelFormat::YCbCr24` (writes PhotometricInterpretation = 6, SamplesPerPixel = 3, BitsPerSample = [8,8,8], `YCbCrSubSampling = [1, 1]`, `YCbCrPositioning = 1`, `ReferenceBlackWhite = [0,255,128,255,128,255]` no-headroom full-range) |
 | **YCbCr (3 chan, subsampled)** | 8 | None / PackBits / LZW / Deflate / **ZSTD**, strip or **§15 tiled**, chunky or **`PlanarConfiguration = 2`** (strip + **tiled**, per-plane `Predictor = 2`) | `EncodePixelFormat::YCbCrSubsampled24` (§21 data-unit packing for `[2,1]`/`[2,2]`/`[4,1]`/`[4,2]`; planar per the TN2-amended §21 reduced chroma-plane geometry) |
+| **JPEG-in-TIFF** (Compression = 7, TN2) — BlackIsZero / RGB / YCbCr (4:4:4 + every §21 subsampling) / CMYK | 8 | **baseline `SOF0`** (Annex K.3 typical or K.2 optimal Huffman tables, K.1/K.2 quantisation × quality knob), strip / multi-strip / **§15 tiled** / **`PlanarConfiguration = 2`**, BigTIFF, multi-page; tables shared through **`JPEGTables`** (tag 347) or per segment | `Gray8` / `Rgb24` / `YCbCr24` / `YCbCrSubsampled24` / `Cmyk32` + `TiffCompression::Jpeg(JpegOptions)` (predictor rejected — TN2 defines none) |
+| **JPEG-in-TIFF 12-bit** | 12 | **extended sequential `SOF1`** (K.2 optimal tables, `Pq = 1` quantisers) or **lossless `SOF3`** | **`EncodePixelFormat::Gray12` / `::Rgb36`** (JPEG-only inputs; decode renders `Gray16Le` / `Rgb48Le`) |
+| **JPEG-in-TIFF lossless** | 8 / 12 / 16 | **`SOF3`**, any Table H.1 predictor 1..=7, sample-exact; strips of any height, tiles, planar | `Gray8` / `Rgb24` / `YCbCr24` / `Cmyk32` / `Gray12` / `Rgb36` / `Gray16Le` / `Rgb48` + `JpegOptions { process: JpegProcess::Lossless { predictor }, .. }` |
 
 `TiffCompression::CcittRle` selects Modified Huffman
 (`Compression = 2`, TIFF 6.0 §10), `TiffCompression::CcittT4OneD`
@@ -883,6 +886,88 @@ to confirm tags 262 / 277 / 284 / 530 / 531 / 532 carry the documented
 values, and `tiffinfo` (black-box) confirms the separate-planes +
 subsampling field set.
 
+### JPEG-in-TIFF write (Compression = 7)
+
+`TiffCompression::Jpeg(JpegOptions)` writes TIFF Technical Note 2
+"new-style" JPEG: every strip / tile is one complete ISO/IEC 10918-1
+datastream produced by the crate's **own T.81 encoder**
+(`src/jpeg_enc.rs`, transcribed from the staged
+`docs/image/jpeg/T-REC-T.81-199209-I.pdf` — no dependency on
+`oxideav-mjpeg` for writing), wrapped by the TN2 segment planner
+(`src/jpeg_wrap.rs`).
+
+```rust
+use oxideav_tiff::{
+    encode_tiff, rgb24_to_ycbcr24, EncodePage, EncodePixelFormat, JpegOptions,
+    JpegProcess, JpegTablesLayout, PageExtras, TiffCompression,
+};
+
+let ycc = rgb24_to_ycbcr24(&rgb);          // §21 default coefficients
+let mut page = EncodePage {
+    width, height,
+    kind: EncodePixelFormat::YCbCrSubsampled24 { pixels: &ycc, subsampling: (2, 2) },
+    compression: TiffCompression::Jpeg(JpegOptions { quality: 90, ..JpegOptions::default() }),
+    predictor: false, planar: false, tiling: None, bigtiff: false,
+    extras: PageExtras::default(),
+};
+page.extras.rows_per_strip = Some(16);     // a multiple of the 4:2:0 MCU height
+let tiff = encode_tiff(&page)?;
+```
+
+* **Processes** (`JpegOptions::process`): `JpegProcess::Dct` writes
+  baseline `SOF0` for 8-bit inputs and extended-sequential `SOF1`
+  for the 12-bit `Gray12` / `Rgb36` inputs (T.81 F.1.5 categories,
+  16-bit `Pq = 1` quantisers, K.2 optimal Huffman tables since the
+  Annex K.3 typical tables cannot code the extended alphabet);
+  `JpegProcess::Lossless { predictor }` writes `SOF3` with one of
+  the seven Table H.1 predictors and is **sample-exact** at 8, 12
+  and 16 bits (`Gray16Le` / `Rgb48` are lossless-only per TN2's
+  "for SOF1, precision 8 or 12 is permitted").
+* **Tables** (`JpegOptions::tables`): `JpegTablesLayout::Shared`
+  (default) writes one `JPEGTables` field (tag 347, type UNDEFINED)
+  holding the abbreviated table-specification stream and abbreviated
+  image segments that reference it; `PerSegment` makes every strip /
+  tile a self-contained interchange stream. `quality` (1..=100)
+  scales the Annex K.1 / K.2 tables (50 = as printed, 75 = halved per
+  the K.1 note, 100 = all ones); `optimize_huffman` derives per-image
+  tables via the K.2 procedure (always on for 12-bit DCT and
+  lossless).
+* **Colour** follows TN2's "color blind" rule: the JPEG components
+  are whatever the TIFF fields say — `Rgb24` is stored as three
+  untransformed R/G/B components under `PhotometricInterpretation =
+  2`, `YCbCr24` / `YCbCrSubsampled24` under `= 6` with the SOF
+  sampling factors equal to `YCbCrSubSampling` (luma `h×v`, chroma
+  `1×1`; chroma box-decimated exactly like the uncompressed §21
+  writer), `Cmyk32` as four components under `= 5`. Writers are
+  expected to convert RGB to YCbCr themselves — `rgb24_to_ycbcr24`
+  applies the §21 transformation with the default CCIR 601-1
+  coefficients and the no-headroom `ReferenceBlackWhite` the page
+  carries.
+* **Layouts**: strips (`RowsPerStrip` must be a multiple of the MCU
+  height `8 × YCbCrSubsampleVert` for the DCT processes unless the
+  page is single-strip; the last strip's SOF height is the remaining
+  rows), §15 tiles (`TileWidth` / `TileLength` multiples of the MCU
+  size — 32 for `[4,x]` subsampling), `PlanarConfiguration = 2`
+  (one single-component stream per plane; subsampled chroma planes
+  at their scaled-down size, strips rounded up per TN2), BigTIFF and
+  multi-page all compose. `Predictor` never composes (TN2 defines no
+  differencing over JPEG); bilevel / palette / transparency-mask /
+  CIELab / float inputs are precise rejections.
+* **Validation**: every emitted layout is decoded by our reader and
+  black-box by ImageMagick, `tiffcp -c none` (libtiff's JPEG decode,
+  re-read by us), `tiffinfo` and `djpeg` on the `JPEGTables`-merged
+  segments (the only route for 12-/16-bit and lossless). Own-decoder
+  PSNR against the source is ≈ 50 dB at quality 90 on smooth
+  content, external decoders agree with ours to ≈ 64–74 dB on
+  non-subsampled pages; chroma-subsampled pages agree to ≈ 35 dB
+  only because the two readers upsample chroma differently
+  (nearest-neighbour splat vs. interpolation). The chroma-subsampled
+  `PlanarConfiguration = 2` layout is the one TN2 says readers "are
+  not required to support": libtiff mis-reads it, so it is validated
+  plane segment by plane segment with `djpeg`. `[4,2]` subsampling
+  writes and decodes externally but our own reader (via
+  `oxideav-mjpeg`) does not accept 4×2 luma sampling yet.
+
 ### BigTIFF write
 
 `EncodePage::bigtiff = true` switches the writer from classic TIFF
@@ -978,8 +1063,12 @@ The compression schemes, photometrics, and layout features described
 above are all implemented on both decode and encode where stated. The
 remaining gaps are:
 
-- **JPEG-in-TIFF *encode*** — `Compression = 7` (and the deprecated
-  `= 6`) is decode-only; the crate writes no JPEG-compressed pages.
+- **JPEG-in-TIFF encode gaps** — the deprecated `Compression = 6`
+  (§22) layouts are decode-only (TN2 discourages writing them);
+  `[4,2]` chroma subsampling writes but the crate's own reader
+  (`oxideav-mjpeg`) rejects 4×2 luma sampling; restart intervals
+  (`DRI` / `RSTn`) and arithmetic coding are not written (TN2
+  discourages the latter).
 - **Deep (>8-bit) CMYK JPEG-in-TIFF and sub-8-bit SOF3 precisions** —
   precise `Error::Unsupported` (no deployed layout to validate
   against); likewise the **tiled §22 tables-form** layout (§22
