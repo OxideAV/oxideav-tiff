@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.6...v0.0.7) - 2026-09-06
+
+### Other
+
+- restart intervals (DRI / RSTm, T.81 B.2.4.4 + E.1.3/E.1.4); JpegOptions::restart_interval for the DCT processes
+- jpeg_roundtrip writer→reader target; decoder: packed-YCbCr lossless segments composite (fuzz finding)
+- §22 tables-form layout over tiles (Compression=6 tiled; chunky, planar, planar subsampled chroma)
+- ImageMagick is not a 12-bit JPEG-in-TIFF oracle (8-bit-only JPEG builds return garbage silently)
+- JPEG-in-TIFF encode — README section + table rows, crate doc, CHANGELOG, Backlog burn-down
+- JPEG-in-TIFF (Compression=7) writer — TiffCompression::Jpeg, strips/tiles/planar, JPEGTables, 12-bit + lossless
+- in-crate T.81 JPEG encoder engine (SOF0/SOF1/SOF3, K.3 tables, K.2 optimal tables)
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+
 ### Fixed
 
 - `Compression = 7` decode: a three-component lossless (`SOF3`)
