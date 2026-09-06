@@ -166,6 +166,8 @@ pub mod jpeg;
 // `decoder`) does.
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
+pub mod jpeg_enc;
+#[doc(hidden)]
 pub mod jpeg_old;
 
 #[cfg(feature = "registry")]
