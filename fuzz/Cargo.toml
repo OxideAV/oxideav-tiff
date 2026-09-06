@@ -67,3 +67,15 @@ name = "decode"
 path = "fuzz_targets/decode.rs"
 test = false
 doc = false
+
+# JPEG-in-TIFF writer → reader pair: arbitrary bytes steer the
+# `TiffCompression::Jpeg` configuration and supply the raster; every
+# file the writer produces must decode (lossless: sample-exact), a
+# one-byte mutation of it must not panic the reader, and the bare
+# T.81 engine must reject arbitrary component geometry with typed
+# errors rather than panic.
+[[bin]]
+name = "jpeg_roundtrip"
+path = "fuzz_targets/jpeg_roundtrip.rs"
+test = false
+doc = false

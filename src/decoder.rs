@@ -5146,10 +5146,31 @@ fn composite_segment(
     use crate::jpeg::{
         composite_cmyk_to_rgb, composite_gray, composite_gray16, composite_rgb48_packed,
         composite_rgb48_planar, composite_rgb_packed, composite_rgb_planar,
-        composite_yuv16_to_rgb48, composite_yuv_to_rgb, JpegPixelFormat,
+        composite_ycbcr48_packed, composite_ycbcr_packed, composite_yuv16_to_rgb48,
+        composite_yuv_to_rgb, JpegPixelFormat,
     };
     let deep = seg.bits > 8;
     match seg.pixel_format {
+        JpegPixelFormat::YCbCr24Packed => {
+            if !want_yuv {
+                return Err(Error::invalid(format!(
+                    "TIFF/JPEG: packed-YCbCr JPEG segment but TIFF photometric={photometric}"
+                )));
+            }
+            if deep {
+                composite_ycbcr48_packed(
+                    seg,
+                    visible_w,
+                    visible_h,
+                    dst,
+                    dst_row_stride,
+                    dst_x,
+                    dst_y,
+                )
+            } else {
+                composite_ycbcr_packed(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+            }
+        }
         JpegPixelFormat::Gray8 => {
             if deep {
                 composite_gray16(

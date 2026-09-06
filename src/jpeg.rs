@@ -83,7 +83,7 @@ impl JpegSegment {
         // bytes; the packed layouts scale accordingly.
         let sb = if self.bits > 8 { 2usize } else { 1 };
         let bytes_per_sample = match self.pixel_format {
-            JpegPixelFormat::Rgb24Packed => 3 * sb,
+            JpegPixelFormat::Rgb24Packed | JpegPixelFormat::YCbCr24Packed => 3 * sb,
             JpegPixelFormat::Cmyk8 => 4 * sb,
             _ => sb,
         };
@@ -148,6 +148,13 @@ pub enum JpegPixelFormat {
     /// The TIFF compositor only needs to walk the packed buffer and
     /// apply the additive-RGB conversion `R=(1-C)(1-K)` etc.
     Cmyk8,
+    /// Single packed interleaved `Y Cb Cr` plane (stride ≥ `width ×
+    /// 3`, ×2 at deep precisions): the shape the codec hands back for
+    /// a three-component *lossless* (`SOF3`) frame under
+    /// `PhotometricInterpretation = 6`. The compositor matrixes each
+    /// pixel through the same BT.601 conversion the planar YUV
+    /// layouts use.
+    YCbCr24Packed,
 }
 
 /// One plane of segment pixels.
@@ -294,16 +301,20 @@ fn classify(
             // bytes a render-ready `R G B` stream — so a narrow
             // stride-padded gray plane can never be hijacked into
             // this branch.
-            if photometric == PHOTO_RGB {
+            if photometric == PHOTO_RGB || photometric == PHOTO_YCBCR {
                 if p.stride < w.saturating_mul(3) || p.data.len() < p.stride * h {
                     return Err(Error::invalid(format!(
-                        "TIFF/JPEG: 1-plane JPEG with photometric=2/RGB but plane is not \
-                         packed-3 (stride={} data={} expected w={seg_w} h={seg_h})",
+                        "TIFF/JPEG: 1-plane JPEG with photometric={photometric} but plane is \
+                         not packed-3 (stride={} data={} expected w={seg_w} h={seg_h})",
                         p.stride,
                         p.data.len()
                     )));
                 }
-                return Ok(JpegPixelFormat::Rgb24Packed);
+                return Ok(if photometric == PHOTO_RGB {
+                    JpegPixelFormat::Rgb24Packed
+                } else {
+                    JpegPixelFormat::YCbCr24Packed
+                });
             }
             if photometric != PHOTO_BLACK_IS_ZERO && photometric != PHOTO_WHITE_IS_ZERO {
                 return Err(Error::invalid(format!(
@@ -435,7 +446,7 @@ fn plane_dims(pf: JpegPixelFormat, seg_w: u32, seg_h: u32, i: usize) -> (u32, u3
         JpegPixelFormat::Yuv444P | JpegPixelFormat::Rgb24 => (seg_w, seg_h),
         // Packed RGB is a single plane; component index > 0 is never
         // queried (the compositor blits the packed rows directly).
-        JpegPixelFormat::Rgb24Packed => (seg_w, seg_h),
+        JpegPixelFormat::Rgb24Packed | JpegPixelFormat::YCbCr24Packed => (seg_w, seg_h),
         JpegPixelFormat::Yuv422P => (seg_w.div_ceil(2), seg_h),
         JpegPixelFormat::Yuv420P => (seg_w.div_ceil(2), seg_h.div_ceil(2)),
         JpegPixelFormat::Yuv411P => (seg_w.div_ceil(4), seg_h),
@@ -475,6 +486,9 @@ pub fn composite_yuv_to_rgb(
             return Err(Error::invalid("composite_yuv_to_rgb on Rgb24Packed"))
         }
         JpegPixelFormat::Cmyk8 => return Err(Error::invalid("composite_yuv_to_rgb on Cmyk8")),
+        JpegPixelFormat::YCbCr24Packed => {
+            return Err(Error::invalid("composite_yuv_to_rgb on YCbCr24Packed"))
+        }
         JpegPixelFormat::Yuv444P => (1u32, 1u32),
         JpegPixelFormat::Yuv422P => (2, 1),
         JpegPixelFormat::Yuv420P => (2, 2),
@@ -592,6 +606,76 @@ pub fn composite_rgb_packed(
         let src_row = &p.data[y * p.stride..y * p.stride + row_bytes];
         let dst_off = dy * dst_row_stride + dst_x as usize * 3;
         dst[dst_off..dst_off + row_bytes].copy_from_slice(src_row);
+    }
+    Ok(())
+}
+
+/// Composite a packed `Y Cb Cr` segment (8-bit) into an `Rgb24`
+/// destination through the BT.601 matrix ([`composite_yuv_to_rgb`]'s
+/// coefficients, TN2 default `ReferenceBlackWhite`).
+#[allow(clippy::too_many_arguments)]
+pub fn composite_ycbcr_packed(
+    seg: &JpegSegment,
+    visible_w: u32,
+    visible_h: u32,
+    dst: &mut [u8],
+    dst_row_stride: usize,
+    dst_x: u32,
+    dst_y: u32,
+) -> Result<()> {
+    if seg.pixel_format != JpegPixelFormat::YCbCr24Packed || seg.bits > 8 {
+        return Err(Error::invalid(
+            "composite_ycbcr_packed called with a non-packed-YCbCr 8-bit segment",
+        ));
+    }
+    let p = &seg.planes[0];
+    for y in 0..visible_h as usize {
+        let dy = dst_y as usize + y;
+        for x in 0..visible_w as usize {
+            let s = y * p.stride + x * 3;
+            let (r, g, b) =
+                ycbcr_to_rgb(p.data[s] as i32, p.data[s + 1] as i32, p.data[s + 2] as i32);
+            let off = dy * dst_row_stride + (dst_x as usize + x) * 3;
+            dst[off] = r;
+            dst[off + 1] = g;
+            dst[off + 2] = b;
+        }
+    }
+    Ok(())
+}
+
+/// Deep (9..=16-bit) packed `Y Cb Cr` segment into an `Rgb48Le`
+/// destination: the BT.601 matrix evaluated at the stream's own
+/// precision ([`ycbcr_to_rgb_raw`]), then widened by bit replication.
+#[allow(clippy::too_many_arguments)]
+pub fn composite_ycbcr48_packed(
+    seg: &JpegSegment,
+    visible_w: u32,
+    visible_h: u32,
+    dst: &mut [u8],
+    dst_row_stride: usize,
+    dst_x: u32,
+    dst_y: u32,
+) -> Result<()> {
+    if seg.pixel_format != JpegPixelFormat::YCbCr24Packed || seg.bits <= 8 {
+        return Err(Error::invalid(
+            "composite_ycbcr48_packed called with a non-deep-packed-YCbCr segment",
+        ));
+    }
+    let bits = seg.bits;
+    let p = &seg.planes[0];
+    for y in 0..visible_h as usize {
+        let dy = dst_y as usize + y;
+        for x in 0..visible_w as usize {
+            let s = y * p.stride + x * 6;
+            let rd = |k: usize| u16::from_le_bytes([p.data[s + 2 * k], p.data[s + 2 * k + 1]]);
+            let (r, g, b) = ycbcr_to_rgb_raw(rd(0), rd(1), rd(2), bits);
+            let off = dy * dst_row_stride + (dst_x as usize + x) * 6;
+            for (c, v) in [r, g, b].into_iter().enumerate() {
+                dst[off + c * 2..off + c * 2 + 2]
+                    .copy_from_slice(&widen_to_16(v, bits).to_le_bytes());
+            }
+        }
     }
     Ok(())
 }

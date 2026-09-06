@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `Compression = 7` decode: a three-component lossless (`SOF3`)
+  segment under `PhotometricInterpretation = 6` arrives from the codec
+  as one packed `Y Cb Cr` plane and was rejected ("1-plane JPEG but
+  photometric=6"); packed YCbCr now composites through the BT.601
+  matrix at 8-bit and deep precisions (fuzz finding).
+
 ### Added
 
 - JPEG-in-TIFF **encode** (`Compression = 7`, TIFF Technical Note 2):
@@ -30,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tiles** decodes (chunky, planar, planar subsampled chroma); pinned
   byte-identical against the `Compression = 7` tiled wrap of the same
   per-tile entropy data.
+- `jpeg_roundtrip` fuzz target (writer → reader pair, lossless
+  exactness, one-byte mutation, bare-engine geometry).
 - `jpeg_enc` engine + `encode_jpeg_roundtrip` suites: every layout is
   decoded by our reader and black-box by ImageMagick, `tiffcp`,
   `tiffinfo` and `djpeg` (PSNR reported; lossless byte-exact).

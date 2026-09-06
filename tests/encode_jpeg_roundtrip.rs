@@ -1309,6 +1309,35 @@ fn lossless_sof3_is_sample_exact_at_8_12_and_16_bits() {
 // Layout composition + rejections.
 // ---------------------------------------------------------------------------
 
+/// Fuzz finding (r457 `jpeg_roundtrip`): a three-component lossless
+/// (`SOF3`) frame comes back from the codec as ONE packed `Y Cb Cr`
+/// plane, which the segment classifier only accepted under
+/// `PhotometricInterpretation = 2`; under `= 6` it must matrix the
+/// packed samples to RGB. Lossless keeps the YCbCr samples exact, so
+/// the decode equals the §21 conversion of the source.
+#[test]
+fn lossless_ycbcr_444_composites_packed_segments() {
+    let (w, h) = (11u32, 9u32);
+    let ycc = smooth_ycc(w as usize, h as usize);
+    let reference = splat_reference_rgb(&ycc, w as usize, h as usize, 1, 1);
+    for planar in [false, true] {
+        let mut p = page(
+            w,
+            h,
+            EncodePixelFormat::YCbCr24 { pixels: &ycc },
+            TiffCompression::Jpeg(JpegOptions {
+                process: JpegProcess::Lossless { predictor: 6 },
+                tables: JpegTablesLayout::PerSegment,
+                ..JpegOptions::default()
+            }),
+        );
+        p.planar = planar;
+        let tiff = encode_tiff(&p).unwrap();
+        let dec = decode_tiff(&tiff).unwrap();
+        assert_eq!(rgb_frame_bytes(&dec), reference, "planar={planar}");
+    }
+}
+
 #[test]
 fn bigtiff_and_multipage_compose_with_jpeg() {
     let (w, h) = (20u32, 18u32);

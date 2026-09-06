@@ -1120,7 +1120,19 @@ oxideav_tiff::register(&mut codecs, &mut containers);
 
 ## Fuzzing
 
-A `cargo-fuzz` decoder target lives at `fuzz/fuzz_targets/decode.rs`.
+Two `cargo-fuzz` targets live under `fuzz/fuzz_targets/`:
+`decode.rs` (arbitrary bytes through every public decoder surface) and
+`jpeg_roundtrip.rs` (the JPEG-in-TIFF writer → reader pair: the input
+steers `TiffCompression::Jpeg`'s configuration and raster; every file
+the writer produces must decode — lossless sample-exact — a one-byte
+mutation of it must not panic the reader, and the bare T.81 engine
+must reject arbitrary component geometry with typed errors). Its first
+bounded run found that the codec returns a three-component lossless
+frame as one packed `Y Cb Cr` plane, which the segment classifier only
+accepted under `PhotometricInterpretation = 2`; packed YCbCr now
+composites through the BT.601 matrix at 8 and deep precisions.
+
+The decoder target `fuzz/fuzz_targets/decode.rs`
 It drives arbitrary bytes through `decode_tiff`, `decode_tiff_all`,
 `parse_header`, `parse_ifd`, and the four public compression
 unpackers (`unpack_packbits` / `unpack_lzw` / `unpack_deflate` /
