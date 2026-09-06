@@ -1133,11 +1133,12 @@ fn gray12_and_rgb36_dct_sof1() {
     if let Some(info) = tiffinfo(&tiff) {
         assert!(info.contains("Bits/Sample: 12"), "{info}");
     }
-    if let Some(m) = magick_decode_depth(&tiff, false, 16) {
-        let p = psnr_u16(&want, &m, 65535.0);
-        assert!(p >= 40.0, "gray12 magick(16-bit): PSNR {p:.2}");
-        eprintln!("gray12: magick 16-bit PSNR {p:.2} dB");
-    }
+    // ImageMagick is *not* an oracle for 12-bit JPEG-in-TIFF: a libtiff
+    // linked against an 8-bit-only JPEG library reads the 12-bit
+    // segments as 8-bit data and returns garbage without failing
+    // (observed on the Windows CI runner), so the 12-bit colour path
+    // is checked by our decoder and `djpeg -precision 12`, which
+    // refuses cleanly when unsupported.
 
     let r = smooth_u16(w as usize, h as usize, 12, 1);
     let gg = smooth_u16(w as usize, h as usize, 12, 2);
@@ -1167,14 +1168,10 @@ fn gray12_and_rgb36_dct_sof1() {
             // stream is read as YCbCr (T.872 §6.1: the container is
             // what says otherwise), so djpeg only confirms the
             // stream decodes with the right geometry here; the
-            // colour check goes through magick with the container.
+            // colour check is our own decoder's (see the gray12
+            // note above on why ImageMagick cannot arbitrate 12-bit).
             if let Some((c, dw, dh, _)) = djpeg(&segs[0], &["-pnm", "-precision", "12"]) {
                 assert_eq!((c, dw, dh), (3, w as usize, h as usize));
-            }
-            if let Some(m) = magick_decode_depth(&tiff, true, 16) {
-                let p = psnr_u16(&want, &m, 65535.0);
-                assert!(p >= 40.0, "rgb36 magick(16-bit): PSNR {p:.2}");
-                eprintln!("rgb36: magick 16-bit PSNR {p:.2} dB");
             }
         }
     }
