@@ -7,8 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Image-crate API contract** (`IMAGE_CRATE_API`, wave 2). The crate
+  root now carries the fleet vocabulary: `probe`, `info -> ImageInfo`,
+  `decode` / `decode_with(&DecodeOptions)` / `decode_rgb8` /
+  `decode_rgba8` / `decode_all` / `decode_all_with` / `decode_from`,
+  `encode(&TiffImage, &EncodeOptions)` / `encode_rgb8` / `encode_rgba8`
+  / `encode_to`, with `TiffImage { width, height, format, planes, color,
+  metadata, palette }` (`new -> Result` validating geometry, `from_rgb8`
+  / `from_rgba8`, `to_rgb8` / `to_rgba8` exact and infallible,
+  `as_bytes` / `into_raw`), `Plane`, `ColorInfo` / `ColorRange`,
+  `Metadata { icc, exif, xmp, gamma }`, `Palette`, `RgbImage` /
+  `RgbaImage`, `Frame`, `ImageInfo`, `DecodeOptions` (`max_width` /
+  `max_height` / `max_pixels` / `max_bytes` / `strict`), `EncodeOptions`
+  (`compression`, `predictor`, `planar`, `tiling`, `rows_per_strip`,
+  `bigtiff`, `embed_icc` / `embed_xmp` / `embed_exif`, `software`,
+  `resolution`), `PixelFormat = TiffPixelFormat`, `Error = TiffError`.
+- **Native layouts.** `TiffPixelFormat` grows `Rgba` (RGB + one
+  unassociated-alpha extra sample, straight alpha verbatim), `Pal8`
+  (palette indices verbatim — 4-bit unpacked — with the `ColorMap` as
+  `TiffImage::palette`) and `Cmyk` (ink coverages verbatim, including
+  the JPEG-in-TIFF chunky / planar / tables-form paths). The historical
+  `Rgb24` renderings of those pages are now `TiffImage::to_rgb8` (same
+  kernels, byte-identical) and what the deprecated decode wrappers
+  return.
+- `TiffImage.pixel_format` is renamed `format`; the type is
+  `#[non_exhaustive]` with `PartialEq`.
+- `TiffError` adds `LimitExceeded` and `Io(std::io::Error)` (+
+  `From<std::io::Error>`), is `#[non_exhaustive]`, and no longer derives
+  `Clone` / `PartialEq`.
+- The decode limits (256 megapixels, 1 GiB of assembled samples) are
+  `DecodeOptions` fields rather than constants and fail with
+  `Error::LimitExceeded`; `strict` rejects the `SampleFormat`
+  single-entry shorthand on multi-sample images.
+- `TiffImage::color` is filled from TIFF 6.0 §20 `WhitePoint` +
+  `PrimaryChromaticities` (H.273 Table 2 rows → `primaries`; default
+  `ColorInfo::tiff_default()` = full range / unspecified / identity).
+- `TiffImage::metadata.exif` carries the page's Exif (34665) + GPS
+  (34853) IFDs as one little-endian Exif TIFF payload, and `encode`
+  writes such a payload back as the child IFDs.
+- The depth API is renamed off the format-suffixed names: `Page {
+  image, metadata, layout }` via `decode_page` / `decode_page_at` /
+  `decode_pages` (+ `_with` variants), `encode_page` / `encode_pages`.
+- Registry: `register` now takes `&mut RuntimeContext` (fleet
+  signature; the two-registry form is the deprecated `register_into`),
+  `make_encoder` + `TiffEncoder` (one single-page TIFF packet per
+  frame, options schema `compression` / `quality` / `predictor` /
+  `planar` / `tile` / `rows_per_strip` / `bigtiff`), a TIFF **muxer**
+  (one packet verbatim; several re-assembled into a multi-page file),
+  `From<TiffImage> for VideoFrame` with the palette and colour-signal
+  side-channels, `TiffImage::from_video_frame` + `TryFrom<(&VideoFrame,
+  &CodecParameters)>`, `TryFrom<PixelFormat> for TiffPixelFormat`, and
+  the demuxer's stream parameters come from `info` (so palette / RGBA /
+  CMYK pages advertise `Pal8` / `Rgba` / `Cmyk`). The framework
+  `Decoder` honours `DecoderLimits` by tightening `DecodeOptions`.
+- CI: the standalone job also runs `cargo clippy --all-targets
+  --no-default-features -D warnings`; the decode fuzz target covers
+  `probe` / `info` / `decode` / `decode_rgba8` / `decode_with` /
+  `decode_all`; the fuzz lockfile tracks the published `oxideav-core`
+  0.1.37 / `oxideav-mjpeg` 0.1.9.
+- README reordered to the contract (Standalone use, Framework use,
+  Supported layouts, Options, Metadata and colour, Limits, then Format
+  specifics).
+
+### Deprecated
+
+- `decode_tiff` / `decode_tiff_at` / `decode_tiff_all` /
+  `decode_tiff_all_pages` (→ `decode` / `decode_page` / `decode_page_at`
+  / `decode_all` / `decode_pages`), `encode_tiff` / `encode_tiff_multi`
+  (→ `encode` / `encode_page` / `encode_pages`), `DecodedTiff` (→
+  `Page`), `TiffPlane` (→ `Plane`), `register_into` (→ `register(&mut
+  RuntimeContext)`). The decode wrappers flatten `Pal8` / `Rgba` /
+  `Cmyk` to the `Rgb24` bytes they always returned. Removed next
+  release.
+
 ### Fixed
 
+- `Entry::as_f64_vec` sized its output by `count` after a `count ×
+  type_size` truncation check that an unknown field type (`type_size ==
+  0`) always passed, so a hostile colorimetry entry of type 0 with
+  `count = 2^31` drove a 3.5 GB allocation (fuzz r466 finding, reached
+  through the new colour resolver); unknown types are rejected first and
+  the resolver reads only RATIONAL entries of the spec-fixed counts.
 - `Compression = 7` decode: a three-component lossless (`SOF3`)
   segment under `PhotometricInterpretation = 6` arrives from the codec
   as one packed `Y Cb Cr` plane and was rejected ("1-plane JPEG but

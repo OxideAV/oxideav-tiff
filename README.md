@@ -14,7 +14,192 @@ chain (multi-page), the Adobe Pagemaker 6.0 *BigTIFF* design
 (WebP-in-TIFF, via the `oxideav-webp` sibling crate's public API).
 Spec-only clean-room: no external library source was consulted.
 
-## Decode
+## Standalone use
+
+The crate follows the OxideAV image-crate contract (`IMAGE_CRATE_API`):
+the same small root vocabulary every `oxideav-<format>` crate exposes,
+usable with `default-features = false` and no `oxideav-core`.
+
+```rust
+// Cargo.toml: oxideav-tiff = { version = "…", default-features = false }
+
+let bytes = std::fs::read("in.tif")?;
+if oxideav_tiff::probe(&bytes) {
+    let info = oxideav_tiff::info(&bytes)?;          // header + IFD chain only
+    println!("{}x{} {:?}, {} page(s)", info.width, info.height, info.format, info.frames);
+
+    let img = oxideav_tiff::decode(&bytes)?;         // TiffImage, native layout
+    let rgba: Vec<u8> = img.to_rgba8();              // tightly packed RGBA, 4 × width per row
+    let (w, h) = (img.width(), img.height());
+
+    let opts = oxideav_tiff::EncodeOptions::default()
+        .with_compression(oxideav_tiff::TiffCompression::Lzw)
+        .with_predictor(true);
+    let out = oxideav_tiff::encode_rgba8(w, h, &rgba, &opts)?;
+    std::fs::write("out.tif", out)?;
+}
+```
+
+| Item | Notes |
+|---|---|
+| `probe(&[u8]) -> bool` | `II*\0` / `MM\0*` (classic) or `II+\0` / `MM\0+` (BigTIFF); no allocation. |
+| `info(&[u8]) -> ImageInfo` | Width / height (after `Orientation`), the layout `decode` returns, `frames` (IFDs on the chain), `has_alpha`, `color`, `has_icc` / `has_exif` / `has_xmp`, plus TIFF extras: `bits_per_sample`, `samples_per_pixel`, `photometric`, `compression`, `planar`, `tiled`, `big_tiff`, `orientation`. Never reads a strip or tile. |
+| `decode` / `decode_with(&DecodeOptions)` | First IFD as a `TiffImage` (native layout, `color` + `metadata` filled). |
+| `decode_rgb8` / `decode_rgba8` | `RgbImage` / `RgbaImage { width, height, data }`, tightly packed. |
+| `decode_all` / `decode_all_with` | Every IFD on the next-IFD chain as `Frame { image, delay: None, index, page_number, new_subfile_type }`. |
+| `decode_from<R: Read>` | Reads to end, then `decode`. |
+| `encode(&TiffImage, &EncodeOptions)` | Single-page file; every native layout is written as itself (no silent conversion). |
+| `encode_rgb8` / `encode_rgba8` | `Rgb24` page / RGB + one unassociated-alpha `ExtraSamples` (TIFF carries alpha; nothing is dropped). |
+| `encode_to<W: Write>` | Streaming variant of `encode`. |
+| `TiffImage { width, height, format, planes, color, metadata, palette }` | `PixelFormat` (= `TiffPixelFormat`), one packed `Plane { stride, data }`, `ColorInfo`, `Metadata { icc, exif, xmp, gamma }`, `Palette { entries: Vec<[u8; 4]> }` for `Pal8`. `new(..) -> Result` validates geometry; `from_rgb8` / `from_rgba8`; `to_rgb8()` / `to_rgba8()` are exact and infallible; `as_bytes()` / `into_raw()`. |
+| `TiffError` (= `Error`) | `InvalidData`, `Unsupported`, `LimitExceeded`, `Io(std::io::Error)`. |
+
+TIFF-specific depth keeps its own names: `decode_page` /
+`decode_page_at` / `decode_pages` return a `Page { image, metadata:
+TiffMetadata, layout: TiffFormatInfo }` (the TIFF 6.0 §8 descriptive
+fields, resolution, orientation, page tags, raw structural tags), and
+`EncodePage` / `encode_page` / `encode_pages` expose every pixel kind,
+sub-IFD and page option the writer has (see *Format specifics*).
+
+The pre-contract names (`decode_tiff`, `decode_tiff_at`,
+`decode_tiff_all`, `decode_tiff_all_pages`, `encode_tiff`,
+`encode_tiff_multi`, `DecodedTiff`, `TiffPlane`) remain for one release
+as `#[deprecated]` wrappers; the decode wrappers flatten `Pal8` / `Rgba`
+/ `Cmyk` to the `Rgb24` bytes the historical decoder emitted.
+
+## Framework use
+
+With the default `registry` feature the crate plugs into `oxideav-core`:
+
+```rust
+let mut ctx = oxideav_core::RuntimeContext::new();
+oxideav_tiff::register(&mut ctx);   // codec (decoder + encoder) + container (demuxer, muxer, probe)
+```
+
+`register_codecs(&mut CodecRegistry)` / `register_containers(&mut
+ContainerRegistry)` install the two halves separately; `make_decoder` /
+`make_encoder` are the codec factories (the framework `Decoder` /
+`Encoder` call the standalone functions above — one implementation).
+`From<TiffImage> for VideoFrame`, `TiffImage::from_video_frame(&VideoFrame,
+&CodecParameters)` and `TryFrom<(&VideoFrame, &CodecParameters)>` bridge
+the two layers; `Pal8` travels with the frame's palette side-channel
+and a specified `ColorInfo` as its colour-signal side-channel. The
+encoder's options schema (`compression`, `quality`, `predictor`,
+`planar`, `tile`, `rows_per_strip`, `bigtiff`) maps onto
+`EncodeOptions`. JPEG-in-TIFF *decode* (`Compression = 7` / `6`) routes
+through `oxideav-mjpeg` and therefore needs `registry`; everything else
+— including WebP-in-TIFF (`Compression = 50001`, via `oxideav-webp`'s
+framework-free surface) and the in-crate JPEG-in-TIFF *encoder* — works
+standalone.
+
+## Supported layouts
+
+Native layouts (`PixelFormat`): `Gray8`, `Gray16Le`, `Rgb24`,
+`Rgb48Le`, `Rgba` (straight alpha), `Pal8` + palette, `Cmyk`. All are
+packed (one plane, `stride = width × bytes per pixel`).
+
+**Decode** — what each on-disk shape becomes (the full matrix is in
+*Format specifics → Decode*):
+
+| On disk | `format` |
+|---|---|
+| Bilevel / 4-bit / 8-bit gray (`WhiteIsZero` inverted, `TransparencyMask` 0xFF = interior), 8-bit CIELab L\* | `Gray8` |
+| 16-bit gray (unsigned; signed via offset-binary map) | `Gray16Le` |
+| 8-bit RGB; YCbCr (any §21 subsampling, chunky / planar, JPEG); 3-sample CIELab; RGB with unspecified / associated / several extra samples (extras dropped) | `Rgb24` |
+| 16-bit RGB; 9..16-bit JPEG RGB / YCbCr | `Rgb48Le` |
+| 8-bit RGB + one unassociated-alpha extra sample (`ExtraSamples = [2]`) | `Rgba` |
+| 4- / 8-bit palette (`ColorMap`) | `Pal8` (indices verbatim, 4-bit unpacked) + `palette` |
+| 8-bit CMYK (`InkSet = 1`), uncompressed / JPEG | `Cmyk` |
+| IEEE float gray / RGB (16 / 32 / 64-bit) | `Gray8` / `Rgb24`, tone-scaled from `SMinSampleValue` / `SMaxSampleValue` (or the data extent) to 8 bits — there is no float native layout |
+
+`to_rgb8` / `to_rgba8` kernels: gray replicated; 16-bit samples keep
+the high byte (the same reduction the `ColorMap` words get); `Rgba`
+drops / keeps its straight alpha; `Pal8` looks up the palette (an index
+past it is black); `Cmyk` applies the TIFF 6.0 §16 inversion
+`R = (255−C)(255−K)/255` (and likewise G / B, integer division). Alpha
+is `255` for every other layout.
+
+**Encode** — `encode` writes every native layout as itself:
+
+| `format` | On disk |
+|---|---|
+| `Gray8` / `Gray16Le` | `PhotometricInterpretation = 1`, 8 / 16 bits |
+| `Rgb24` / `Rgb48Le` | `PhotometricInterpretation = 2`, 8 / 16 bits |
+| `Rgba` | RGB + `ExtraSamples = [2]` |
+| `Pal8` | `PhotometricInterpretation = 3`, 8-bit indices, `ColorMap` from the palette (`Error::Unsupported` if an entry is not opaque — TIFF palettes carry no alpha) |
+| `Cmyk` | `PhotometricInterpretation = 5`, `InkSet = 1` |
+
+Compression: `None` (default), `PackBits`, `Lzw`, `Deflate`, `Zstd`
+(50000) for every layout; `Webp` (50001) for `Rgb24` / `Rgba`; `Jpeg`
+(7, in-crate T.81 writer) for `Gray8` / `Rgb24` / `Cmyk` (and
+`Gray16Le` / `Rgb48Le` lossless). Bilevel, 4-bit, signed, float, YCbCr
+and CIELab pages are written through `EncodePage` / `encode_page`.
+`decode(encode(img)) == img` (planes, palette, colour and metadata) is
+pinned for every native layout × compression in
+`tests/image_crate_api.rs`.
+
+## Options
+
+`DecodeOptions` (`Default` + `with_*`): `max_width`, `max_height`,
+`max_pixels` (default 256 Mi), `max_bytes` (assembled sample bytes,
+default 1 GiB) — `None` lifts a limit, `unlimited()` lifts all; checked
+against the IFD's claims before any allocation, failing with
+`Error::LimitExceeded`. `strict` (default `false`) rejects the
+`SampleFormat` single-entry shorthand on multi-sample images; every
+other malformed layout tag is already an error in both modes.
+
+`EncodeOptions` (`Default` + `with_*`): `compression`
+(`TiffCompression`, default `None`; JPEG quality / process live in
+`TiffCompression::Jpeg(JpegOptions)`), `predictor` (§14 horizontal
+differencing), `planar` (`PlanarConfiguration = 2`), `tiling`
+(`(TileWidth, TileLength)`, multiples of 16), `rows_per_strip`,
+`bigtiff`, `embed_icc` / `embed_xmp` / `embed_exif` (default `true`),
+`software` (tag 305), `resolution` (`PageResolution`).
+
+## Metadata and colour
+
+`TiffImage::metadata` carries the ICC profile (tag 34675, verbatim),
+the XMP packet (tag 700, verbatim) and `exif`: the page's Exif IFD
+(34665) and GPS IFD (34853) re-serialised as one little-endian Exif
+TIFF payload (IFD0 holding the two pointer tags, child entries copied
+with their values re-laid out; IFD-typed pointers such as
+Interoperability are dropped). `encode` parses such a payload — either
+byte order — back into the child IFDs. `gamma` is always `None` (TIFF
+has no gamma tag; its §20 `TransferFunction` is a table). The TIFF 6.0
+§8 descriptive strings, resolution, orientation and page tags are on
+`Page::metadata` (`TiffMetadata`).
+
+`TiffImage::color` is TIFF 6.0 §20 colorimetry as H.273 code points:
+`ColorInfo { range: Full, primaries, transfer: 2, matrix: 0 }`. An image
+"has a colorimetric interpretation if and only if both the WhitePoint
+and PrimaryChromaticities fields are present", so `primaries` is set
+only when both are present and match an H.273 Table 2 row (BT.709 → 1,
+BT.470 M → 4, BT.470 B/G → 5, BT.601 525 → 6, BT.2020 → 9, P3 DCI → 11,
+P3 D65 → 12, ±0.0015); `transfer` stays unspecified (no code point
+exists for a `TransferFunction` table), `matrix` is identity because
+every layout the decoder hands back is RGB / gray / palette / CMYK, and
+integer samples are full range. Absent colorimetry is
+`ColorInfo::tiff_default()` (Full / 2 / 2 / 0). The encoder does not yet
+write `WhitePoint` / `PrimaryChromaticities`, so `color` is not part of
+the lossless round-trip pin.
+
+## Limits
+
+- 256 megapixels and 1 GiB of assembled samples per IFD by default
+  (`DecodeOptions`), checked from the IFD tags before allocation; with
+  `registry` the framework's `DecoderLimits` can only tighten them.
+- Layouts outside the decode table (e.g. 16-bit RGBA, 16-bit CMYK,
+  non-uniform `BitsPerSample`, deep CMYK JPEG) are `Error::Unsupported`
+  / `InvalidData`; see *Backlog*.
+- Float samples are tone-scaled to 8 bits on decode (no `GrayF32` /
+  `RgbF32` native layout yet); the float encode kinds are on
+  `EncodePage`.
+- `PlanarConfiguration = 2` pages are re-interleaved into the packed
+  layout on decode (`planes` always has one entry).
+
+## Format specifics
+
+### Decode
 
 | Photometric    | Bit depth      | Compression                        | Output       |
 | -------------- | -------------- | ---------------------------------- | ------------ |
@@ -27,20 +212,22 @@ Spec-only clean-room: no external library source was consulted.
 | BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
 | BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` / `Gray16Le` |
 | **Transparency Mask** | 1       | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` (interior = 0xFF, exterior = 0x00) |
-| Palette        | 4 / 8          | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` |
+| Palette        | 4 / 8          | None / PackBits / LZW / Deflate / **ZSTD** | `Pal8` + `palette` (ColorMap, high byte of each 16-bit word) |
 | RGB (3 chan)   | 8              | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` |
 | RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb48Le` |
-| RGB (3 chan / 4 chan + §ExtraSamples) | 8 | **WebP-in-TIFF** (Compression=50001; VP8L lossless + VP8 lossy segments) | `Rgb24` |
-| CMYK (4 chan)  | 8              | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` |
+| RGB (3 chan / 4 chan + §ExtraSamples) | 8 | **WebP-in-TIFF** (Compression=50001; VP8L lossless + VP8 lossy segments) | `Rgb24` / `Rgba` (ExtraSamples = [2]) |
+| RGB (4 chan, §ExtraSamples = [2] unassociated alpha) | 8 | None / PackBits / LZW / Deflate / **ZSTD** | `Rgba` (straight alpha, verbatim) |
+| RGB (≥ 4 chan, §ExtraSamples = 0 / 1 or several) | 8 | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` (extras dropped; associated alpha = §18 composite-over-black) |
+| CMYK (4 chan)  | 8              | None / PackBits / LZW / Deflate / **ZSTD** | `Cmyk` (ink coverages verbatim; `to_rgb8` = §16 inversion) |
 | YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **ZSTD** (incl. **§21 chroma subsampling** `[2,1]`/`[2,2]`/`[4,1]`/`[4,2]`, chunky + planar, strip + tiled) / **JPEG-in-TIFF** (Compression=7, chunky + **TN2 planar**) | `Rgb24` |
 | RGB (3 chan)   | 8              | **JPEG-in-TIFF** (Compression=7, chunky + planar) | `Rgb24`      |
 | BlackIsZero / WhiteIsZero | 8   | **JPEG-in-TIFF** (Compression=7)   | `Gray8`      |
-| CMYK (4 chan)  | 8              | **JPEG-in-TIFF** (Compression=7, chunky + planar) | `Rgb24`      |
+| CMYK (4 chan)  | 8              | **JPEG-in-TIFF** (Compression=7, chunky + planar) | `Cmyk`       |
 | BlackIsZero / WhiteIsZero | **9..=16 (12-bit SOF1, 9..16-bit SOF3)** | **JPEG-in-TIFF** (Compression=7) + **old-style Compression=6 interchange** | `Gray16Le` (bit-replication widening) |
 | YCbCr / RGB (3 chan) | **9..=16** | **JPEG-in-TIFF** (Compression=7, chunky + planar) | `Rgb48Le` |
 | **CIELab (3 chan)** | 8         | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` (Lab→XYZ@D65→linear NTSC→sRGB) |
 | **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
-| BlackIsZero / WhiteIsZero / RGB / YCbCr / CMYK | 8 | **Old-style JPEG** (Compression=6, TIFF 6.0 §22 — **both layouts**: interchange-format, and **tables-form** via T.81 Annex B marker synthesis; chunky + planar) | `Gray8` / `Rgb24` |
+| BlackIsZero / WhiteIsZero / RGB / YCbCr / CMYK | 8 | **Old-style JPEG** (Compression=6, TIFF 6.0 §22 — **both layouts**: interchange-format, and **tables-form** via T.81 Annex B marker synthesis; chunky + planar) | `Gray8` / `Rgb24` / `Cmyk` |
 
 `Predictor = 1` (no prediction), `Predictor = 2` (horizontal
 differencing, per-component for `SamplesPerPixel > 1`) and
@@ -81,11 +268,11 @@ JPEG-in-TIFF (`Compression = 7`), whose planar form follows TN2's
 "Special considerations for PlanarConfiguration 2" (single-channel
 segments, subsampled chroma segments at scaled-down SOF dimensions).
 Multi-page files walk the next-IFD chain
-via [`decode_tiff_all`]. Both `II` (little-endian) and `MM`
+via [`decode_all`] / [`decode_pages`]. Both `II` (little-endian) and `MM`
 (big-endian) byte orders are accepted, and both classic
 32-bit-offset TIFF and BigTIFF (8-byte offsets, magic 43) parse.
 
-### JPEG-in-TIFF (Compression = 7)
+#### JPEG-in-TIFF (Compression = 7)
 
 Per [TIFF Technical Note 2 (DRAFT 17-Mar-95)](docs/image/tiff/technote2-jpeg-in-tiff.html),
 `Compression = 7` is "new-style JPEG": each strip or tile is itself a
@@ -156,7 +343,7 @@ JPEG-in-TIFF requires the default-on `registry` Cargo feature; with
 `Error::Unsupported` (the §22 field validation and its precise
 rejection errors still run in standalone builds).
 
-### Old-style JPEG (Compression = 6, TIFF 6.0 §22)
+#### Old-style JPEG (Compression = 6, TIFF 6.0 §22)
 
 TIFF 6.0 §22 predates Tech Note 2 and defines `Compression = 6` with
 nine auxiliary fields (tags 512–521). TN2 deprecates the design but
@@ -187,7 +374,7 @@ Two §22 layouts exist:
   `JPEGProc` is accepted when the interchange stream is present (the
   SOF marker carries the process — TN2 records writers that omitted
   every auxiliary field). Multi-page §22 chains decode via
-  [`decode_tiff_all`]. Byte-exact equivalence with the
+  [`decode_all`] / [`decode_pages`]. Byte-exact equivalence with the
   `Compression = 7` wrapping of the identical bitstream is asserted in
   `tests/decode_oldstyle_jpeg.rs`.
 
@@ -227,7 +414,7 @@ Two §22 layouts exist:
   selection-values are range-checked (1..=7), and out-of-bounds /
   non-SOI interchange offsets are typed errors.
 
-### CIELab (PhotometricInterpretation = 8)
+#### CIELab (PhotometricInterpretation = 8)
 
 Per TIFF 6.0 §23 "CIE L*a*b* Images" (page 110), `PhotometricInterpretation = 8`
 identifies a 1976 CIE L\*a\*b\* image whose three (or one) 8-bit
@@ -283,7 +470,7 @@ Tiled layout (§15) composes with both variants under chunky and, for
 `BitsPerSample` SHORT array (6 bytes) stays inline in the widened
 8-byte value/offset slot.
 
-### Zstandard (Compression = 50000)
+#### Zstandard (Compression = 50000)
 
 `Compression = 50000` is the de-facto registry extension for
 Zstandard (RFC 8478) — there is no Adobe technical note registering
@@ -329,7 +516,7 @@ decoded by us — both compared pixel-exact). `Compression = 50001`
 (WebP) from the same registry page is implemented too — see the next
 section.
 
-### WebP (Compression = 50001)
+#### WebP (Compression = 50001)
 
 `Compression = 50001` is the pixel-codec sibling of the 50000
 Zstandard registry extension, from the same de-facto registry page
@@ -387,7 +574,7 @@ alpha carriage verified by re-decoding our emitted RIFF payload), and
 hostile-IFD rejections (declared Predictor, frame/IFD geometry
 mismatch).
 
-### Transparency Mask (PhotometricInterpretation = 4)
+#### Transparency Mask (PhotometricInterpretation = 4)
 
 Per TIFF 6.0 §"PhotometricInterpretation" value 4 (page 37) and
 §"NewSubfileType" bit 2 (page 36), a mask page is a 1-bit-per-pixel
@@ -559,12 +746,12 @@ per the spec default, and an RGB page with `SamplesPerPixel ≥ 4` but
 no tag 338 still decodes by skipping the undeclared trailing
 components.
 
-## Metadata & format introspection
+### Metadata & format introspection
 
 Every decode result carries the descriptive and structural tags that sit
 alongside the pixels, so a caller can read back exactly what a writer
-stored without re-walking the IFD. `decode_tiff` / `decode_tiff_at`
-return a `DecodedTiff` whose `metadata: TiffMetadata` and
+stored without re-walking the IFD. `decode_page` / `decode_page_at`
+return a `Page` whose `metadata: TiffMetadata` and
 `format: TiffFormatInfo` fields expose:
 
 | Field group | Tags | Reported as |
@@ -578,7 +765,7 @@ return a `DecodedTiff` whose `metadata: TiffMetadata` and
 Extraction is **total**: a malformed informational entry (wrong field
 type, truncated RATIONAL, out-of-range enum, over-long / unterminated /
 non-UTF-8 ASCII) leaves that one field empty and never gates the pixel
-decode or panics. `decode_tiff_all_pages` returns one `DecodedTiff` per
+decode or panics. `decode_pages` returns one `Page` per
 IFD so the metadata travels with each page of a multi-page file.
 
 On the write side the encoder's `PageExtras` emits every §8 ASCII field,
@@ -586,7 +773,7 @@ the resolution triple, Orientation, PageNumber and the NewSubfileType
 bits, interleaved into the IFD in the §2-required ascending tag order —
 so the whole §8 metadata surface round-trips end to end.
 
-### ICC profile (34675) & XMP packet (700)
+#### ICC profile (34675) & XMP packet (700)
 
 Neither tag is defined by TIFF 6.0 itself — tag 34675 (InterColorProfile)
 comes from the TIFF/EP (ISO 12234-2) assignment and tag 700 (XMP) from
@@ -610,7 +797,7 @@ black-box interop (`tests/icc_xmp_blackbox.rs`) proves both directions
 against `magick`, `tiffcp` and `tiffdump` as opaque validator
 processes.
 
-## Encode
+### Encode
 
 | Photometric    | Bit depth | Compression                                                 | API call                |
 | -------------- | --------- | ----------------------------------------------------------- | ----------------------- |
@@ -790,13 +977,13 @@ the 4-bit `Gray4` / `Palette4`, and the 1-bit `Bilevel` /
 `TransparencyMask` formats all write tiles.
 
 Output is classic II little-endian TIFF, single-IFD via
-[`encode_tiff`] or multi-page via [`encode_tiff_multi`]. Files
+[`encode_page`] (or the contract's [`encode`]) or multi-page via [`encode_pages`]. Files
 roundtrip through independent reference readers/transcoders; CCITT
 outputs additionally validate by transcoding our `Compression = 3`
 stream back to uncompressed with an independent tool and checking the
 resulting pixels match the original input.
 
-### YCbCr write (PhotometricInterpretation = 6, chunky 4:4:4)
+#### YCbCr write (PhotometricInterpretation = 6, chunky 4:4:4)
 
 `EncodePixelFormat::YCbCr24` writes per TIFF 6.0 §21 "YCbCr Images"
 (page 89): `PhotometricInterpretation = 6`, `SamplesPerPixel = 3`,
@@ -890,7 +1077,7 @@ to confirm tags 262 / 277 / 284 / 530 / 531 / 532 carry the documented
 values, and `tiffinfo` (black-box) confirms the separate-planes +
 subsampling field set.
 
-### JPEG-in-TIFF write (Compression = 7)
+#### JPEG-in-TIFF write (Compression = 7)
 
 `TiffCompression::Jpeg(JpegOptions)` writes TIFF Technical Note 2
 "new-style" JPEG: every strip / tile is one complete ISO/IEC 10918-1
@@ -902,7 +1089,7 @@ datastream produced by the crate's **own T.81 encoder**
 
 ```rust
 use oxideav_tiff::{
-    encode_tiff, rgb24_to_ycbcr24, EncodePage, EncodePixelFormat, JpegOptions,
+    encode_page, rgb24_to_ycbcr24, EncodePage, EncodePixelFormat, JpegOptions,
     JpegProcess, JpegTablesLayout, PageExtras, TiffCompression,
 };
 
@@ -915,7 +1102,7 @@ let mut page = EncodePage {
     extras: PageExtras::default(),
 };
 page.extras.rows_per_strip = Some(16);     // a multiple of the 4:2:0 MCU height
-let tiff = encode_tiff(&page)?;
+let tiff = encode_page(&page)?;
 ```
 
 * **Processes** (`JpegOptions::process`): `JpegProcess::Dct` writes
@@ -979,7 +1166,7 @@ let tiff = encode_tiff(&page)?;
   writes and decodes externally but our own reader (via
   `oxideav-mjpeg`) does not accept 4×2 luma sampling yet.
 
-### BigTIFF write
+#### BigTIFF write
 
 `EncodePage::bigtiff = true` switches the writer from classic TIFF
 (8-byte header, magic 42, 32-bit offsets, 12-byte IFD entries) to
@@ -995,11 +1182,11 @@ out-of-line. The classic 32-bit-offset overflow check the encoder
 performs against `u32::MAX` is lifted in BigTIFF mode (the on-disk
 ceiling is the full u64 file-offset range). Pixel formats, compressors,
 predictor / planar / tiling flags compose with `bigtiff = true`
-unchanged, and the multi-IFD chain ([`encode_tiff_multi`]) is supported
+unchanged, and the multi-IFD chain ([`encode_pages`]) is supported
 as long as every page agrees on the variant (a mixed-variant chain
 errors out — classic and BigTIFF IFD layouts are wire-incompatible).
 
-### Multi-strip write (RowsPerStrip)
+#### Multi-strip write (RowsPerStrip)
 
 `PageExtras::rows_per_strip = Some(r)` splits the written image into
 `ceil(ImageLength / r)` independently-compressed strips (TIFF 6.0
@@ -1017,7 +1204,7 @@ multi-page. Mutually exclusive with tiled layout (§15: the tile fields
 replace RowsPerStrip). `None` keeps the historical single-strip output
 byte-for-byte.
 
-### Page extras: PageNumber, NewSubfileType, Exif/GPS child IFDs, SubIFDs tree
+#### Page extras: PageNumber, NewSubfileType, Exif/GPS child IFDs, SubIFDs tree
 
 `EncodePage::extras` (`PageExtras`, all fields default-off) adds the
 page-level metadata writes:
@@ -1058,8 +1245,8 @@ page-level metadata writes:
   whose IFD hangs off the parent's tag-330 LONG / LONG8 offset array
   instead of the next-IFD chain; children nest (depth-capped at 8) and
   the offsets array spills out-of-line exactly like the strip arrays
-  when it outgrows the value slot. `decode_tiff_at(file, offset)`
-  decodes a child image from its tag-330 offset; `decode_tiff_all`
+  when it outgrows the value slot. `decode_page_at(file, offset)`
+  decodes a child image from its tag-330 offset; `decode_all`
   ignores children by construction (they are not chained pages).
 
 Round-trips are byte-inspected with the crate's own public
@@ -1068,7 +1255,7 @@ inline-vs-spilled tag-330 array on classic + BigTIFF), and `tiffinfo`
 (black-box) confirms the Page Number / multi-page / SubIFD-pointer
 lines.
 
-## Backlog (not yet implemented)
+### Backlog (not yet implemented)
 
 The compression schemes, photometrics, and layout features described
 above are all implemented on both decode and encode where stated. The
@@ -1089,7 +1276,7 @@ remaining gaps are:
   per component).
 - **DNG / GeoTIFF / Exif tag semantics.** The child-IFD *mechanics* are
   in (write side via `PageExtras::exif_ifd` / `gps_ifd` / `sub_ifds`;
-  read side via `parse_ifd` at the pointer offset + `decode_tiff_at`
+  read side via `parse_ifd` at the pointer offset + `decode_page_at`
   for SubIFD images), but the crate interprets no Exif/GPS/DNG/GeoTIFF
   tag meanings — the defining tag catalogues (JEITA/CIPA Exif, OGC
   GeoTIFF, Adobe DNG) are not in the staged spec material.
@@ -1119,14 +1306,6 @@ remaining gaps are:
   non-float or non-16/32/64-bit data is rejected per the §14 "the reader
   must give up" rule.
 
-## Registration
-
-```rust
-let mut codecs = oxideav_core::CodecRegistry::new();
-let mut containers = oxideav_core::ContainerRegistry::new();
-oxideav_tiff::register(&mut codecs, &mut containers);
-```
-
 ## Fuzzing
 
 Two `cargo-fuzz` targets live under `fuzz/fuzz_targets/`:
@@ -1141,8 +1320,10 @@ frame as one packed `Y Cb Cr` plane, which the segment classifier only
 accepted under `PhotometricInterpretation = 2`; packed YCbCr now
 composites through the BT.601 matrix at 8 and deep precisions.
 
-The decoder target `fuzz/fuzz_targets/decode.rs`
-It drives arbitrary bytes through `decode_tiff`, `decode_tiff_all`,
+The decoder target `fuzz/fuzz_targets/decode.rs` drives arbitrary
+bytes through the contract surface (`probe` / `info` / `decode` /
+`decode_rgba8` / `decode_with` under tight limits / `decode_all`), the
+`Page` depth API (`decode_page` / `decode_pages` / `decode_page_at`),
 `parse_header`, `parse_ifd`, and the four public compression
 unpackers (`unpack_packbits` / `unpack_lzw` / `unpack_deflate` /
 `unpack_zstd`). The
@@ -1161,7 +1342,9 @@ tests: an LZW first-after-Clear non-leaf code forming a self-referential
 prefix chain (`src/compress.rs`), a BigTIFF `first_ifd_offset = u64::MAX`
 that overflowed slice math (`src/ifd.rs`), and an attacker-claimed
 `ImageWidth × ImageLength` driving a multi-exabyte upfront allocation
-(the `src/decoder.rs` `MAX_IMAGE_PIXELS` gate). Deflate output is capped
+(the `DecodeOptions::max_pixels` gate), and an unknown-typed
+colorimetry entry whose `count` sized a 3.5 GB float vector
+(`Entry::as_f64_vec`, r466). Deflate output is capped
 to bound zip-bomb expansion. Regression tests live in
 `tests/decode_fuzz_regressions.rs` plus inline `compress` / `ifd` test
 modules so the panic-freedom checks survive in CI even when the fuzzer
