@@ -6,9 +6,9 @@
 //! geometry, quality, table layout, process, planar / tiled flags)
 //! and supply the sample raster. Contract:
 //!
-//! 1. `encode_tiff` never panics; it either produces a file or a
+//! 1. `encode_page` never panics; it either produces a file or a
 //!    typed error.
-//! 2. Every file it produces decodes through `decode_tiff` (the
+//! 2. Every file it produces decodes through `decode_page` (the
 //!    `Compression = 7` reader routes each segment through the
 //!    registered JPEG codec) — the one documented exception being
 //!    `YCbCrSubSampling = [4, 2]`, which the codec does not accept.
@@ -27,7 +27,7 @@ use oxideav_tiff::jpeg_enc::{
     QUANT_LUMINANCE_K1,
 };
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, JpegOptions, JpegProcess,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, JpegOptions, JpegProcess,
     JpegTablesLayout, PageExtras, TiffCompression, TiffPixelFormat,
 };
 
@@ -125,17 +125,17 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // (1) + (2): encode, then the file must decode.
-    if let Ok(tiff) = encode_tiff(&page) {
-        let decoded = decode_tiff(&tiff);
+    if let Ok(tiff) = encode_page(&page) {
+        let decoded = decode_page(&tiff);
         let four_two = kind_sel == 3 && subsampling == (4, 2);
         match decoded {
             Ok(dec) => {
-                assert_eq!((dec.width, dec.height), (width, height));
+                assert_eq!((dec.image.width, dec.image.height), (width, height));
                 // (3) lossless exactness on raw-layout formats.
                 if let JpegProcess::Lossless { .. } = process {
-                    let p = &dec.frame.planes[0];
+                    let p = &dec.image.planes[0];
                     let row = |y: usize, bytes: usize| &p.data[y * p.stride..y * p.stride + bytes];
-                    match (kind_sel, dec.pixel_format) {
+                    match (kind_sel, dec.image.format) {
                         (0, TiffPixelFormat::Gray8) => {
                             for y in 0..h {
                                 assert_eq!(row(y, w), &gray8[y * w..(y + 1) * w]);
@@ -162,8 +162,10 @@ fuzz_target!(|data: &[u8]| {
                                     .chunks_exact(2)
                                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                                     .collect();
-                                let want: Vec<u16> =
-                                    g12[y * w..(y + 1) * w].iter().map(|&v| (v << 4) | (v >> 8)).collect();
+                                let want: Vec<u16> = g12[y * w..(y + 1) * w]
+                                    .iter()
+                                    .map(|&v| (v << 4) | (v >> 8))
+                                    .collect();
                                 assert_eq!(got, want);
                             }
                         }
@@ -180,7 +182,7 @@ fuzz_target!(|data: &[u8]| {
             let mut m = tiff.clone();
             let at = (mutate_at as usize * 7919) % m.len();
             m[at] ^= 0x5A;
-            let _ = decode_tiff(&m);
+            let _ = decode_page(&m);
         }
     }
 

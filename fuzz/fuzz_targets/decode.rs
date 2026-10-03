@@ -40,7 +40,7 @@
 //! * **BigTIFF 64-bit offsets** — `as usize` on a u64 offset is
 //!   identity on 64-bit hosts but truncates on 32-bit hosts; the
 //!   post-cast bound check must reject truncations that pass.
-//! * **Cyclic next-IFD pointer** — `decode_tiff_all` walks the
+//! * **Cyclic next-IFD pointer** — `decode_all` walks the
 //!   chain; a crafted file that points back to itself must error
 //!   from the visited-set check, not OOM on the next-IFD walk.
 //! * **Compression unpacker direct entry** — `unpack_packbits` /
@@ -59,7 +59,10 @@ use libfuzzer_sys::fuzz_target;
 use oxideav_tiff::compress::{unpack_deflate, unpack_lzw, unpack_packbits, unpack_zstd};
 use oxideav_tiff::ifd::{parse_header, parse_ifd};
 use oxideav_tiff::metadata::{extract_format_info, extract_metadata};
-use oxideav_tiff::{decode_tiff, decode_tiff_all, decode_tiff_all_pages, decode_tiff_at};
+use oxideav_tiff::{
+    decode, decode_all, decode_page, decode_page_at, decode_pages, decode_rgba8, decode_with, info,
+    probe, DecodeOptions,
+};
 
 /// Cap the standalone-decompressor `expected_len` so a tiny fuzz
 /// input claiming a huge expected size cannot drive a multi-gibibyte
@@ -69,26 +72,42 @@ const MAX_EXPECTED_LEN: usize = 1 << 20; // 1 MiB
 
 fuzz_target!(|data: &[u8]| {
     // -----------------------------------------------------------------
-    // 1. The high-level public surface: `decode_tiff` (first IFD) and
-    //    `decode_tiff_all` (full multi-page chain). Together these
+    // 1. The high-level public surface: `decode_page` (first IFD) and
+    //    `decode_all` (full multi-page chain). Together these
     //    exercise the header parser, IFD walker, every compression
     //    unpacker, the strip and tile reassemblers, the predictor,
     //    and every photometric expander. The single richest fuzz
     //    surface in the crate.
     // -----------------------------------------------------------------
-    let _ = decode_tiff(data);
-    let _ = decode_tiff_all(data);
-    // `decode_tiff_all_pages` walks the same chain but also runs the
+    // The image-crate contract surface first: `probe` is total and
+    // allocation-free, `info` walks the header + IFD chain without
+    // touching pixels, `decode` / `decode_rgba8` run the first page
+    // through every photometric expander and the RGB(A) renderers.
+    let _ = probe(data);
+    let _ = info(data);
+    let _ = decode(data);
+    let _ = decode_rgba8(data);
+    // Tight limits must reject before allocation, never panic.
+    let _ = decode_with(
+        data,
+        &DecodeOptions::default()
+            .with_max_width(64)
+            .with_max_height(64)
+            .with_strict(true),
+    );
+    let _ = decode_page(data);
+    let _ = decode_all(data);
+    // `decode_pages` walks the same chain but also runs the
     // metadata + format-info extractors per page; drive it too.
-    let _ = decode_tiff_all_pages(data);
-    // `decode_tiff_at` takes an explicit (attacker-controllable in a
+    let _ = decode_pages(data);
+    // `decode_page_at` takes an explicit (attacker-controllable in a
     // hostile SubIFDs entry) IFD offset — probe it with a
     // fuzzer-chosen offset and a couple of fixed danger spots (header
     // overlap, EOF boundary).
     if let Some((&prefix, _)) = data.split_first() {
-        let _ = decode_tiff_at(data, prefix as u64);
-        let _ = decode_tiff_at(data, data.len() as u64);
-        let _ = decode_tiff_at(data, u64::MAX);
+        let _ = decode_page_at(data, prefix as u64);
+        let _ = decode_page_at(data, data.len() as u64);
+        let _ = decode_page_at(data, u64::MAX);
     }
 
     // -----------------------------------------------------------------

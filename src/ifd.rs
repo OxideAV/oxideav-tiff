@@ -180,7 +180,19 @@ impl Entry {
     /// spec allows.
     pub fn as_f64_vec(&self, bo: ByteOrder) -> Result<Vec<f64>> {
         let n = self.count as usize;
-        let need = n.saturating_mul(type_size(self.field_type) as usize);
+        let unit = type_size(self.field_type) as usize;
+        // An unknown field type has no element width: the parser keeps
+        // no value bytes for it, and `n` is attacker-controlled, so it
+        // must be rejected before the `with_capacity(n)` below (fuzz
+        // r466 finding: a WhitePoint entry of type 0 and count 2^31
+        // drove a 3.5 GB allocation).
+        if unit == 0 {
+            return Err(Error::invalid(format!(
+                "TIFF: entry tag {} has unknown field type {}",
+                self.tag, self.field_type
+            )));
+        }
+        let need = n.saturating_mul(unit);
         if self.data.len() < need {
             return Err(Error::invalid("TIFF: float entry truncated"));
         }
@@ -348,7 +360,7 @@ fn parse_ifd_classic(input: &[u8], bo: ByteOrder, offset: u64) -> Result<(Vec<En
     // Classic TIFF stores `offset` as a 32-bit field, but the
     // `parse_ifd` public surface widens it to u64; an attacker can
     // pass `u64::MAX` via the BigTIFF-typed entry path or via a
-    // hand-crafted `decode_tiff` driver, so all `off + N` arithmetic
+    // hand-crafted `decode_page` driver, so all `off + N` arithmetic
     // must go through `checked_add`.
     let off = offset as usize;
     let off_plus_2 = off

@@ -11,7 +11,7 @@
 //! (`MAX_IMAGE_PIXELS` sanity gate up-front against attacker-claimed
 //! `ImageWidth * ImageLength`).
 
-use oxideav_tiff::{decode_tiff, decode_tiff_all};
+use oxideav_tiff::{decode, decode_all, decode_page, info, ColorInfo};
 
 #[test]
 fn fuzz_r454_huge_samples_per_pixel_allocation_rejected() {
@@ -43,7 +43,7 @@ fn fuzz_r454_huge_samples_per_pixel_allocation_rejected() {
         v.extend_from_slice(&val.to_le_bytes());
     }
     v.extend_from_slice(&0u32.to_le_bytes());
-    let Err(e) = decode_tiff(&v) else {
+    let Err(e) = decode_page(&v) else {
         panic!("hostile SamplesPerPixel allocation must not decode");
     };
     assert!(format!("{e:?}").contains("too large"), "{e:?}");
@@ -78,11 +78,11 @@ fn fuzz_r454_samples_per_pixel_zero_does_not_panic() {
         v.extend_from_slice(&val.to_le_bytes());
     }
     v.extend_from_slice(&0u32.to_le_bytes());
-    let Err(e) = decode_tiff(&v) else {
+    let Err(e) = decode_page(&v) else {
         panic!("SamplesPerPixel=0 must not decode");
     };
     assert!(format!("{e:?}").contains("SamplesPerPixel=0"), "{e:?}");
-    let _ = decode_tiff_all(&v);
+    let _ = decode_all(&v);
 }
 
 #[test]
@@ -99,8 +99,8 @@ fn fuzz_r126_bigtiff_first_ifd_offset_u64_max_does_not_panic() {
         0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x3D, 0xB1,
     ];
     // Either return path is acceptable; the contract is "does not panic".
-    let _ = decode_tiff(&bytes);
-    let _ = decode_tiff_all(&bytes);
+    let _ = decode_page(&bytes);
+    let _ = decode_all(&bytes);
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn fuzz_r126_huge_dimensions_rejected_up_front() {
                                               // Pad to make the StripOffsets=100 dereference legal so we
                                               // exercise the dimension gate, not the EOF check.
     v.resize(200, 0);
-    let err = match decode_tiff(&v) {
+    let err = match decode_page(&v) {
         Ok(_) => panic!("expected dimension-rejection error"),
         Err(e) => e,
     };
@@ -147,4 +147,50 @@ fn fuzz_r126_huge_dimensions_rejected_up_front() {
             || msg.contains("pixels"),
         "expected too-large message, got: {msg}"
     );
+}
+
+#[test]
+fn fuzz_r466_unknown_type_colorimetry_entry_does_not_allocate() {
+    // Fuzz r466 finding (oom-4c5bb55e…): the colour-signalling
+    // resolver reads WhitePoint (318) / PrimaryChromaticities (319)
+    // through `Entry::as_f64_vec`, which sized its output by `count`
+    // after a `count × type_size` truncation check — and an unknown
+    // field type has `type_size == 0`, so a hostile entry of type 0
+    // with `count = 2^31` passed the check and drove a 3.5 GB
+    // `Vec::with_capacity`. Both ends are closed: `as_f64_vec` rejects
+    // unknown types before sizing, and the resolver only reads
+    // RATIONAL entries of the spec-fixed counts. The 1×1 page itself
+    // must still decode (colorimetry is metadata, never a gate).
+    let mut v: Vec<u8> = Vec::new();
+    v.extend_from_slice(b"II");
+    v.extend_from_slice(&42u16.to_le_bytes());
+    v.extend_from_slice(&8u32.to_le_bytes());
+    let entries: &[(u16, u16, u32, u32)] = &[
+        (256, 4, 1, 1),       // ImageWidth
+        (257, 4, 1, 1),       // ImageLength
+        (258, 3, 1, 8),       // BitsPerSample
+        (259, 3, 1, 1),       // Compression = None
+        (262, 3, 1, 1),       // PhotometricInterpretation = BlackIsZero
+        (273, 4, 1, 150),     // StripOffsets
+        (277, 3, 1, 1),       // SamplesPerPixel
+        (278, 4, 1, 1),       // RowsPerStrip
+        (279, 4, 1, 1),       // StripByteCounts
+        (318, 0, 1 << 31, 0), // WhitePoint — hostile: type 0, count 2^31
+        (319, 0, 1 << 31, 0), // PrimaryChromaticities — same
+    ];
+    v.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for &(tag, ty, cnt, val) in entries {
+        v.extend_from_slice(&tag.to_le_bytes());
+        v.extend_from_slice(&ty.to_le_bytes());
+        v.extend_from_slice(&cnt.to_le_bytes());
+        v.extend_from_slice(&val.to_le_bytes());
+    }
+    v.extend_from_slice(&0u32.to_le_bytes());
+    v.resize(151, 0);
+    v[150] = 0x5A;
+    let img = decode(&v).expect("hostile colorimetry entries must not gate the decode");
+    assert_eq!(img.planes[0].data, vec![0x5A]);
+    assert_eq!(img.color, ColorInfo::tiff_default());
+    let info = info(&v).expect("info must survive the same entries");
+    assert_eq!(info.color, ColorInfo::tiff_default());
 }

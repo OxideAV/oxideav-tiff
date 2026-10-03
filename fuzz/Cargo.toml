@@ -28,7 +28,7 @@ cargo-fuzz = true
 #   * BigTIFF 64-bit offsets (offset-as-usize cast on 32-bit hosts).
 #
 # Contract under test is decoder-only panic-freedom: every public
-# surface (`decode_tiff`, `decode_tiff_all`, the IFD parsers, the
+# surface (`probe` / `info` / `decode` / `decode_all`, the IFD parsers, the
 # compression unpackers) must return a `Result` for any input rather
 # than panic, abort, integer-overflow in debug, index out of bounds,
 # or attempt an attacker-claimed allocation that exceeds what the
@@ -60,8 +60,9 @@ debug = 1
 # Decode arbitrary bytes through every public decoder surface. Mirrors
 # the `ico` / `qoi` / `bmp` / `tta` / `flac` / `id3` / `mkv`
 # panic-free `decode` / `parse` target shape — a single libfuzzer
-# entry funnels the input through `decode_tiff`, `decode_tiff_all`,
-# and the lower-level IFD / compression parsers.
+# entry funnels the input through `probe` / `info` / `decode` /
+# `decode_all` / `decode_pages` and the lower-level IFD / compression
+# parsers.
 [[bin]]
 name = "decode"
 path = "fuzz_targets/decode.rs"
