@@ -20,11 +20,11 @@
 //! re-balance the colour.
 //!
 //! These tests build minimal hand-crafted classic-II TIFF byte strings
-//! and drive them through the public `decode_tiff` entry point, so the
+//! and drive them through the public `decode_page` entry point, so the
 //! expected display bytes are computed directly from the linear-mapping
 //! definition — a binary-independent oracle.
 
-use oxideav_tiff::decode_tiff;
+use oxideav_tiff::decode_page;
 
 /// IFD entry, SHORT (field-type = 3) with a single inline value.
 fn entry_short(tag: u16, value: u16) -> [u8; 12] {
@@ -162,10 +162,10 @@ fn f64_strip(vals: &[f64]) -> Vec<u8> {
     s
 }
 
-/// Assert `decode_tiff` returned an error whose Display includes the
+/// Assert `decode_page` returned an error whose Display includes the
 /// given substring.
 fn expect_err_containing(bytes: &[u8], needle: &str) {
-    match decode_tiff(bytes) {
+    match decode_page(bytes) {
         Ok(_) => panic!("expected an error containing {needle:?}, got Ok(..)"),
         Err(e) => {
             let msg = format!("{e}");
@@ -187,9 +187,9 @@ fn float32_rgb_scanned_extent_shared() {
     //   1.0  -> 255
     let strip = f32_strip(&[0.0, 0.5, 1.0, 0.25, 0.75, 1.0]);
     let bytes = build_float_rgb_row(2, 32, &strip, &[]);
-    let d = decode_tiff(&bytes).expect("float32 RGB must decode");
-    assert_eq!((d.width, d.height), (2, 1));
-    assert_eq!(d.frame.planes[0].data, vec![0u8, 128, 255, 64, 191, 255]);
+    let d = decode_page(&bytes).expect("float32 RGB must decode");
+    assert_eq!((d.image.width, d.image.height), (2, 1));
+    assert_eq!(d.image.planes[0].data, vec![0u8, 128, 255, 64, 191, 255]);
 }
 
 #[test]
@@ -200,8 +200,8 @@ fn float32_rgb_shared_extent_preserves_balance() {
     // that would flatten the pixel to (0, 0, 0) / full white.
     let strip = f32_strip(&[0.0, 0.5, 1.0]);
     let bytes = build_float_rgb_row(1, 32, &strip, &[]);
-    let d = decode_tiff(&bytes).expect("float32 RGB must decode");
-    assert_eq!(d.frame.planes[0].data, vec![0u8, 128, 255]);
+    let d = decode_page(&bytes).expect("float32 RGB must decode");
+    assert_eq!(d.image.planes[0].data, vec![0u8, 128, 255]);
 }
 
 #[test]
@@ -214,8 +214,8 @@ fn float32_rgb_smin_smax_bound_overrides_scan() {
     let strip = f32_strip(&[0.0, 0.5, 1.0]);
     let extra = [entry_float(340, -1.0), entry_float(341, 3.0)];
     let bytes = build_float_rgb_row(1, 32, &strip, &extra);
-    let d = decode_tiff(&bytes).expect("float32 RGB with SMin/SMax must decode");
-    assert_eq!(d.frame.planes[0].data, vec![64u8, 96, 128]);
+    let d = decode_page(&bytes).expect("float32 RGB with SMin/SMax must decode");
+    assert_eq!(d.image.planes[0].data, vec![64u8, 96, 128]);
 }
 
 #[test]
@@ -223,8 +223,8 @@ fn float32_rgb_negative_to_positive_extent() {
     // Shared extent [-1.0, +1.0]; midpoint 0.0 -> 128, -1 -> 0, +1 -> 255.
     let strip = f32_strip(&[-1.0, 0.0, 1.0]);
     let bytes = build_float_rgb_row(1, 32, &strip, &[]);
-    let d = decode_tiff(&bytes).expect("float32 RGB must decode");
-    assert_eq!(d.frame.planes[0].data, vec![0u8, 128, 255]);
+    let d = decode_page(&bytes).expect("float32 RGB must decode");
+    assert_eq!(d.image.planes[0].data, vec![0u8, 128, 255]);
 }
 
 #[test]
@@ -234,8 +234,8 @@ fn float32_rgb_nonfinite_renders_floor() {
     // render at the display floor (0).
     let strip = f32_strip(&[0.0, f32::NAN, 1.0, f32::INFINITY, 0.5, 1.0]);
     let bytes = build_float_rgb_row(2, 32, &strip, &[]);
-    let d = decode_tiff(&bytes).expect("float32 RGB with non-finite must decode");
-    assert_eq!(d.frame.planes[0].data, vec![0u8, 0, 255, 0, 128, 255]);
+    let d = decode_page(&bytes).expect("float32 RGB with non-finite must decode");
+    assert_eq!(d.image.planes[0].data, vec![0u8, 0, 255, 0, 128, 255]);
 }
 
 #[test]
@@ -243,8 +243,8 @@ fn float32_rgb_flat_image_renders_floor() {
     // All samples equal -> degenerate span -> flat 0 plane.
     let strip = f32_strip(&[2.5, 2.5, 2.5]);
     let bytes = build_float_rgb_row(1, 32, &strip, &[]);
-    let d = decode_tiff(&bytes).expect("flat float32 RGB must decode");
-    assert_eq!(d.frame.planes[0].data, vec![0u8, 0, 0]);
+    let d = decode_page(&bytes).expect("flat float32 RGB must decode");
+    assert_eq!(d.image.planes[0].data, vec![0u8, 0, 0]);
 }
 
 #[test]
@@ -253,8 +253,8 @@ fn float16_rgb_half_precision_scanned_extent() {
     // 0, 128, 255.
     let strip = half_strip(&[0.0, 0.5, 1.0]);
     let bytes = build_float_rgb_row(1, 16, &strip, &[]);
-    let d = decode_tiff(&bytes).expect("float16 RGB must decode");
-    assert_eq!(d.frame.planes[0].data, vec![0u8, 128, 255]);
+    let d = decode_page(&bytes).expect("float16 RGB must decode");
+    assert_eq!(d.image.planes[0].data, vec![0u8, 128, 255]);
 }
 
 #[test]
@@ -263,8 +263,8 @@ fn float64_rgb_double_precision_scanned_extent() {
     // 0, 64, 255.
     let strip = f64_strip(&[0.0, 0.25, 1.0]);
     let bytes = build_float_rgb_row(1, 64, &strip, &[]);
-    let d = decode_tiff(&bytes).expect("float64 RGB must decode");
-    assert_eq!(d.frame.planes[0].data, vec![0u8, 64, 255]);
+    let d = decode_page(&bytes).expect("float64 RGB must decode");
+    assert_eq!(d.image.planes[0].data, vec![0u8, 64, 255]);
 }
 
 #[test]

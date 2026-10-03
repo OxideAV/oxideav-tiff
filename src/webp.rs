@@ -37,6 +37,12 @@ use crate::error::{Result, TiffError as Error};
 /// The WebP frame dimensions are validated against the strip / tile
 /// geometry from the IFD — a payload whose frame is not exactly
 /// `width` × `rows` is rejected rather than resampled or cropped.
+// The published `oxideav-webp` 0.2.x surface is what this crate's CI
+// resolves; its image-crate-contract successors (`decode` /
+// `encode_rgba8`) are deprecated-wrapper siblings on the sibling's
+// master and unreleased, so the pre-contract names stay in use here
+// until that release lands (the workspace path build then warns).
+#[allow(deprecated)]
 pub(crate) fn unpack_webp(
     raw: &[u8],
     width: u32,
@@ -93,6 +99,12 @@ pub(crate) fn unpack_webp(
 /// Lossless VP8L is the natural fit for a TIFF writer: every
 /// Compression=50001 page round-trips pixel-exact, matching the
 /// guarantee of all the other compression schemes this encoder emits.
+// The published `oxideav-webp` 0.2.x surface is what this crate's CI
+// resolves; its image-crate-contract successors (`decode` /
+// `encode_rgba8`) are deprecated-wrapper siblings on the sibling's
+// master and unreleased, so the pre-contract names stay in use here
+// until that release lands (the workspace path build then warns).
+#[allow(deprecated)]
 pub(crate) fn pack_webp(raw: &[u8], width: u32, rows: u32) -> Result<Vec<u8>> {
     let pixels = (width as usize) * (rows as usize);
     if pixels == 0 {

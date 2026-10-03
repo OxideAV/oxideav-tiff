@@ -11,7 +11,7 @@
 //! The oracle for every case is the *strip-based* decode of the same
 //! source pixels: we encode the identical image twice — once tiled,
 //! once strip — through our own writer, decode both through
-//! [`decode_tiff`], and assert the resulting pixel planes are
+//! [`decode_page`], and assert the resulting pixel planes are
 //! byte-identical. A tiled decoder that mishandled tile ordering,
 //! row stride within a tile, or the §15 padding of edge tiles would
 //! diverge from the strip decode of the same image, so equality
@@ -19,7 +19,8 @@
 //! independent of any external reference.
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, RgbColor, TiffCompression,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, RgbColor, TiffCompression,
+    TiffPixelFormat,
 };
 
 // ---- Source-pixel generators (deterministic, layout-independent) ----
@@ -87,18 +88,27 @@ fn full_palette() -> Vec<RgbColor> {
 /// plus the (w, h) the tiled decode reported. The two planes must be
 /// equal for a correct tile decode.
 fn tiled_vs_strip(page_tiled: &EncodePage<'_>, page_strip: &EncodePage<'_>) -> (Vec<u8>, Vec<u8>) {
-    let tiled_bytes = encode_tiff(page_tiled).expect("encode tiled");
-    let strip_bytes = encode_tiff(page_strip).expect("encode strip");
-    let dt = decode_tiff(&tiled_bytes).expect("decode tiled");
-    let ds = decode_tiff(&strip_bytes).expect("decode strip");
+    let tiled_bytes = encode_page(page_tiled).expect("encode tiled");
+    let strip_bytes = encode_page(page_strip).expect("encode strip");
+    let dt = decode_page(&tiled_bytes).expect("decode tiled");
+    let ds = decode_page(&strip_bytes).expect("decode strip");
     assert_eq!(
-        (dt.width, dt.height),
-        (ds.width, ds.height),
+        (dt.image.width, dt.image.height),
+        (ds.image.width, ds.image.height),
         "tiled/strip dimension mismatch"
     );
+    assert_eq!(
+        dt.image.format, ds.image.format,
+        "tiled/strip layout mismatch"
+    );
+    // Palette pages come back as native `Pal8`; compare their display
+    // render so the index → colour mapping is checked exactly as before.
+    if dt.image.format == TiffPixelFormat::Pal8 {
+        return (dt.image.to_rgb8(), ds.image.to_rgb8());
+    }
     (
-        dt.frame.planes[0].data.clone(),
-        ds.frame.planes[0].data.clone(),
+        dt.image.planes[0].data.clone(),
+        ds.image.planes[0].data.clone(),
     )
 }
 
@@ -394,7 +404,7 @@ fn tiled_planar_rgb24_partial_edges_match_strip_and_source() {
     // 50x30 over 16x16 tiles => 4x2 grid with right-column and
     // bottom-row §15 padding, one such grid per R/G/B plane.
     let px = pattern_rgb(50, 30);
-    let planar_t = encode_tiff(&rgb_planar_tiled_page(
+    let planar_t = encode_page(&rgb_planar_tiled_page(
         50,
         30,
         &px,
@@ -403,9 +413,9 @@ fn tiled_planar_rgb24_partial_edges_match_strip_and_source() {
         (16, 16),
     ))
     .expect("encode planar tiled");
-    let dp = decode_tiff(&planar_t).expect("decode planar tiled");
-    assert_eq!((dp.width, dp.height), (50, 30));
-    assert_eq!(dp.frame.planes[0].data, px, "planar-tiled rgb24 != source");
+    let dp = decode_page(&planar_t).expect("decode planar tiled");
+    assert_eq!((dp.image.width, dp.image.height), (50, 30));
+    assert_eq!(dp.image.planes[0].data, px, "planar-tiled rgb24 != source");
 }
 
 #[test]
@@ -420,21 +430,21 @@ fn tiled_planar_rgb24_matches_chunky_tiled_all_compressions() {
         TiffCompression::Lzw,
         TiffCompression::Deflate,
     ] {
-        let planar = encode_tiff(&rgb_planar_tiled_page(50, 30, &px, comp, false, (16, 16)))
+        let planar = encode_page(&rgb_planar_tiled_page(50, 30, &px, comp, false, (16, 16)))
             .expect("encode planar tiled");
-        let chunky = encode_tiff(&EncodePage {
+        let chunky = encode_page(&EncodePage {
             planar: false,
             ..rgb_planar_tiled_page(50, 30, &px, comp, false, (16, 16))
         })
         .expect("encode chunky tiled");
-        let dp = decode_tiff(&planar).expect("decode planar tiled");
-        let dc = decode_tiff(&chunky).expect("decode chunky tiled");
+        let dp = decode_page(&planar).expect("decode planar tiled");
+        let dc = decode_page(&chunky).expect("decode chunky tiled");
         assert_eq!(
-            dp.frame.planes[0].data, dc.frame.planes[0].data,
+            dp.image.planes[0].data, dc.image.planes[0].data,
             "planar-tiled != chunky-tiled under {comp:?}"
         );
         assert_eq!(
-            dp.frame.planes[0].data, px,
+            dp.image.planes[0].data, px,
             "planar-tiled != source under {comp:?}"
         );
     }
@@ -447,7 +457,7 @@ fn tiled_planar_rgb24_predictor_match_source() {
     // as it does for grayscale data"), applied per-tile. The decoder
     // reverses it per-plane-per-tile.
     let px = pattern_rgb(48, 32);
-    let planar = encode_tiff(&rgb_planar_tiled_page(
+    let planar = encode_page(&rgb_planar_tiled_page(
         48,
         32,
         &px,
@@ -456,9 +466,9 @@ fn tiled_planar_rgb24_predictor_match_source() {
         (16, 16),
     ))
     .expect("encode planar tiled predictor");
-    let dp = decode_tiff(&planar).expect("decode planar tiled predictor");
+    let dp = decode_page(&planar).expect("decode planar tiled predictor");
     assert_eq!(
-        dp.frame.planes[0].data, px,
+        dp.image.planes[0].data, px,
         "planar-tiled predictor != source"
     );
 }
@@ -469,8 +479,8 @@ fn tiled_planar_rgb24_nonsquare_and_oversized_tiles_match_source() {
     // the image (64x32 over 20x12): exercises independent x/y per-plane
     // boundary padding.
     let px1 = pattern_rgb(50, 30);
-    let dp1 = decode_tiff(
-        &encode_tiff(&rgb_planar_tiled_page(
+    let dp1 = decode_page(
+        &encode_page(&rgb_planar_tiled_page(
             50,
             30,
             &px1,
@@ -482,13 +492,13 @@ fn tiled_planar_rgb24_nonsquare_and_oversized_tiles_match_source() {
     )
     .expect("decode");
     assert_eq!(
-        dp1.frame.planes[0].data, px1,
+        dp1.image.planes[0].data, px1,
         "non-square planar tile != source"
     );
 
     let px2 = pattern_rgb(20, 12);
-    let dp2 = decode_tiff(
-        &encode_tiff(&rgb_planar_tiled_page(
+    let dp2 = decode_page(
+        &encode_page(&rgb_planar_tiled_page(
             20,
             12,
             &px2,
@@ -500,7 +510,7 @@ fn tiled_planar_rgb24_nonsquare_and_oversized_tiles_match_source() {
     )
     .expect("decode");
     assert_eq!(
-        dp2.frame.planes[0].data, px2,
+        dp2.image.planes[0].data, px2,
         "oversized planar tile != source"
     );
 }
@@ -512,7 +522,7 @@ fn tiled_planar_rejected_on_single_sample_formats() {
     // irrelevant"); combining it with tiling must still be rejected by
     // the same single-sample guard, not silently produce a planar grid.
     let px = ramp_gray8(32, 32);
-    let r = encode_tiff(&EncodePage {
+    let r = encode_page(&EncodePage {
         width: 32,
         height: 32,
         kind: EncodePixelFormat::Gray8 { pixels: &px },

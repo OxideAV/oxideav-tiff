@@ -27,7 +27,7 @@ use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::jpeg::merge_jpeg_segment;
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, rgb24_to_ycbcr24, EncodePage, EncodePixelFormat, JpegOptions,
+    decode_page, encode_page, rgb24_to_ycbcr24, EncodePage, EncodePixelFormat, JpegOptions,
     JpegProcess, JpegTablesLayout, PageExtras, TiffCompression, TiffPixelFormat,
 };
 
@@ -409,28 +409,28 @@ fn splat_reference_rgb(ycc: &[u8], w: usize, h: usize, sh: usize, sv: usize) -> 
     out
 }
 
-fn gray_frame_bytes(decoded: &oxideav_tiff::DecodedTiff) -> Vec<u8> {
-    assert_eq!(decoded.pixel_format, TiffPixelFormat::Gray8);
-    let p = &decoded.frame.planes[0];
-    let w = decoded.width as usize;
-    (0..decoded.height as usize)
+fn gray_frame_bytes(decoded: &oxideav_tiff::Page) -> Vec<u8> {
+    assert_eq!(decoded.image.format, TiffPixelFormat::Gray8);
+    let p = &decoded.image.planes[0];
+    let w = decoded.image.width as usize;
+    (0..decoded.image.height as usize)
         .flat_map(|y| p.data[y * p.stride..y * p.stride + w].to_vec())
         .collect()
 }
 
-fn rgb_frame_bytes(decoded: &oxideav_tiff::DecodedTiff) -> Vec<u8> {
-    assert_eq!(decoded.pixel_format, TiffPixelFormat::Rgb24);
-    let p = &decoded.frame.planes[0];
-    let w = decoded.width as usize;
-    (0..decoded.height as usize)
+fn rgb_frame_bytes(decoded: &oxideav_tiff::Page) -> Vec<u8> {
+    assert_eq!(decoded.image.format, TiffPixelFormat::Rgb24);
+    let p = &decoded.image.planes[0];
+    let w = decoded.image.width as usize;
+    (0..decoded.image.height as usize)
         .flat_map(|y| p.data[y * p.stride..y * p.stride + w * 3].to_vec())
         .collect()
 }
 
-fn u16_frame(decoded: &oxideav_tiff::DecodedTiff, spp: usize) -> Vec<u16> {
-    let p = &decoded.frame.planes[0];
-    let w = decoded.width as usize;
-    (0..decoded.height as usize)
+fn u16_frame(decoded: &oxideav_tiff::Page, spp: usize) -> Vec<u16> {
+    let p = &decoded.image.planes[0];
+    let w = decoded.image.width as usize;
+    (0..decoded.image.height as usize)
         .flat_map(|y| {
             p.data[y * p.stride..y * p.stride + w * spp * 2]
                 .chunks_exact(2)
@@ -497,8 +497,8 @@ fn validate_8bit_agree(
         let name = label.replace(|c: char| !c.is_ascii_alphanumeric(), "_");
         let _ = fs::write(PathBuf::from(dir).join(format!("{name}.tif")), tiff);
     }
-    let dec = decode_tiff(tiff).unwrap();
-    assert_eq!(dec.format.compression, Some(COMPRESSION_JPEG_NEW));
+    let dec = decode_page(tiff).unwrap();
+    assert_eq!(dec.layout.compression, Some(COMPRESSION_JPEG_NEW));
     let ours = if rgb {
         rgb_frame_bytes(&dec)
     } else {
@@ -528,9 +528,12 @@ fn validate_8bit_agree(
         ran += 1;
     }
     if let Some(rewritten) = tiffcp_none(tiff) {
-        let dec2 = decode_tiff(&rewritten).unwrap();
-        assert_eq!(dec2.format.compression, Some(COMPRESSION_NONE));
-        assert_eq!((dec2.width, dec2.height), (dec.width, dec.height));
+        let dec2 = decode_page(&rewritten).unwrap();
+        assert_eq!(dec2.layout.compression, Some(COMPRESSION_NONE));
+        assert_eq!(
+            (dec2.image.width, dec2.image.height),
+            (dec.image.width, dec.image.height)
+        );
         let theirs = if rgb {
             rgb_frame_bytes(&dec2)
         } else {
@@ -575,8 +578,8 @@ fn validate_planar_subsampled(
         let name = label.replace(|c: char| !c.is_ascii_alphanumeric(), "_");
         let _ = fs::write(PathBuf::from(dir).join(format!("{name}.tif")), tiff);
     }
-    let dec = decode_tiff(tiff).unwrap();
-    assert_eq!(dec.format.planar_config, Some(PLANAR_SEPARATE));
+    let dec = decode_page(tiff).unwrap();
+    assert_eq!(dec.layout.planar_config, Some(PLANAR_SEPARATE));
     let ours = rgb_frame_bytes(&dec);
     let reference = splat_reference_rgb(ycc, w, h, sh, sv);
     let p = psnr_u8(&reference, &ours);
@@ -677,7 +680,7 @@ fn gray8_single_strip_both_table_layouts() {
     let (w, h) = (45u32, 29u32);
     let src = smooth_gray(w as usize, h as usize, 4);
     for layout in [JpegTablesLayout::Shared, JpegTablesLayout::PerSegment] {
-        let tiff = encode_tiff(&page(
+        let tiff = encode_page(&page(
             w,
             h,
             EncodePixelFormat::Gray8 { pixels: &src },
@@ -717,7 +720,7 @@ fn gray8_multi_strip_rows_per_strip_16() {
         jpeg(85, JpegTablesLayout::Shared),
     );
     p.extras.rows_per_strip = Some(16);
-    let tiff = encode_tiff(&p).unwrap();
+    let tiff = encode_page(&p).unwrap();
     let segs = extract_segments(&tiff);
     assert_eq!(segs.len(), 4, "ceil(50 / 16) strips");
     validate_8bit(&tiff, &src, false, 36.0, "gray8 4 strips");
@@ -727,14 +730,14 @@ fn gray8_multi_strip_rows_per_strip_16() {
     let lines = u16::from_be_bytes([last[sof + 5], last[sof + 6]]);
     assert_eq!(lines, 2);
     // Quality knob is monotone in size.
-    let big = encode_tiff(&page(
+    let big = encode_page(&page(
         w,
         h,
         EncodePixelFormat::Gray8 { pixels: &src },
         jpeg(100, JpegTablesLayout::PerSegment),
     ))
     .unwrap();
-    let small = encode_tiff(&page(
+    let small = encode_page(&page(
         w,
         h,
         EncodePixelFormat::Gray8 { pixels: &src },
@@ -755,15 +758,15 @@ fn rows_per_strip_must_be_mcu_aligned_for_dct() {
         jpeg(75, JpegTablesLayout::Shared),
     );
     p.extras.rows_per_strip = Some(12);
-    let err = encode_tiff(&p).unwrap_err().to_string();
+    let err = encode_page(&p).unwrap_err().to_string();
     assert!(err.contains("multiple of the MCU height"), "{err}");
     // Lossless is exempt.
     p.compression = TiffCompression::Jpeg(JpegOptions {
         process: JpegProcess::Lossless { predictor: 1 },
         ..JpegOptions::default()
     });
-    let tiff = encode_tiff(&p).unwrap();
-    let dec = decode_tiff(&tiff).unwrap();
+    let tiff = encode_page(&p).unwrap();
+    let dec = decode_page(&tiff).unwrap();
     assert_eq!(gray_frame_bytes(&dec), src);
     // A single strip of any height is fine for DCT.
     let mut p2 = page(
@@ -773,7 +776,7 @@ fn rows_per_strip_must_be_mcu_aligned_for_dct() {
         jpeg(75, JpegTablesLayout::Shared),
     );
     p2.extras.rows_per_strip = Some(40);
-    encode_tiff(&p2).unwrap();
+    encode_page(&p2).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -785,15 +788,15 @@ fn rgb24_photometric_rgb_jpeg() {
     let (w, h) = (40u32, 24u32);
     let src = smooth_rgb(w as usize, h as usize);
     for layout in [JpegTablesLayout::Shared, JpegTablesLayout::PerSegment] {
-        let tiff = encode_tiff(&page(
+        let tiff = encode_page(&page(
             w,
             h,
             EncodePixelFormat::Rgb24 { pixels: &src },
             jpeg(92, layout),
         ))
         .unwrap();
-        let dec = decode_tiff(&tiff).unwrap();
-        assert_eq!(dec.format.photometric, Some(PHOTO_RGB));
+        let dec = decode_page(&tiff).unwrap();
+        assert_eq!(dec.layout.photometric, Some(PHOTO_RGB));
         validate_8bit(&tiff, &src, true, 38.0, &format!("rgb24 {layout:?}"));
     }
 }
@@ -804,15 +807,15 @@ fn ycbcr_444_and_subsampled_strips() {
     let rgb = smooth_rgb(w as usize, h as usize);
     let ycc = rgb24_to_ycbcr24(&rgb);
     // 4:4:4 via the plain YCbCr24 input.
-    let tiff = encode_tiff(&page(
+    let tiff = encode_page(&page(
         w,
         h,
         EncodePixelFormat::YCbCr24 { pixels: &ycc },
         jpeg(92, JpegTablesLayout::Shared),
     ))
     .unwrap();
-    let dec = decode_tiff(&tiff).unwrap();
-    assert_eq!(dec.format.photometric, Some(PHOTO_YCBCR));
+    let dec = decode_page(&tiff).unwrap();
+    assert_eq!(dec.layout.photometric, Some(PHOTO_YCBCR));
     validate_8bit(&tiff, &rgb, true, 36.0, "ycbcr 4:4:4");
     let ycc = smooth_ycc(w as usize, h as usize);
     // Subsampled: every §21 pair; the chroma is smooth so the
@@ -828,7 +831,7 @@ fn ycbcr_444_and_subsampled_strips() {
             jpeg(92, JpegTablesLayout::Shared),
         );
         p.extras.rows_per_strip = Some(16);
-        let tiff = encode_tiff(&p).unwrap();
+        let tiff = encode_page(&p).unwrap();
         let entries = ifd_entries(&tiff);
         let ss = find(&entries, TAG_YCBCR_SUBSAMPLING)
             .unwrap()
@@ -838,13 +841,22 @@ fn ycbcr_444_and_subsampled_strips() {
         let reference = splat_reference_rgb(&ycc, w as usize, h as usize, sh as usize, sv as usize);
         if (sh, sv) == (4, 2) {
             // The crate's own Compression = 7 reader (oxideav-mjpeg)
-            // does not decode 4x2 luma sampling, so this legal §21
-            // pair is validated black-box only.
-            let err = match decode_tiff(&tiff) {
-                Ok(_) => String::from("decoded"),
-                Err(e) => e.to_string(),
-            };
-            assert!(err.contains("4x2"), "{err}");
+            // decodes 4x2 luma sampling only from a release that grew
+            // that sampling layout: against an older release the pair
+            // is a precise "4x2" refusal, against a newer one it must
+            // reconstruct the source like every other pair. Either
+            // way the legal §21 pair is validated black-box too.
+            match decode_page(&tiff) {
+                Ok(dec) => {
+                    let ours = rgb_frame_bytes(&dec);
+                    let p = psnr_u8(&reference, &ours);
+                    assert!(p >= 36.0, "ycbcr 4x2 strips: own decode PSNR {p:.2} dB");
+                }
+                Err(e) => {
+                    let err = e.to_string();
+                    assert!(err.contains("4x2"), "{err}");
+                }
+            }
             if let Some(m) = magick_decode(&tiff, true) {
                 let m8: Vec<u8> = m.iter().map(|&v| v as u8).collect();
                 let pm = psnr_u8(&reference, &m8);
@@ -891,10 +903,10 @@ fn tiled_gray_rgb_and_ycbcr420() {
         jpeg(90, JpegTablesLayout::Shared),
     );
     p.tiling = Some((32, 16));
-    let tiff = encode_tiff(&p).unwrap();
+    let tiff = encode_page(&p).unwrap();
     assert_eq!(extract_segments(&tiff).len(), 3 * 3);
-    let dec = decode_tiff(&tiff).unwrap();
-    assert!(dec.format.tiled);
+    let dec = decode_page(&tiff).unwrap();
+    assert!(dec.layout.tiled);
     validate_8bit(&tiff, &gray, false, 37.0, "gray8 tiles 32x16");
 
     let mut p = page(
@@ -904,7 +916,7 @@ fn tiled_gray_rgb_and_ycbcr420() {
         jpeg(90, JpegTablesLayout::PerSegment),
     );
     p.tiling = Some((16, 32));
-    let tiff = encode_tiff(&p).unwrap();
+    let tiff = encode_page(&p).unwrap();
     validate_8bit(&tiff, &rgb, true, 37.0, "rgb24 tiles 16x32");
 
     let mut p = page(
@@ -926,7 +938,7 @@ fn tiled_gray_rgb_and_ycbcr420() {
         pixels: &ycc2,
         subsampling: (2, 2),
     };
-    let tiff = encode_tiff(&p).unwrap();
+    let tiff = encode_page(&p).unwrap();
     let reference = splat_reference_rgb(&ycc2, 70, 44, 2, 2);
     validate_8bit_agree(
         &tiff,
@@ -948,10 +960,10 @@ fn tiled_gray_rgb_and_ycbcr420() {
         jpeg(90, JpegTablesLayout::Shared),
     );
     p.tiling = Some((16, 16));
-    let err = encode_tiff(&p).unwrap_err().to_string();
+    let err = encode_page(&p).unwrap_err().to_string();
     assert!(err.contains("MCU size"), "{err}");
     p.tiling = Some((32, 16));
-    let tiff = encode_tiff(&p).unwrap();
+    let tiff = encode_page(&p).unwrap();
     let reference = splat_reference_rgb(&ycc411, 64, 32, 4, 1);
     validate_8bit_agree(
         &tiff,
@@ -981,11 +993,11 @@ fn planar_rgb_and_subsampled_ycbcr_strips_and_tiles() {
     );
     p.planar = true;
     p.extras.rows_per_strip = Some(16);
-    let tiff = encode_tiff(&p).unwrap();
+    let tiff = encode_page(&p).unwrap();
     let segs = extract_segments(&tiff);
     assert_eq!(segs.len(), 3 * 3, "SamplesPerPixel × StripsPerImage");
-    let dec = decode_tiff(&tiff).unwrap();
-    assert_eq!(dec.format.planar_config, Some(PLANAR_SEPARATE));
+    let dec = decode_page(&tiff).unwrap();
+    assert_eq!(dec.layout.planar_config, Some(PLANAR_SEPARATE));
     validate_8bit(&tiff, &rgb, true, 38.0, "planar rgb strips");
     // Every plane segment is a single-component frame with 1x1
     // factors (TN2 PlanarConfiguration 2).
@@ -1008,7 +1020,7 @@ fn planar_rgb_and_subsampled_ycbcr_strips_and_tiles() {
     );
     p.planar = true;
     p.extras.rows_per_strip = Some(16);
-    let tiff = encode_tiff(&p).unwrap();
+    let tiff = encode_page(&p).unwrap();
     let segs = extract_segments(&tiff);
     assert_eq!(segs.len(), 9);
     let sof = segs[3].windows(2).position(|x| x == [0xFF, 0xC0]).unwrap();
@@ -1036,7 +1048,7 @@ fn planar_rgb_and_subsampled_ycbcr_strips_and_tiles() {
     );
     p.planar = true;
     p.tiling = Some((32, 16));
-    let tiff = encode_tiff(&p).unwrap();
+    let tiff = encode_page(&p).unwrap();
     let segs = extract_segments(&tiff);
     assert_eq!(segs.len(), 3 * 2 * 3);
     let sof = segs[6].windows(2).position(|x| x == [0xFF, 0xC0]).unwrap();
@@ -1075,10 +1087,12 @@ fn cmyk_jpeg_roundtrips_through_own_decoder() {
             jpeg(95, JpegTablesLayout::Shared),
         );
         p.planar = planar;
-        let tiff = encode_tiff(&p).unwrap();
-        let dec = decode_tiff(&tiff).unwrap();
-        assert_eq!(dec.format.photometric, Some(PHOTO_CMYK));
-        let ours = rgb_frame_bytes(&dec);
+        let tiff = encode_page(&p).unwrap();
+        let dec = decode_page(&tiff).unwrap();
+        assert_eq!(dec.layout.photometric, Some(PHOTO_CMYK));
+        // Native Cmyk layout; the §16 additive mapping is `to_rgb8`.
+        assert_eq!(dec.image.format, TiffPixelFormat::Cmyk);
+        let ours = dec.image.to_rgb8();
         let p = psnr_u8(&rgb, &ours);
         assert!(p >= 36.0, "cmyk planar={planar}: PSNR {p:.2}");
         if let Some(info) = tiffinfo(&tiff) {
@@ -1108,16 +1122,16 @@ fn widen12(v: u16) -> u16 {
 fn gray12_and_rgb36_dct_sof1() {
     let (w, h) = (30u32, 21u32);
     let g = smooth_u16(w as usize, h as usize, 12, 1);
-    let tiff = encode_tiff(&page(
+    let tiff = encode_page(&page(
         w,
         h,
         EncodePixelFormat::Gray12 { pixels: &g },
         jpeg(95, JpegTablesLayout::Shared),
     ))
     .unwrap();
-    let dec = decode_tiff(&tiff).unwrap();
-    assert_eq!(dec.pixel_format, TiffPixelFormat::Gray16Le);
-    assert_eq!(dec.format.bits_per_sample, vec![12]);
+    let dec = decode_page(&tiff).unwrap();
+    assert_eq!(dec.image.format, TiffPixelFormat::Gray16Le);
+    assert_eq!(dec.layout.bits_per_sample, vec![12]);
     let got = u16_frame(&dec, 1);
     let want: Vec<u16> = g.iter().map(|&v| widen12(v)).collect();
     let p = psnr_u16(&want, &got, 65535.0);
@@ -1155,9 +1169,9 @@ fn gray12_and_rgb36_dct_sof1() {
             jpeg(95, JpegTablesLayout::PerSegment),
         );
         p.planar = planar;
-        let tiff = encode_tiff(&p).unwrap();
-        let dec = decode_tiff(&tiff).unwrap();
-        assert_eq!(dec.pixel_format, TiffPixelFormat::Rgb48Le);
+        let tiff = encode_page(&p).unwrap();
+        let dec = decode_page(&tiff).unwrap();
+        assert_eq!(dec.image.format, TiffPixelFormat::Rgb48Le);
         let got = u16_frame(&dec, 3);
         let want: Vec<u16> = rgb.iter().map(|&v| widen12(v)).collect();
         let p = psnr_u16(&want, &got, 65535.0);
@@ -1176,7 +1190,7 @@ fn gray12_and_rgb36_dct_sof1() {
         }
     }
     // 12-bit input under a byte-run compressor is rejected precisely.
-    let err = encode_tiff(&page(
+    let err = encode_page(&page(
         w,
         h,
         EncodePixelFormat::Gray12 { pixels: &g },
@@ -1206,8 +1220,8 @@ fn lossless_sof3_is_sample_exact_at_8_12_and_16_bits() {
         });
         // 8-bit.
         let tiff =
-            encode_tiff(&page(w, h, EncodePixelFormat::Gray8 { pixels: &g8 }, comp)).unwrap();
-        let dec = decode_tiff(&tiff).unwrap();
+            encode_page(&page(w, h, EncodePixelFormat::Gray8 { pixels: &g8 }, comp)).unwrap();
+        let dec = decode_page(&tiff).unwrap();
         assert_eq!(gray_frame_bytes(&dec), g8, "8-bit predictor {predictor}");
         let segs = extract_segments(&tiff);
         assert!(segs[0].windows(2).any(|x| x == [0xFF, 0xC3]), "SOF3");
@@ -1215,7 +1229,7 @@ fn lossless_sof3_is_sample_exact_at_8_12_and_16_bits() {
             assert_eq!(s, to_u16(&g8), "djpeg 8-bit predictor {predictor}");
         }
         if let Some(rewritten) = tiffcp_none(&tiff) {
-            let dec2 = decode_tiff(&rewritten).unwrap();
+            let dec2 = decode_page(&rewritten).unwrap();
             assert_eq!(
                 gray_frame_bytes(&dec2),
                 g8,
@@ -1230,14 +1244,14 @@ fn lossless_sof3_is_sample_exact_at_8_12_and_16_bits() {
             );
         }
         // 12-bit.
-        let tiff = encode_tiff(&page(
+        let tiff = encode_page(&page(
             w,
             h,
             EncodePixelFormat::Gray12 { pixels: &g12 },
             comp,
         ))
         .unwrap();
-        let dec = decode_tiff(&tiff).unwrap();
+        let dec = decode_page(&tiff).unwrap();
         let want: Vec<u16> = g12.iter().map(|&v| widen12(v)).collect();
         assert_eq!(u16_frame(&dec, 1), want, "12-bit predictor {predictor}");
         let segs = extract_segments(&tiff);
@@ -1245,15 +1259,15 @@ fn lossless_sof3_is_sample_exact_at_8_12_and_16_bits() {
             assert_eq!(s, g12, "djpeg 12-bit predictor {predictor}");
         }
         // 16-bit.
-        let tiff = encode_tiff(&page(
+        let tiff = encode_page(&page(
             w,
             h,
             EncodePixelFormat::Gray16Le { pixels: &g16le },
             comp,
         ))
         .unwrap();
-        let dec = decode_tiff(&tiff).unwrap();
-        assert_eq!(dec.format.bits_per_sample, vec![16]);
+        let dec = decode_page(&tiff).unwrap();
+        assert_eq!(dec.layout.bits_per_sample, vec![16]);
         assert_eq!(u16_frame(&dec, 1), g16, "16-bit predictor {predictor}");
         let segs = extract_segments(&tiff);
         if let Some((_, _, _, s)) = djpeg(&segs[0], &["-pnm", "-precision", "16"]) {
@@ -1284,9 +1298,9 @@ fn lossless_sof3_is_sample_exact_at_8_12_and_16_bits() {
         let mut p = page(w, h, EncodePixelFormat::Rgb48 { pixels: &rgb48 }, comp);
         p.planar = planar;
         p.tiling = tiling;
-        let tiff = encode_tiff(&p).unwrap();
-        let dec = decode_tiff(&tiff).unwrap();
-        assert_eq!(dec.pixel_format, TiffPixelFormat::Rgb48Le);
+        let tiff = encode_page(&p).unwrap();
+        let dec = decode_page(&tiff).unwrap();
+        assert_eq!(dec.image.format, TiffPixelFormat::Rgb48Le);
         assert_eq!(
             u16_frame(&dec, 3),
             want,
@@ -1294,7 +1308,7 @@ fn lossless_sof3_is_sample_exact_at_8_12_and_16_bits() {
         );
     }
     // 16-bit input needs the lossless process.
-    let err = encode_tiff(&page(
+    let err = encode_page(&page(
         w,
         h,
         EncodePixelFormat::Gray16Le { pixels: &g16le },
@@ -1332,8 +1346,8 @@ fn lossless_ycbcr_444_composites_packed_segments() {
             }),
         );
         p.planar = planar;
-        let tiff = encode_tiff(&p).unwrap();
-        let dec = decode_tiff(&tiff).unwrap();
+        let tiff = encode_page(&p).unwrap();
+        let dec = decode_page(&tiff).unwrap();
         assert_eq!(rgb_frame_bytes(&dec), reference, "planar={planar}");
     }
 }
@@ -1365,7 +1379,7 @@ fn restart_intervals_compose_with_strips_tiles_and_lossless() {
         TiffCompression::Jpeg(opts),
     );
     p.extras.rows_per_strip = Some(16);
-    let tiff = encode_tiff(&p).unwrap();
+    let tiff = encode_page(&p).unwrap();
     let segs = extract_segments(&tiff);
     assert_eq!(segs.len(), 3);
     // 6 × 2 = 12 MCUs per full strip, Ri = 4 → 2 markers; the last strip
@@ -1389,7 +1403,7 @@ fn restart_intervals_compose_with_strips_tiles_and_lossless() {
         }),
     );
     p.tiling = Some((32, 32));
-    let tiff = encode_tiff(&p).unwrap();
+    let tiff = encode_page(&p).unwrap();
     let segs = extract_segments(&tiff);
     // 32×32 tile = 4 MCUs of 16×16 at Ri = 1 → 3 markers per tile.
     assert_eq!(rst_count(&segs[0]), 3);
@@ -1409,7 +1423,7 @@ fn restart_intervals_compose_with_strips_tiles_and_lossless() {
     // H.1.2.1 start-of-interval prediction rule, so the TIFF level
     // rejects the combination precisely rather than emit pages it
     // cannot read back.
-    let err = encode_tiff(&page(
+    let err = encode_page(&page(
         w,
         h,
         EncodePixelFormat::Gray8 { pixels: &gray },
@@ -1446,9 +1460,9 @@ fn bigtiff_and_multipage_compose_with_jpeg() {
         jpeg(90, JpegTablesLayout::PerSegment),
     );
     p2.bigtiff = true;
-    let tiff = oxideav_tiff::encode_tiff_multi(&[p1, p2]).unwrap();
+    let tiff = oxideav_tiff::encode_pages(&[p1, p2]).unwrap();
     assert_eq!(u16::from_le_bytes([tiff[2], tiff[3]]), 43, "BigTIFF magic");
-    let pages = oxideav_tiff::decode_tiff_all_pages(&tiff).unwrap();
+    let pages = oxideav_tiff::decode_pages(&tiff).unwrap();
     assert_eq!(pages.len(), 2);
     assert!(psnr_u8(&a, &gray_frame_bytes(&pages[0])) >= 38.0);
     assert!(psnr_u8(&b, &rgb_frame_bytes(&pages[1])) >= 38.0);
@@ -1466,12 +1480,12 @@ fn jpeg_rejections_are_precise() {
     let comp = jpeg(75, JpegTablesLayout::Shared);
     let mut p = page(w, h, EncodePixelFormat::Gray8 { pixels: &g }, comp);
     p.predictor = true;
-    assert!(encode_tiff(&p)
+    assert!(encode_page(&p)
         .unwrap_err()
         .to_string()
         .contains("Predictor"));
     let bits = vec![0u8; 2 * 16];
-    let err = encode_tiff(&page(
+    let err = encode_page(&page(
         w,
         h,
         EncodePixelFormat::Bilevel { pixels: &bits },
@@ -1481,7 +1495,7 @@ fn jpeg_rejections_are_precise() {
     .to_string();
     assert!(err.contains("Bilevel"), "{err}");
     let pal = vec![[0u8, 0, 0]; 256];
-    let err = encode_tiff(&page(
+    let err = encode_page(&page(
         w,
         h,
         EncodePixelFormat::Palette8 {
@@ -1494,11 +1508,11 @@ fn jpeg_rejections_are_precise() {
     .to_string();
     assert!(err.contains("Palette8"), "{err}");
     let f = vec![0f32; 256];
-    let err = encode_tiff(&page(w, h, EncodePixelFormat::GrayF32 { pixels: &f }, comp))
+    let err = encode_page(&page(w, h, EncodePixelFormat::GrayF32 { pixels: &f }, comp))
         .unwrap_err()
         .to_string();
     assert!(err.contains("float"), "{err}");
-    let err = encode_tiff(&page(
+    let err = encode_page(&page(
         w,
         h,
         EncodePixelFormat::Gray8 { pixels: &g },
@@ -1511,12 +1525,12 @@ fn jpeg_rejections_are_precise() {
         process: JpegProcess::Lossless { predictor: 8 },
         ..JpegOptions::default()
     });
-    let err = encode_tiff(&page(w, h, EncodePixelFormat::Gray8 { pixels: &g }, bad))
+    let err = encode_page(&page(w, h, EncodePixelFormat::Gray8 { pixels: &g }, bad))
         .unwrap_err()
         .to_string();
     assert!(err.contains("Table H.1"), "{err}");
     let ycc = vec![128u8; 16 * 16 * 3];
-    let err = encode_tiff(&page(
+    let err = encode_page(&page(
         w,
         h,
         EncodePixelFormat::YCbCrSubsampled24 {
@@ -1532,7 +1546,7 @@ fn jpeg_rejections_are_precise() {
     .to_string();
     assert!(err.contains("non-subsampled"), "{err}");
     let big = vec![4096u16; 256];
-    let err = encode_tiff(&page(
+    let err = encode_page(&page(
         w,
         h,
         EncodePixelFormat::Gray12 { pixels: &big },

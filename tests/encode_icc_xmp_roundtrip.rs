@@ -12,7 +12,7 @@
 
 use oxideav_tiff::ifd::{parse_header, parse_ifd};
 use oxideav_tiff::{
-    decode_tiff, decode_tiff_all_pages, encode_tiff, encode_tiff_multi, AuxIfdEntry, EncodePage,
+    decode_page, decode_pages, encode_page, encode_pages, AuxIfdEntry, EncodePage,
     EncodePixelFormat, PageExtras, TiffCompression,
 };
 
@@ -57,7 +57,7 @@ fn gray_page<'a>(pixels: &'a [u8], w: u32, h: u32, extras: PageExtras<'a>) -> En
 }
 
 fn assert_both(tiff: &[u8], xmp: &[u8], icc: &[u8]) {
-    let d = decode_tiff(tiff).expect("decode");
+    let d = decode_page(tiff).expect("decode");
     assert_eq!(d.metadata.xmp.as_deref(), Some(xmp));
     assert_eq!(d.metadata.icc_profile.as_deref(), Some(icc));
 }
@@ -72,7 +72,7 @@ fn classic_single_strip_round_trip() {
         icc_profile: Some(&icc),
         ..Default::default()
     };
-    let tiff = encode_tiff(&gray_page(&px, 8, 8, extras)).expect("encode");
+    let tiff = encode_page(&gray_page(&px, 8, 8, extras)).expect("encode");
     assert_both(&tiff, &xmp, &icc);
 }
 
@@ -88,7 +88,7 @@ fn bigtiff_round_trip() {
     };
     let mut page = gray_page(&px, 8, 8, extras);
     page.bigtiff = true;
-    let tiff = encode_tiff(&page).expect("encode");
+    let tiff = encode_page(&page).expect("encode");
     assert_both(&tiff, &xmp, &icc);
 }
 
@@ -105,7 +105,7 @@ fn multi_strip_round_trip() {
     };
     let mut page = gray_page(&px, 16, 16, extras);
     page.compression = TiffCompression::Lzw;
-    let tiff = encode_tiff(&page).expect("encode");
+    let tiff = encode_page(&page).expect("encode");
     assert_both(&tiff, &xmp, &icc);
 }
 
@@ -130,7 +130,7 @@ fn tiled_round_trip() {
         bigtiff: false,
         extras,
     };
-    let tiff = encode_tiff(&page).expect("encode");
+    let tiff = encode_page(&page).expect("encode");
     assert_both(&tiff, &xmp, &icc);
 }
 
@@ -155,7 +155,7 @@ fn planar_round_trip() {
         bigtiff: false,
         extras,
     };
-    let tiff = encode_tiff(&page).expect("encode");
+    let tiff = encode_page(&page).expect("encode");
     assert_both(&tiff, &xmp, &icc);
 }
 
@@ -191,8 +191,8 @@ fn multi_page_distinct_payloads_per_page() {
         for p in &mut pages {
             p.bigtiff = bigtiff;
         }
-        let tiff = encode_tiff_multi(&pages).expect("encode multi");
-        let decoded = decode_tiff_all_pages(&tiff).expect("decode all");
+        let tiff = encode_pages(&pages).expect("encode multi");
+        let decoded = decode_pages(&tiff).expect("decode all");
         assert_eq!(decoded.len(), 3, "bigtiff={bigtiff}");
         assert_eq!(decoded[0].metadata.xmp.as_deref(), Some(xmp0.as_slice()));
         assert_eq!(
@@ -222,8 +222,8 @@ fn re_encode_preserves_decoded_payloads() {
         icc_profile: Some(&icc),
         ..Default::default()
     };
-    let first = encode_tiff(&gray_page(&px, 8, 8, extras)).expect("encode 1");
-    let d1 = decode_tiff(&first).expect("decode 1");
+    let first = encode_page(&gray_page(&px, 8, 8, extras)).expect("encode 1");
+    let d1 = decode_page(&first).expect("decode 1");
     let xmp_back = d1.metadata.xmp.clone().expect("xmp survived hop 1");
     let icc_back = d1.metadata.icc_profile.clone().expect("icc survived hop 1");
     let extras2 = PageExtras {
@@ -231,8 +231,8 @@ fn re_encode_preserves_decoded_payloads() {
         icc_profile: Some(&icc_back),
         ..Default::default()
     };
-    let second = encode_tiff(&gray_page(&px, 8, 8, extras2)).expect("encode 2");
-    let d2 = decode_tiff(&second).expect("decode 2");
+    let second = encode_page(&gray_page(&px, 8, 8, extras2)).expect("encode 2");
+    let d2 = decode_page(&second).expect("decode 2");
     assert_eq!(d2.metadata.xmp.as_deref(), Some(xmp.as_slice()));
     assert_eq!(d2.metadata.icc_profile.as_deref(), Some(icc.as_slice()));
 }
@@ -272,7 +272,7 @@ fn ifd_tags_stay_ascending_with_full_extras() {
         icc_profile: Some(&icc),
         ..Default::default()
     };
-    let tiff = encode_tiff(&gray_page(&px, 4, 4, extras)).expect("encode");
+    let tiff = encode_page(&gray_page(&px, 4, 4, extras)).expect("encode");
     let h = parse_header(&tiff).expect("header");
     let (entries, _next) =
         parse_ifd(&tiff, h.byte_order, h.variant, h.first_ifd_offset).expect("ifd");
@@ -303,7 +303,7 @@ fn written_entry_types_match_the_registered_defaults() {
         icc_profile: Some(&icc),
         ..Default::default()
     };
-    let tiff = encode_tiff(&gray_page(&px, 4, 4, extras)).expect("encode");
+    let tiff = encode_page(&gray_page(&px, 4, 4, extras)).expect("encode");
     let h = parse_header(&tiff).expect("header");
     let (entries, _) = parse_ifd(&tiff, h.byte_order, h.variant, h.first_ifd_offset).expect("ifd");
     let xe = entries.iter().find(|e| e.tag == 700).expect("tag 700");
@@ -340,7 +340,7 @@ fn icc_rejections_are_precise() {
         icc_profile: Some(&short),
         ..Default::default()
     };
-    let err = encode_tiff(&gray_page(&px, 4, 4, extras)).unwrap_err();
+    let err = encode_page(&gray_page(&px, 4, 4, extras)).unwrap_err();
     let msg = format!("{err:?}");
     assert!(msg.contains("128-byte ICC header"), "{msg}");
     // Size-field mismatch.
@@ -350,7 +350,7 @@ fn icc_rejections_are_precise() {
         icc_profile: Some(&lying),
         ..Default::default()
     };
-    let err = encode_tiff(&gray_page(&px, 4, 4, extras)).unwrap_err();
+    let err = encode_page(&gray_page(&px, 4, 4, extras)).unwrap_err();
     let msg = format!("{err:?}");
     assert!(msg.contains("authoritative"), "{msg}");
     // Little-endian-swapped size field is a mismatch too (the field
@@ -362,7 +362,7 @@ fn icc_rejections_are_precise() {
         icc_profile: Some(&swapped),
         ..Default::default()
     };
-    assert!(encode_tiff(&gray_page(&px, 4, 4, extras)).is_err());
+    assert!(encode_page(&gray_page(&px, 4, 4, extras)).is_err());
 }
 
 #[test]
@@ -372,7 +372,7 @@ fn empty_xmp_rejected() {
         xmp: Some(&[]),
         ..Default::default()
     };
-    let err = encode_tiff(&gray_page(&px, 4, 4, extras)).unwrap_err();
+    let err = encode_page(&gray_page(&px, 4, 4, extras)).unwrap_err();
     let msg = format!("{err:?}");
     assert!(msg.contains("non-empty"), "{msg}");
 }
@@ -387,8 +387,8 @@ fn xmp_payload_is_opaque_bytes() {
         xmp: Some(&payload),
         ..Default::default()
     };
-    let tiff = encode_tiff(&gray_page(&px, 4, 4, extras)).expect("encode");
-    let d = decode_tiff(&tiff).expect("decode");
+    let tiff = encode_page(&gray_page(&px, 4, 4, extras)).expect("encode");
+    let d = decode_page(&tiff).expect("decode");
     assert_eq!(d.metadata.xmp.as_deref(), Some(payload.as_slice()));
 }
 
@@ -418,6 +418,6 @@ fn payloads_compose_with_ccitt_bilevel_page() {
         bigtiff: false,
         extras,
     };
-    let tiff = encode_tiff(&page).expect("encode");
+    let tiff = encode_page(&page).expect("encode");
     assert_both(&tiff, &xmp, &icc);
 }

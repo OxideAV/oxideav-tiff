@@ -733,6 +733,34 @@ pub fn composite_cmyk_to_rgb(
     Ok(())
 }
 
+/// Composite a decoded CMYK segment verbatim into a packed 4-byte
+/// `Cmyk` destination plane (ink coverages as the JPEG carried them,
+/// Adobe APP14 inversion already undone by the segment decoder).
+pub fn composite_cmyk_packed(
+    seg: &JpegSegment,
+    visible_w: u32,
+    visible_h: u32,
+    dst: &mut [u8],
+    dst_row_stride: usize,
+    dst_x: u32,
+    dst_y: u32,
+) -> Result<()> {
+    if seg.pixel_format != JpegPixelFormat::Cmyk8 {
+        return Err(Error::invalid(
+            "composite_cmyk_packed called with non-Cmyk8 segment",
+        ));
+    }
+    let p = &seg.planes[0];
+    let row_bytes = visible_w as usize * 4;
+    for y in 0..visible_h as usize {
+        let dy = dst_y as usize + y;
+        let src_off = y * p.stride;
+        let off = dy * dst_row_stride + dst_x as usize * 4;
+        dst[off..off + row_bytes].copy_from_slice(&p.data[src_off..src_off + row_bytes]);
+    }
+    Ok(())
+}
+
 /// Widen a raw `bits`-precision code value (`0 .. 2^bits - 1`) onto
 /// the full 16-bit display extent by bit replication — the same
 /// max-value-preserving map the 4-bit grayscale path uses at 8 bits

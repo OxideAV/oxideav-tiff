@@ -20,7 +20,7 @@
 //! so any transport corruption (byte-swap, truncation, off-by-one
 //! count handling) fails loudly.
 
-use oxideav_tiff::decode_tiff;
+use oxideav_tiff::decode_page;
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/icc_xmp");
 
@@ -123,9 +123,9 @@ fn classic_fixture_extracts_byte_exact() {
     let tiff = load("icc_xmp_gray16.tif");
     let icc = load("profile.icc");
     let xmp = load("packet.xmp");
-    let d = decode_tiff(&tiff).expect("decode classic fixture");
-    assert_eq!(d.width, 16);
-    assert_eq!(d.height, 16);
+    let d = decode_page(&tiff).expect("decode classic fixture");
+    assert_eq!(d.image.width, 16);
+    assert_eq!(d.image.height, 16);
     let got_icc = d.metadata.icc_profile.expect("icc extracted");
     assert_eq!(got_icc, icc);
     assert_eq!(sha256_hex(&got_icc), ICC_SHA);
@@ -141,8 +141,8 @@ fn bigtiff_fixture_extracts_byte_exact() {
     let xmp = load("packet.xmp");
     // BigTIFF magic 43.
     assert_eq!(&tiff[2..4], &[0x2B, 0x00]);
-    let d = decode_tiff(&tiff).expect("decode BigTIFF fixture");
-    assert_eq!(d.width, 16);
+    let d = decode_page(&tiff).expect("decode BigTIFF fixture");
+    assert_eq!(d.image.width, 16);
     let got_icc = d.metadata.icc_profile.expect("icc extracted");
     assert_eq!(got_icc, icc);
     let got_xmp = d.metadata.xmp.expect("xmp extracted");
@@ -154,9 +154,9 @@ fn fixture_payloads_re_encode_and_survive() {
     // Full preservation loop over an externally written file: decode
     // the fixture, re-encode the payloads onto a fresh page with our
     // writer, decode again — the pins must still hold after two hops.
-    use oxideav_tiff::{encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression};
+    use oxideav_tiff::{encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression};
     let tiff = load("icc_xmp_gray16.tif");
-    let d = decode_tiff(&tiff).expect("decode fixture");
+    let d = decode_page(&tiff).expect("decode fixture");
     let icc = d.metadata.icc_profile.expect("icc");
     let xmp = d.metadata.xmp.expect("xmp");
     let px: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
@@ -165,7 +165,7 @@ fn fixture_payloads_re_encode_and_survive() {
         icc_profile: Some(&icc),
         ..Default::default()
     };
-    let ours = encode_tiff(&EncodePage {
+    let ours = encode_page(&EncodePage {
         width: 8,
         height: 8,
         kind: EncodePixelFormat::Gray8 { pixels: &px },
@@ -177,7 +177,7 @@ fn fixture_payloads_re_encode_and_survive() {
         extras,
     })
     .expect("re-encode");
-    let d2 = decode_tiff(&ours).expect("decode re-encoded");
+    let d2 = decode_page(&ours).expect("decode re-encoded");
     assert_eq!(sha256_hex(&d2.metadata.icc_profile.unwrap()), ICC_SHA);
     assert_eq!(sha256_hex(&d2.metadata.xmp.unwrap()), XMP_SHA);
 }

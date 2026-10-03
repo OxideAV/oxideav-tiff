@@ -17,7 +17,7 @@
 //! all driven so the round-trip is independent of the per-tile codec.
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
 };
 
 /// Pack an MSB-first 1-bit bilevel raster with a deterministic pseudo-random
@@ -55,7 +55,7 @@ fn encode_bilevel(
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    encode_tiff(&page).expect("encode bilevel")
+    encode_page(&page).expect("encode bilevel")
 }
 
 fn encode_mask(
@@ -76,7 +76,7 @@ fn encode_mask(
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    encode_tiff(&page).expect("encode mask")
+    encode_page(&page).expect("encode mask")
 }
 
 /// The byte-aligned compressors the decoder's sub-byte tile path reads.
@@ -96,13 +96,13 @@ fn assert_tiled_matches_strip(w: u32, h: u32, tile: (u32, u32)) {
         let strip = encode_bilevel(&pixels, w, h, comp, None);
         let tiled = encode_bilevel(&pixels, w, h, comp, Some(tile));
 
-        let ds = decode_tiff(&strip).expect("decode strip");
-        let dt = decode_tiff(&tiled).expect("decode tiled");
+        let ds = decode_page(&strip).expect("decode strip");
+        let dt = decode_page(&tiled).expect("decode tiled");
 
-        assert_eq!((ds.width, ds.height), (w, h));
-        assert_eq!((dt.width, dt.height), (w, h));
+        assert_eq!((ds.image.width, ds.image.height), (w, h));
+        assert_eq!((dt.image.width, dt.image.height), (w, h));
         assert_eq!(
-            dt.frame.planes[0].data, ds.frame.planes[0].data,
+            dt.image.planes[0].data, ds.image.planes[0].data,
             "tiled != strip for {w}x{h} tile {tile:?} comp {comp:?}"
         );
     }
@@ -164,10 +164,10 @@ fn transparency_mask_tiled_matches_strip() {
     for &comp in COMPS {
         let strip = encode_mask(&pixels, w, h, comp, None);
         let tiled = encode_mask(&pixels, w, h, comp, Some(tile));
-        let ds = decode_tiff(&strip).expect("decode strip mask");
-        let dt = decode_tiff(&tiled).expect("decode tiled mask");
+        let ds = decode_page(&strip).expect("decode strip mask");
+        let dt = decode_page(&tiled).expect("decode tiled mask");
         assert_eq!(
-            dt.frame.planes[0].data, ds.frame.planes[0].data,
+            dt.image.planes[0].data, ds.image.planes[0].data,
             "mask tiled != strip comp {comp:?}"
         );
     }
@@ -193,11 +193,11 @@ fn bigtiff_tiled_bilevel_matches_strip() {
         tiling: Some(tile),
         ..page_strip.clone()
     };
-    let strip = encode_tiff(&page_strip).expect("encode strip bigtiff");
-    let tiled = encode_tiff(&page_tiled).expect("encode tiled bigtiff");
-    let ds = decode_tiff(&strip).expect("decode strip bigtiff");
-    let dt = decode_tiff(&tiled).expect("decode tiled bigtiff");
-    assert_eq!(dt.frame.planes[0].data, ds.frame.planes[0].data);
+    let strip = encode_page(&page_strip).expect("encode strip bigtiff");
+    let tiled = encode_page(&page_tiled).expect("encode tiled bigtiff");
+    let ds = decode_page(&strip).expect("decode strip bigtiff");
+    let dt = decode_page(&tiled).expect("decode tiled bigtiff");
+    assert_eq!(dt.image.planes[0].data, ds.image.planes[0].data);
 }
 
 #[test]
@@ -215,7 +215,7 @@ fn tile_dims_must_be_multiple_of_16() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    assert!(encode_tiff(&page).is_err(), "tile_w=8 must be rejected");
+    assert!(encode_page(&page).is_err(), "tile_w=8 must be rejected");
 }
 
 #[test]
@@ -234,7 +234,7 @@ fn ccitt_tiling_still_rejected() {
         extras: PageExtras::default(),
     };
     assert!(
-        encode_tiff(&page).is_err(),
+        encode_page(&page).is_err(),
         "CCITT + tiling must be rejected"
     );
 }

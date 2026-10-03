@@ -48,7 +48,7 @@ impl ResolutionUnit {
 /// Every field is optional: it is `Some` only when the corresponding
 /// tag is present *and* well-formed. All fields default to `None`, so
 /// [`TiffMetadata::default()`] is the "no metadata" value the standalone
-/// [`crate::decode_tiff`] result carries when a file omits every
+/// [`crate::decode_page`] result carries when a file omits every
 /// informational tag.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TiffMetadata {

@@ -29,14 +29,14 @@
 //! The single-strip sub-byte decode path is long-established and
 //! independently validated (it is the same path the bilevel / 4-bit
 //! strip fixtures and the CCITT / palette decoders ride). Decoding both
-//! layouts through [`decode_tiff`] and asserting the resulting planes
+//! layouts through [`decode_page`] and asserting the resulting planes
 //! are byte-identical is therefore a strong, binary-independent
 //! correctness signal for the new tiled sub-byte path: a decoder that
 //! mishandled tile ordering, tile-row stride, byte-aligned column
 //! offsets, or §15 edge padding would diverge from the strip decode of
 //! the identical image.
 
-use oxideav_tiff::{decode_tiff, TiffPixelFormat};
+use oxideav_tiff::{decode_page, TiffPixelFormat};
 
 // ---------------------------------------------------------------------
 // Bit-packing helpers
@@ -388,22 +388,22 @@ fn palette_16() -> Vec<u16> {
 // ---------------------------------------------------------------------
 
 fn assert_tiled_matches_strip(tiled: &[u8], strip: &[u8], w: u32, h: u32, pf: TiffPixelFormat) {
-    let dt = decode_tiff(tiled).expect("tiled decode");
-    let ds = decode_tiff(strip).expect("strip decode");
-    assert_eq!(dt.width, w, "tiled width");
-    assert_eq!(dt.height, h, "tiled height");
-    assert_eq!(dt.pixel_format, pf, "tiled pixel format");
-    assert_eq!(ds.pixel_format, pf, "strip pixel format");
+    let dt = decode_page(tiled).expect("tiled decode");
+    let ds = decode_page(strip).expect("strip decode");
+    assert_eq!(dt.image.width, w, "tiled width");
+    assert_eq!(dt.image.height, h, "tiled height");
+    assert_eq!(dt.image.format, pf, "tiled pixel format");
+    assert_eq!(ds.image.format, pf, "strip pixel format");
     assert_eq!(
-        dt.frame.planes.len(),
-        ds.frame.planes.len(),
+        dt.image.planes.len(),
+        ds.image.planes.len(),
         "plane count mismatch"
     );
     for (i, (tp, sp)) in dt
-        .frame
+        .image
         .planes
         .iter()
-        .zip(ds.frame.planes.iter())
+        .zip(ds.image.planes.iter())
         .enumerate()
     {
         assert_eq!(
@@ -531,7 +531,7 @@ fn palette_4bpp_exact_fit() {
     let cm = palette_16();
     let tiled = build_tiled(&s, w, h, 16, 16, 4, 3, Some(&cm)); // photometric 3 = Palette
     let strip = build_strip(&s, w, h, 4, 3, Some(&cm));
-    assert_tiled_matches_strip(&tiled, &strip, w as u32, h as u32, TiffPixelFormat::Rgb24);
+    assert_tiled_matches_strip(&tiled, &strip, w as u32, h as u32, TiffPixelFormat::Pal8);
 }
 
 #[test]
@@ -541,5 +541,5 @@ fn palette_4bpp_partial_edges() {
     let cm = palette_16();
     let tiled = build_tiled(&s, w, h, 16, 16, 4, 3, Some(&cm));
     let strip = build_strip(&s, w, h, 4, 3, Some(&cm));
-    assert_tiled_matches_strip(&tiled, &strip, w as u32, h as u32, TiffPixelFormat::Rgb24);
+    assert_tiled_matches_strip(&tiled, &strip, w as u32, h as u32, TiffPixelFormat::Pal8);
 }

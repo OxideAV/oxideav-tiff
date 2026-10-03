@@ -27,7 +27,7 @@
 //! back.
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
 };
 
 /// Build a `(width, height, packed_msb_first_bytes)` triplet for a
@@ -80,13 +80,13 @@ fn build_page<'a>(w: u32, h: u32, bytes: &'a [u8], compression: TiffCompression)
 
 fn roundtrip_assert(w: u32, h: u32, bytes: &[u8], compression: TiffCompression) {
     let page = build_page(w, h, bytes, compression);
-    let file = encode_tiff(&page).expect("encode_tiff");
-    let img = decode_tiff(&file).expect("decode_tiff");
-    assert_eq!(img.width, w);
-    assert_eq!(img.height, h);
+    let file = encode_page(&page).expect("encode_page");
+    let img = decode_page(&file).expect("decode_page");
+    assert_eq!(img.image.width, w);
+    assert_eq!(img.image.height, h);
     let expected = expand_to_gray8(bytes, w, h);
     assert_eq!(
-        img.frame.planes[0].data, expected,
+        img.image.planes[0].data, expected,
         "encode→decode mismatch for {compression:?}"
     );
 }
@@ -198,10 +198,10 @@ fn t4_2d_blackiszero_polarity_16x4_via_inverted_input() {
             uncompressed: false,
         },
     );
-    let file = encode_tiff(&page).expect("encode_tiff");
-    let img = decode_tiff(&file).expect("decode_tiff");
+    let file = encode_page(&page).expect("encode_page");
+    let img = decode_page(&file).expect("decode_page");
     let expected = expand_to_gray8(&inverted, w, h);
-    assert_eq!(img.frame.planes[0].data, expected);
+    assert_eq!(img.image.planes[0].data, expected);
 }
 
 // -------------------------------------------------------------------------
@@ -309,7 +309,7 @@ fn t4_2d_rejects_non_bilevel_input() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    assert!(encode_tiff(&page).is_err());
+    assert!(encode_page(&page).is_err());
 }
 
 #[test]
@@ -327,5 +327,5 @@ fn t6_rejects_non_bilevel_input() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    assert!(encode_tiff(&page).is_err());
+    assert!(encode_page(&page).is_err());
 }

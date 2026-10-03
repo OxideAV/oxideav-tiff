@@ -22,7 +22,7 @@ use std::process::{Command, Stdio};
 
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::types::*;
-use oxideav_tiff::{decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, TiffCompression};
+use oxideav_tiff::{decode_page, encode_page, EncodePage, EncodePixelFormat, TiffCompression};
 
 fn bilevel_page(w: u32, h: u32, pixels: &[u8], compression: TiffCompression) -> Vec<u8> {
     let page = EncodePage {
@@ -36,7 +36,7 @@ fn bilevel_page(w: u32, h: u32, pixels: &[u8], compression: TiffCompression) -> 
         bigtiff: false,
         extras: Default::default(),
     };
-    encode_tiff(&page).expect("encode")
+    encode_page(&page).expect("encode")
 }
 
 /// Pack a per-pixel 0/1 raster MSB-first.
@@ -58,9 +58,9 @@ fn pack_bits(pixels: &[u8], w: usize, h: usize) -> Vec<u8> {
 /// WhiteIsZero, decoder maps bit 1 (black) → 0x00 after inversion, so
 /// recover "1 = black" as `byte == 0x00`).
 fn decode_bits(tiff: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let d = decode_tiff(tiff).expect("decode");
-    assert_eq!((d.width as usize, d.height as usize), (w, h));
-    let p = &d.frame.planes[0];
+    let d = decode_page(tiff).expect("decode");
+    assert_eq!((d.image.width as usize, d.image.height as usize), (w, h));
+    let p = &d.image.planes[0];
     let mut out = Vec::with_capacity(w * h);
     for y in 0..h {
         for x in 0..w {
@@ -224,7 +224,7 @@ fn uncompressed_multistrip_roundtrip() {
             ..Default::default()
         },
     };
-    let tiff = encode_tiff(&page).expect("encode");
+    let tiff = encode_page(&page).expect("encode");
     assert_eq!(decode_bits(&tiff, w, h), pixels);
 }
 

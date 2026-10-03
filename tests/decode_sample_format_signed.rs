@@ -14,11 +14,11 @@
 //! For 8-bit that map is `XOR 0x80`; for 16-bit `XOR 0x8000`.
 //!
 //! These tests build minimal hand-crafted classic-II TIFF byte strings
-//! and drive them through the public `decode_tiff` entry point, so they
+//! and drive them through the public `decode_page` entry point, so they
 //! are binary-independent oracles: the expected display bytes are
 //! computed directly from the offset-binary definition.
 
-use oxideav_tiff::decode_tiff;
+use oxideav_tiff::decode_page;
 
 /// IFD entry, SHORT (field-type = 3) with a single inline value.
 fn entry_short(tag: u16, value: u16) -> [u8; 12] {
@@ -98,9 +98,9 @@ fn signed_8bit_blackiszero_full_range_offset_binary() {
     // signed-min at 0 and signed-max at 255.
     let strip = [0x80u8, 0xFF, 0x00, 0x01, 0x7F];
     let bytes = build_gray_row(5, 8, 1, 2, &strip);
-    let d = decode_tiff(&bytes).expect("signed 8-bit grayscale must decode");
-    assert_eq!((d.width, d.height), (5, 1));
-    assert_eq!(d.frame.planes[0].data, vec![0x00u8, 0x7F, 0x80, 0x81, 0xFF]);
+    let d = decode_page(&bytes).expect("signed 8-bit grayscale must decode");
+    assert_eq!((d.image.width, d.image.height), (5, 1));
+    assert_eq!(d.image.planes[0].data, vec![0x00u8, 0x7F, 0x80, 0x81, 0xFF]);
 }
 
 #[test]
@@ -111,8 +111,8 @@ fn signed_8bit_whiteiszero_composes_with_polarity() {
     // inverted 0xFF; 0x7F (+127) -> offset 0xFF -> inverted 0x00.
     let strip = [0x80u8, 0x00, 0x7F];
     let bytes = build_gray_row(3, 8, 0, 2, &strip);
-    let d = decode_tiff(&bytes).expect("signed 8-bit WhiteIsZero must decode");
-    assert_eq!(d.frame.planes[0].data, vec![0xFFu8, 0x7F, 0x00]);
+    let d = decode_page(&bytes).expect("signed 8-bit WhiteIsZero must decode");
+    assert_eq!(d.image.planes[0].data, vec![0xFFu8, 0x7F, 0x00]);
 }
 
 #[test]
@@ -126,12 +126,12 @@ fn signed_16bit_blackiszero_offset_binary_le() {
         strip.extend_from_slice(&(w as u16).to_le_bytes());
     }
     let bytes = build_gray_row(3, 16, 1, 2, &strip);
-    let d = decode_tiff(&bytes).expect("signed 16-bit grayscale must decode");
+    let d = decode_page(&bytes).expect("signed 16-bit grayscale must decode");
     let mut expect = Vec::new();
     for v in [0x0000u16, 0x8000, 0xFFFF] {
         expect.extend_from_slice(&v.to_le_bytes());
     }
-    assert_eq!(d.frame.planes[0].data, expect);
+    assert_eq!(d.image.planes[0].data, expect);
 }
 
 #[test]
@@ -183,18 +183,18 @@ fn signed_16bit_big_endian_on_disk() {
     out.extend_from_slice(&entry_short_be(339, 2)); // SampleFormat signed
     out.extend_from_slice(&0u32.to_be_bytes());
 
-    let d = decode_tiff(&out).expect("big-endian signed 16-bit must decode");
+    let d = decode_page(&out).expect("big-endian signed 16-bit must decode");
     let mut expect = Vec::new();
     for v in [0x0000u16, 0xFFFF] {
         expect.extend_from_slice(&v.to_le_bytes());
     }
-    assert_eq!(d.frame.planes[0].data, expect);
+    assert_eq!(d.image.planes[0].data, expect);
 }
 
-/// Assert `decode_tiff` returned an error whose Display includes the
-/// given substring (`DecodedTiff` is not `Debug`).
+/// Assert `decode_page` returned an error whose Display includes the
+/// given substring (`Page` is not `Debug`).
 fn expect_err_containing(bytes: &[u8], needle: &str) {
-    match decode_tiff(bytes) {
+    match decode_page(bytes) {
         Ok(_) => panic!("expected an error containing {needle:?}, got Ok(..)"),
         Err(e) => {
             let msg = format!("{e}");
@@ -268,10 +268,10 @@ fn signed_zero_maps_to_midpoint() {
     // a stored signed 0 renders at the display midpoint (0x80 for
     // 8-bit, 0x8000 for 16-bit), so neutral data is mid-gray.
     let bytes8 = build_gray_row(1, 8, 1, 2, &[0x00u8]);
-    let d8 = decode_tiff(&bytes8).expect("8-bit signed zero must decode");
-    assert_eq!(d8.frame.planes[0].data, vec![0x80u8]);
+    let d8 = decode_page(&bytes8).expect("8-bit signed zero must decode");
+    assert_eq!(d8.image.planes[0].data, vec![0x80u8]);
 
     let bytes16 = build_gray_row(1, 16, 1, 2, &0i16.to_le_bytes());
-    let d16 = decode_tiff(&bytes16).expect("16-bit signed zero must decode");
-    assert_eq!(d16.frame.planes[0].data, 0x8000u16.to_le_bytes());
+    let d16 = decode_page(&bytes16).expect("16-bit signed zero must decode");
+    assert_eq!(d16.image.planes[0].data, 0x8000u16.to_le_bytes());
 }

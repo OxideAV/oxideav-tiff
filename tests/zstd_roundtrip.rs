@@ -8,7 +8,7 @@
 //!
 //! 1. **Self-roundtrips** (run unconditionally): encode the identical
 //!    pixels twice — once `Compression = 50000`, once `Compression =
-//!    1` — decode both through [`decode_tiff`], and assert the pixel
+//!    1` — decode both through [`decode_page`], and assert the pixel
 //!    planes are byte-identical. Covers Gray8 / Gray16Le / Rgb24 /
 //!    Palette8 / Bilevel, the §14 predictor, `PlanarConfiguration =
 //!    2`, §15 tiling with partial edge tiles, BigTIFF, and the
@@ -35,8 +35,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use oxideav_tiff::{
-    decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    PageExtras, RgbColor, TiffCompression,
+    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
+    RgbColor, TiffCompression,
 };
 
 // ---- Source-pixel generators (deterministic, layout-independent) ----
@@ -116,18 +116,18 @@ fn bilevel_bits(w: u32, h: u32) -> Vec<u8> {
 /// (Compression=1) — same pixels, same flags otherwise — decode both,
 /// and assert the decoded planes match each other.
 fn zstd_vs_none(page_zstd: &EncodePage<'_>, page_none: &EncodePage<'_>) {
-    let z_bytes = encode_tiff(page_zstd).expect("encode zstd");
-    let n_bytes = encode_tiff(page_none).expect("encode none");
-    let dz = decode_tiff(&z_bytes).expect("decode zstd");
-    let dn = decode_tiff(&n_bytes).expect("decode none");
+    let z_bytes = encode_page(page_zstd).expect("encode zstd");
+    let n_bytes = encode_page(page_none).expect("encode none");
+    let dz = decode_page(&z_bytes).expect("decode zstd");
+    let dn = decode_page(&n_bytes).expect("decode none");
     assert_eq!(
-        (dz.width, dz.height),
-        (dn.width, dn.height),
+        (dz.image.width, dz.image.height),
+        (dn.image.width, dn.image.height),
         "zstd/none dimension mismatch"
     );
-    assert_eq!(dz.pixel_format, dn.pixel_format);
+    assert_eq!(dz.image.format, dn.image.format);
     assert_eq!(
-        dz.frame.planes[0].data, dn.frame.planes[0].data,
+        dz.image.planes[0].data, dn.image.planes[0].data,
         "zstd decode != none decode of the same pixels"
     );
 }
@@ -468,11 +468,11 @@ fn zstd_multipage() {
             false,
         ),
     ];
-    let bytes = encode_tiff_multi(&pages).expect("encode multipage zstd");
-    let all = decode_tiff_all(&bytes).expect("decode multipage zstd");
+    let bytes = encode_pages(&pages).expect("encode multipage zstd");
+    let all = decode_all(&bytes).expect("decode multipage zstd");
     assert_eq!(all.len(), 2);
-    assert_eq!(all[0].planes[0].data, a);
-    assert_eq!(all[1].planes[0].data, b);
+    assert_eq!(all[0].image.planes[0].data, a);
+    assert_eq!(all[1].image.planes[0].data, b);
 }
 
 // ---- On-disk wire checks ----
@@ -504,7 +504,7 @@ fn zstd_wire_tag_and_frame_magic() {
     // strip payload must begin with the RFC 8478 frame magic
     // `0x28 0xB5 0x2F 0xFD` (trace doc §3 step 3).
     let px = ramp_gray8(32, 32);
-    let bytes = encode_tiff(&page(
+    let bytes = encode_page(&page(
         32,
         32,
         EncodePixelFormat::Gray8 { pixels: &px },
@@ -525,7 +525,7 @@ fn zstd_wire_tag_and_frame_magic() {
         "strip payload is not a Zstandard frame"
     );
     // Predictor variant additionally writes tag 317 = 2.
-    let bytes_p = encode_tiff(&page(
+    let bytes_p = encode_page(&page(
         32,
         32,
         EncodePixelFormat::Gray8 { pixels: &px },
@@ -607,9 +607,9 @@ fn zstd_hand_built_raw_block_frame_decodes() {
     let pixels: Vec<u8> = (0u8..16).collect();
     let strip = raw_block_zstd_frame(&pixels);
     let tiff = build_zstd_tiff(4, 4, &strip, None);
-    let d = decode_tiff(&tiff).expect("hand-built zstd TIFF must decode");
-    assert_eq!((d.width, d.height), (4, 4));
-    assert_eq!(d.frame.planes[0].data, pixels);
+    let d = decode_page(&tiff).expect("hand-built zstd TIFF must decode");
+    assert_eq!((d.image.width, d.image.height), (4, 4));
+    assert_eq!(d.image.planes[0].data, pixels);
 }
 
 #[test]
@@ -622,8 +622,8 @@ fn zstd_hand_built_predictor2_reverses() {
     let diffed = [10u8, 3, 4, 5];
     let strip = raw_block_zstd_frame(&diffed);
     let tiff = build_zstd_tiff(4, 1, &strip, Some(2));
-    let d = decode_tiff(&tiff).expect("predictor-2 zstd TIFF must decode");
-    assert_eq!(d.frame.planes[0].data, vec![10, 13, 17, 22]);
+    let d = decode_page(&tiff).expect("predictor-2 zstd TIFF must decode");
+    assert_eq!(d.image.planes[0].data, vec![10, 13, 17, 22]);
 }
 
 #[test]
@@ -636,7 +636,7 @@ fn zstd_unknown_predictor_rejected() {
     let pixels: Vec<u8> = (0u8..16).collect();
     let strip = raw_block_zstd_frame(&pixels);
     let tiff = build_zstd_tiff(4, 4, &strip, Some(4));
-    let err = match decode_tiff(&tiff) {
+    let err = match decode_page(&tiff) {
         Ok(_) => panic!("Predictor=4 (undefined) must be rejected"),
         Err(e) => e,
     };
@@ -653,7 +653,7 @@ fn zstd_float_predictor_on_integer_samples_rejected() {
     let pixels: Vec<u8> = (0u8..16).collect();
     let strip = raw_block_zstd_frame(&pixels);
     let tiff = build_zstd_tiff(4, 4, &strip, Some(3));
-    let err = match decode_tiff(&tiff) {
+    let err = match decode_page(&tiff) {
         Ok(_) => panic!("Predictor=3 over integer samples must be rejected"),
         Err(e) => e,
     };
@@ -734,7 +734,7 @@ fn zstd_float32_predictor3_decodes() {
     // Predictor=1 twin.
     let s1 = raw_block_zstd_frame(&raw);
     let t1 = build_zstd_float_tiff(w, h, &s1, Some(1));
-    let d1 = decode_tiff(&t1).expect("zstd float32 predictor=1 must decode");
+    let d1 = decode_page(&t1).expect("zstd float32 predictor=1 must decode");
 
     // Predictor=3: apply the encoder-side transform per row, then wrap in
     // a ZSTD frame.
@@ -745,11 +745,11 @@ fn zstd_float32_predictor3_decodes() {
     }
     let s3 = raw_block_zstd_frame(&pred);
     let t3 = build_zstd_float_tiff(w, h, &s3, Some(3));
-    let d3 = decode_tiff(&t3).expect("zstd float32 predictor=3 must decode");
+    let d3 = decode_page(&t3).expect("zstd float32 predictor=3 must decode");
 
-    assert_eq!((d3.width, d3.height), (w as u32, h as u32));
+    assert_eq!((d3.image.width, d3.image.height), (w as u32, h as u32));
     assert_eq!(
-        d1.frame.planes[0].data, d3.frame.planes[0].data,
+        d1.image.planes[0].data, d3.image.planes[0].data,
         "ZSTD float32 Predictor=3 must decode identically to Predictor=1"
     );
 }
@@ -759,7 +759,7 @@ fn zstd_corrupt_frame_is_error_not_panic() {
     // Garbage strip bytes under Compression=50000 → clean error.
     let strip = [0xDEu8, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03];
     let tiff = build_zstd_tiff(4, 4, &strip, None);
-    assert!(decode_tiff(&tiff).is_err());
+    assert!(decode_page(&tiff).is_err());
 }
 
 // ---- Black-box cross-checks against an independent binary ----
@@ -807,7 +807,7 @@ fn zstd_blackbox_our_encode_transcodes_to_none() {
         return;
     }
     let px = pattern_rgb(40, 30);
-    let bytes = encode_tiff(&page(
+    let bytes = encode_page(&page(
         40,
         30,
         EncodePixelFormat::Rgb24 { pixels: &px },
@@ -827,8 +827,8 @@ fn zstd_blackbox_our_encode_transcodes_to_none() {
         return;
     }
     let none_bytes = fs::read(&npath).unwrap();
-    let d = decode_tiff(&none_bytes).expect("decode transcoded none");
-    assert_eq!(d.frame.planes[0].data, px, "pixels lost in zstd transcode");
+    let d = decode_page(&none_bytes).expect("decode transcoded none");
+    assert_eq!(d.image.planes[0].data, px, "pixels lost in zstd transcode");
 }
 
 #[test]
@@ -841,7 +841,7 @@ fn zstd_blackbox_reference_file_decodes() {
         return;
     }
     let px = ramp_gray8(64, 48);
-    let bytes = encode_tiff(&page(
+    let bytes = encode_page(&page(
         64,
         48,
         EncodePixelFormat::Gray8 { pixels: &px },
@@ -863,9 +863,9 @@ fn zstd_blackbox_reference_file_decodes() {
         }
         let zbytes = fs::read(&zpath).unwrap();
         let d =
-            decode_tiff(&zbytes).unwrap_or_else(|e| panic!("decode reference {codec} file: {e:?}"));
+            decode_page(&zbytes).unwrap_or_else(|e| panic!("decode reference {codec} file: {e:?}"));
         assert_eq!(
-            d.frame.planes[0].data, px,
+            d.image.planes[0].data, px,
             "reference {codec} decode mismatch"
         );
     }

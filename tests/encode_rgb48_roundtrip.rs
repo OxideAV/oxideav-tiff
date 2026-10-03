@@ -16,8 +16,8 @@
 
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    PageExtras, TiffCompression, TiffPixelFormat,
+    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
+    TiffCompression, TiffPixelFormat,
 };
 
 /// Deterministic 16-bit RGB test raster exercising the full sample
@@ -56,16 +56,16 @@ fn page<'a>(w: u32, h: u32, pixels: &'a [u8], compression: TiffCompression) -> E
 /// Encode one page, decode it, assert the format is `Rgb48Le` and
 /// return the row-packed pixel bytes.
 fn roundtrip(p: &EncodePage<'_>) -> Vec<u8> {
-    let tiff = encode_tiff(p).expect("encode failed");
-    let d = decode_tiff(&tiff).expect("decode failed");
-    assert_eq!((d.width, d.height), (p.width, p.height));
-    assert_eq!(d.pixel_format, TiffPixelFormat::Rgb48Le);
-    assert_eq!(d.frame.planes.len(), 1);
-    let stride = d.frame.planes[0].stride;
-    let row_bytes = d.width as usize * 6;
-    let mut out = Vec::with_capacity(row_bytes * d.height as usize);
-    for y in 0..d.height as usize {
-        out.extend_from_slice(&d.frame.planes[0].data[y * stride..y * stride + row_bytes]);
+    let tiff = encode_page(p).expect("encode failed");
+    let d = decode_page(&tiff).expect("decode failed");
+    assert_eq!((d.image.width, d.image.height), (p.width, p.height));
+    assert_eq!(d.image.format, TiffPixelFormat::Rgb48Le);
+    assert_eq!(d.image.planes.len(), 1);
+    let stride = d.image.planes[0].stride;
+    let row_bytes = d.image.width as usize * 6;
+    let mut out = Vec::with_capacity(row_bytes * d.image.height as usize);
+    for y in 0..d.image.height as usize {
+        out.extend_from_slice(&d.image.planes[0].data[y * stride..y * stride + row_bytes]);
     }
     out
 }
@@ -211,13 +211,13 @@ fn rgb48_multipage_chain() {
             extras: PageExtras::default(),
         },
     ];
-    let tiff = encode_tiff_multi(&pages).expect("multi-page encode failed");
-    let decoded = decode_tiff_all(&tiff).expect("multi-page decode failed");
+    let tiff = encode_pages(&pages).expect("multi-page encode failed");
+    let decoded = decode_all(&tiff).expect("multi-page decode failed");
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].pixel_format, TiffPixelFormat::Rgb48Le);
-    assert_eq!(decoded[0].planes[0].data, rgb);
-    assert_eq!(decoded[1].pixel_format, TiffPixelFormat::Gray16Le);
-    assert_eq!(decoded[1].planes[0].data, gray);
+    assert_eq!(decoded[0].image.format, TiffPixelFormat::Rgb48Le);
+    assert_eq!(decoded[0].image.planes[0].data, rgb);
+    assert_eq!(decoded[1].image.format, TiffPixelFormat::Gray16Le);
+    assert_eq!(decoded[1].image.planes[0].data, gray);
 }
 
 /// The written IFD carries the 16-bit RGB field set: BitsPerSample =
@@ -228,7 +228,7 @@ fn rgb48_ifd_tags() {
     use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
     let (w, h) = (16u32, 8u32);
     let pixels = pixels_rgb48(w, h);
-    let tiff = encode_tiff(&page(w, h, &pixels, TiffCompression::None)).expect("encode failed");
+    let tiff = encode_page(&page(w, h, &pixels, TiffCompression::None)).expect("encode failed");
     let hd = parse_header(&tiff).expect("header");
     let (entries, next) =
         parse_ifd(&tiff, hd.byte_order, hd.variant, hd.first_ifd_offset).expect("ifd");
@@ -256,7 +256,7 @@ fn rgb48_ifd_tags() {
 #[test]
 fn rgb48_wrong_buffer_size_rejected() {
     let pixels = vec![0u8; 10];
-    let e = encode_tiff(&page(4, 4, &pixels, TiffCompression::None)).unwrap_err();
+    let e = encode_page(&page(4, 4, &pixels, TiffCompression::None)).unwrap_err();
     let msg = format!("{e:?}");
     assert!(msg.contains("Rgb48"), "{msg}");
 }
@@ -266,7 +266,7 @@ fn rgb48_wrong_buffer_size_rejected() {
 fn rgb48_ccitt_rejected() {
     let (w, h) = (16u32, 8u32);
     let pixels = pixels_rgb48(w, h);
-    let e = encode_tiff(&page(w, h, &pixels, TiffCompression::CcittRle)).unwrap_err();
+    let e = encode_page(&page(w, h, &pixels, TiffCompression::CcittRle)).unwrap_err();
     let msg = format!("{e:?}");
     assert!(msg.contains("CCITT") || msg.contains("Bilevel"), "{msg}");
 }
@@ -295,7 +295,7 @@ fn rgb48_imagemagick_reads_our_output() {
         predictor: true,
         ..page(w, h, &pixels, TiffCompression::Lzw)
     };
-    let tiff = encode_tiff(&p).expect("encode failed");
+    let tiff = encode_page(&p).expect("encode failed");
 
     let dir = std::env::temp_dir().join(format!("oxideav-tiff-rgb48-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

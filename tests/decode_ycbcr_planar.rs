@@ -20,7 +20,7 @@
 //! resolution) is rejected with a precise error — only 4:4:4 planar
 //! YCbCr decodes — and that rejection is exercised here too.
 
-use oxideav_tiff::decode_tiff;
+use oxideav_tiff::decode_page;
 
 /// Hand-build a classic-II chunky 4:4:4 YCbCr TIFF (one `(Y, Cb, Cr)`
 /// triple per pixel, `PlanarConfiguration = 1`). Carries the
@@ -228,12 +228,12 @@ fn planar_ycbcr_444_matches_chunky_decode() {
         let chunky = build_chunky_ycbcr_tiff(w, h, &pixels);
         let planar = build_planar_ycbcr_tiff(w, h, &pixels);
 
-        let dc = decode_tiff(&chunky).expect("chunky 4:4:4 YCbCr decode");
-        let dp = decode_tiff(&planar).expect("planar 4:4:4 YCbCr decode");
+        let dc = decode_page(&chunky).expect("chunky 4:4:4 YCbCr decode");
+        let dp = decode_page(&planar).expect("planar 4:4:4 YCbCr decode");
 
-        assert_eq!((dp.width, dp.height), (w, h));
+        assert_eq!((dp.image.width, dp.image.height), (w, h));
         assert_eq!(
-            dp.frame.planes[0].data, dc.frame.planes[0].data,
+            dp.image.planes[0].data, dc.image.planes[0].data,
             "planar 4:4:4 YCbCr diverged from chunky for {w}x{h}"
         );
     }
@@ -252,10 +252,10 @@ fn planar_ycbcr_444_solid_chroma_preserves_plane_order() {
         pixels.push(200); // Cb
         pixels.push(60); // Cr
     }
-    let dc = decode_tiff(&build_chunky_ycbcr_tiff(w, h, &pixels)).unwrap();
-    let dp = decode_tiff(&build_planar_ycbcr_tiff(w, h, &pixels)).unwrap();
+    let dc = decode_page(&build_chunky_ycbcr_tiff(w, h, &pixels)).unwrap();
+    let dp = decode_page(&build_planar_ycbcr_tiff(w, h, &pixels)).unwrap();
     assert_eq!(
-        dp.frame.planes[0].data, dc.frame.planes[0].data,
+        dp.image.planes[0].data, dc.image.planes[0].data,
         "Cb/Cr plane order mismatch under PlanarConfiguration=2"
     );
 }
@@ -303,11 +303,11 @@ fn planar_ycbcr_subsampled_uses_reduced_chroma_geometry() {
     }
     assert!(patched, "test setup: tag 530 not found to patch");
 
-    let got = decode_tiff(&tiff).expect("subsampled (2,2) planar YCbCr strips now decode");
-    assert_eq!((got.width, got.height), (w, h));
-    let want = decode_tiff(&build_planar_ycbcr_tiff(w, h, &pixels)).unwrap();
+    let got = decode_page(&tiff).expect("subsampled (2,2) planar YCbCr strips now decode");
+    assert_eq!((got.image.width, got.image.height), (w, h));
+    let want = decode_page(&build_planar_ycbcr_tiff(w, h, &pixels)).unwrap();
     assert_eq!(
-        got.frame.planes[0].data, want.frame.planes[0].data,
+        got.image.planes[0].data, want.image.planes[0].data,
         "constant-chroma subsampled planar decode must match the 4:4:4 decode"
     );
 }

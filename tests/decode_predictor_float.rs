@@ -36,7 +36,7 @@ use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use oxideav_tiff::{decode_tiff, DecodedTiff};
+use oxideav_tiff::{decode_page, Page};
 
 // ---------------------------------------------------------------------------
 // Hand-built classic-II TIFF assembly (little-endian).
@@ -130,13 +130,13 @@ fn build_float_gray_tiff(w: u32, h: u32, bps: u16, predictor: u16, sample_bytes:
     file
 }
 
-fn frame_to_gray8(d: &DecodedTiff) -> Vec<u8> {
-    assert_eq!(d.frame.planes.len(), 1);
-    let stride = d.frame.planes[0].stride;
-    let row = d.width as usize;
-    let mut out = Vec::with_capacity(row * d.height as usize);
-    for y in 0..d.height as usize {
-        out.extend_from_slice(&d.frame.planes[0].data[y * stride..y * stride + row]);
+fn frame_to_gray8(d: &Page) -> Vec<u8> {
+    assert_eq!(d.image.planes.len(), 1);
+    let stride = d.image.planes[0].stride;
+    let row = d.image.width as usize;
+    let mut out = Vec::with_capacity(row * d.image.height as usize);
+    for y in 0..d.image.height as usize {
+        out.extend_from_slice(&d.image.planes[0].data[y * stride..y * stride + row]);
     }
     out
 }
@@ -190,10 +190,10 @@ fn ramp_f16(w: u32, h: u32) -> Vec<u8> {
 fn assert_pred3_matches_pred1(w: u32, h: u32, bps: u16, raw: &[u8]) {
     let p1 = build_float_gray_tiff(w, h, bps, 1, raw);
     let p3 = build_float_gray_tiff(w, h, bps, 3, raw);
-    let d1 = decode_tiff(&p1).expect("decode predictor=1 float TIFF");
-    let d3 = decode_tiff(&p3).expect("decode predictor=3 float TIFF");
-    assert_eq!((d1.width, d1.height), (w, h));
-    assert_eq!((d3.width, d3.height), (w, h));
+    let d1 = decode_page(&p1).expect("decode predictor=1 float TIFF");
+    let d3 = decode_page(&p3).expect("decode predictor=3 float TIFF");
+    assert_eq!((d1.image.width, d1.image.height), (w, h));
+    assert_eq!((d3.image.width, d3.image.height), (w, h));
     assert_eq!(
         frame_to_gray8(&d1),
         frame_to_gray8(&d3),
@@ -270,7 +270,7 @@ fn float_predictor_rejects_non_float_sampleformat() {
     }
     file.extend_from_slice(&0u32.to_le_bytes());
     assert!(
-        decode_tiff(&file).is_err(),
+        decode_page(&file).is_err(),
         "Predictor=3 with integer SampleFormat must be rejected"
     );
 }
@@ -399,13 +399,13 @@ fn magick_float_tiff_ex(
     bytes
 }
 
-fn frame_to_rgb24(d: &DecodedTiff) -> Vec<u8> {
-    assert_eq!(d.frame.planes.len(), 1);
-    let stride = d.frame.planes[0].stride;
-    let row = d.width as usize * 3;
-    let mut out = Vec::with_capacity(row * d.height as usize);
-    for y in 0..d.height as usize {
-        out.extend_from_slice(&d.frame.planes[0].data[y * stride..y * stride + row]);
+fn frame_to_rgb24(d: &Page) -> Vec<u8> {
+    assert_eq!(d.image.planes.len(), 1);
+    let stride = d.image.planes[0].stride;
+    let row = d.image.width as usize * 3;
+    let mut out = Vec::with_capacity(row * d.image.height as usize);
+    for y in 0..d.image.height as usize {
+        out.extend_from_slice(&d.image.planes[0].data[y * stride..y * stride + row]);
     }
     out
 }
@@ -425,10 +425,10 @@ fn validate_magick(bps: u32, compress: &str) {
         eprintln!("skipping: magick did not produce a predictor=3 {bps}-bit float TIFF");
         return;
     };
-    let d1 = decode_tiff(&p1).expect("decode magick predictor=1 float TIFF");
-    let d3 = decode_tiff(&p3).expect("decode magick predictor=3 float TIFF");
-    assert_eq!((d1.width, d1.height), (w, h));
-    assert_eq!((d3.width, d3.height), (w, h));
+    let d1 = decode_page(&p1).expect("decode magick predictor=1 float TIFF");
+    let d3 = decode_page(&p3).expect("decode magick predictor=3 float TIFF");
+    assert_eq!((d1.image.width, d1.image.height), (w, h));
+    assert_eq!((d3.image.width, d3.image.height), (w, h));
     assert_eq!(
         frame_to_gray8(&d1),
         frame_to_gray8(&d3),
@@ -532,9 +532,9 @@ fn float_predictor_rgb_f32_handbuilt() {
     }
     let p1 = build_float_rgb_tiff(w, h, 32, 1, &raw);
     let p3 = build_float_rgb_tiff(w, h, 32, 3, &raw);
-    let d1 = decode_tiff(&p1).expect("decode predictor=1 RGB float TIFF");
-    let d3 = decode_tiff(&p3).expect("decode predictor=3 RGB float TIFF");
-    assert_eq!((d3.width, d3.height), (w, h));
+    let d1 = decode_page(&p1).expect("decode predictor=1 RGB float TIFF");
+    let d3 = decode_page(&p3).expect("decode predictor=3 RGB float TIFF");
+    assert_eq!((d3.image.width, d3.image.height), (w, h));
     assert_eq!(
         frame_to_rgb24(&d1),
         frame_to_rgb24(&d3),
@@ -563,9 +563,9 @@ fn float_predictor_magick_multistrip_f32_lzw() {
         eprintln!("skipping: magick did not produce predictor=3 multistrip float TIFF");
         return;
     };
-    let d1 = decode_tiff(&p1).expect("decode magick predictor=1 multistrip float TIFF");
-    let d3 = decode_tiff(&p3).expect("decode magick predictor=3 multistrip float TIFF");
-    assert_eq!((d3.width, d3.height), (w, h));
+    let d1 = decode_page(&p1).expect("decode magick predictor=1 multistrip float TIFF");
+    let d3 = decode_page(&p3).expect("decode magick predictor=3 multistrip float TIFF");
+    assert_eq!((d3.image.width, d3.image.height), (w, h));
     assert_eq!(
         frame_to_gray8(&d1),
         frame_to_gray8(&d3),
@@ -592,9 +592,9 @@ fn float_predictor_magick_tiled_f32_lzw() {
         eprintln!("skipping: magick did not produce predictor=3 tiled float TIFF");
         return;
     };
-    let d1 = decode_tiff(&p1).expect("decode magick predictor=1 tiled float TIFF");
-    let d3 = decode_tiff(&p3).expect("decode magick predictor=3 tiled float TIFF");
-    assert_eq!((d3.width, d3.height), (w, h));
+    let d1 = decode_page(&p1).expect("decode magick predictor=1 tiled float TIFF");
+    let d3 = decode_page(&p3).expect("decode magick predictor=3 tiled float TIFF");
+    assert_eq!((d3.image.width, d3.image.height), (w, h));
     assert_eq!(
         frame_to_gray8(&d1),
         frame_to_gray8(&d3),

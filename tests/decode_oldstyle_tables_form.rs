@@ -27,7 +27,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use oxideav_tiff::types::*;
-use oxideav_tiff::{decode_tiff, TiffError};
+use oxideav_tiff::{decode_page, TiffError};
 
 fn rand_suffix() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -597,8 +597,8 @@ fn tables_form_gray_baseline_matches_c7() {
         &to_tf_tables(&d),
         std::slice::from_ref(&d.entropy),
     );
-    let got = decode_tiff(&tf).expect("tables-form decode");
-    let oracle = decode_tiff(&build_c7_tiff(
+    let got = decode_page(&tf).expect("tables-form decode");
+    let oracle = decode_page(&build_c7_tiff(
         &jpeg,
         w as u32,
         h as u32,
@@ -608,8 +608,8 @@ fn tables_form_gray_baseline_matches_c7() {
     ))
     .expect("C7 oracle decode");
     assert_eq!(
-        image_bytes(&got.frame, 1),
-        image_bytes(&oracle.frame, 1),
+        image_bytes(&got.image, 1),
+        image_bytes(&oracle.image, 1),
         "tables-form synthesis must reproduce the interchange decode"
     );
 }
@@ -651,8 +651,8 @@ fn tables_form_ycbcr420_matches_c7() {
         &to_tf_tables(&d),
         std::slice::from_ref(&d.entropy),
     );
-    let got = decode_tiff(&tf).expect("tables-form YCbCr decode");
-    let oracle = decode_tiff(&build_c7_tiff(
+    let got = decode_page(&tf).expect("tables-form YCbCr decode");
+    let oracle = decode_page(&build_c7_tiff(
         &jpeg,
         w as u32,
         h as u32,
@@ -662,8 +662,8 @@ fn tables_form_ycbcr420_matches_c7() {
     ))
     .expect("C7 oracle decode");
     assert_eq!(
-        image_bytes(&got.frame, 3),
-        image_bytes(&oracle.frame, 3),
+        image_bytes(&got.image, 3),
+        image_bytes(&oracle.image, 3),
         "tables-form YCbCr must reproduce the interchange decode"
     );
 }
@@ -703,9 +703,9 @@ fn tables_form_lossless_gray_exact() {
             &to_tf_tables(&d),
             std::slice::from_ref(&d.entropy),
         );
-        let got = decode_tiff(&tf).expect("tables-form lossless decode");
+        let got = decode_page(&tf).expect("tables-form lossless decode");
         assert_eq!(
-            image_bytes(&got.frame, 1),
+            image_bytes(&got.image, 1),
             src,
             "psv={psv} lossless tables-form must be byte-exact"
         );
@@ -752,10 +752,10 @@ fn tables_form_multistrip_gray_matches_c7_halves() {
         &to_tf_tables(&d_top),
         &[d_top.entropy.clone(), d_bottom.entropy.clone()],
     );
-    let got = decode_tiff(&tf).expect("multi-strip tables-form decode");
+    let got = decode_page(&tf).expect("multi-strip tables-form decode");
 
     // Oracle: decode each half's complete bitstream via C7 wraps.
-    let top_or = decode_tiff(&build_c7_tiff(
+    let top_or = decode_page(&build_c7_tiff(
         &j_top,
         w as u32,
         h as u32 / 2,
@@ -764,7 +764,7 @@ fn tables_form_multistrip_gray_matches_c7_halves() {
         None,
     ))
     .expect("top oracle");
-    let bottom_or = decode_tiff(&build_c7_tiff(
+    let bottom_or = decode_page(&build_c7_tiff(
         &j_bottom,
         w as u32,
         h as u32 / 2,
@@ -773,9 +773,9 @@ fn tables_form_multistrip_gray_matches_c7_halves() {
         None,
     ))
     .expect("bottom oracle");
-    let mut want = image_bytes(&top_or.frame, 1);
-    want.extend_from_slice(&image_bytes(&bottom_or.frame, 1));
-    assert_eq!(image_bytes(&got.frame, 1), want);
+    let mut want = image_bytes(&top_or.image, 1);
+    want.extend_from_slice(&image_bytes(&bottom_or.image, 1));
+    assert_eq!(image_bytes(&got.image, 1), want);
 }
 
 /// Planar (PlanarConfiguration = 2) lossless RGB tables-form: three
@@ -823,14 +823,14 @@ fn tables_form_planar_rgb_lossless_exact() {
         &tables,
         &strips,
     );
-    let got = decode_tiff(&tf).expect("planar tables-form decode");
+    let got = decode_page(&tf).expect("planar tables-form decode");
     let mut want = Vec::with_capacity(w * h * 3);
     for (i, &r) in planes[0].iter().enumerate() {
         want.push(r);
         want.push(planes[1][i]);
         want.push(planes[2][i]);
     }
-    assert_eq!(image_bytes(&got.frame, 3), want, "planar lossless exact");
+    assert_eq!(image_bytes(&got.image, 3), want, "planar lossless exact");
 }
 
 /// Rejection semantics that must survive: a well-formed *tiled*
@@ -861,7 +861,7 @@ fn tables_form_remaining_gates() {
         },
         &[vec![0u8; 4]],
     );
-    let Err(e) = decode_tiff(&tf) else {
+    let Err(e) = decode_page(&tf) else {
         panic!("baseline without AC tables must not decode");
     };
     let msg = format!("{e:?}");

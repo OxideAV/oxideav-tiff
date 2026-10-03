@@ -12,7 +12,7 @@
 //!     directed cases pin the round-to-nearest-even, overflow-to-Inf,
 //!     and underflow-to-zero edges.
 //!   * **Display-plane oracle.** Encoded f16 pages decode through the
-//!     public `decode_tiff` to the same display bytes a test-local map
+//!     public `decode_page` to the same display bytes a test-local map
 //!     computes from the widened samples — across the compressor ×
 //!     predictor × strip/tile × chunky/planar × classic/BigTIFF matrix.
 //!   * **Raw-byte oracle.** For the uncompressed no-predictor page the
@@ -26,7 +26,7 @@
 
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, f16_bits_to_f32, f32_to_f16_bits, EncodePage, EncodePixelFormat,
+    decode_page, encode_page, f16_bits_to_f32, f32_to_f16_bits, EncodePage, EncodePixelFormat,
     PageExtras, TiffCompression, TiffPixelFormat,
 };
 
@@ -184,11 +184,11 @@ fn encode_gray_f16_matrix_decodes_to_display_map() {
                         bigtiff,
                         extras: PageExtras::default(),
                     };
-                    let file = encode_tiff(&page).expect("encode GrayF16");
-                    let img = decode_tiff(&file).expect("decode GrayF16");
-                    assert_eq!(img.pixel_format, TiffPixelFormat::Gray8);
+                    let file = encode_page(&page).expect("encode GrayF16");
+                    let img = decode_page(&file).expect("decode GrayF16");
+                    assert_eq!(img.image.format, TiffPixelFormat::Gray8);
                     assert_eq!(
-                        img.frame.planes[0].data, want,
+                        img.image.planes[0].data, want,
                         "GrayF16 display mismatch (compression={compression:?} \
                          predictor={predictor} tiling={tiling:?} bigtiff={bigtiff})"
                     );
@@ -220,11 +220,11 @@ fn encode_rgb_f16_matrix_decodes_to_display_map() {
                         bigtiff: false,
                         extras: PageExtras::default(),
                     };
-                    let file = encode_tiff(&page).expect("encode RgbF16");
-                    let img = decode_tiff(&file).expect("decode RgbF16");
-                    assert_eq!(img.pixel_format, TiffPixelFormat::Rgb24);
+                    let file = encode_page(&page).expect("encode RgbF16");
+                    let img = decode_page(&file).expect("decode RgbF16");
+                    assert_eq!(img.image.format, TiffPixelFormat::Rgb24);
                     assert_eq!(
-                        img.frame.planes[0].data, want,
+                        img.image.planes[0].data, want,
                         "RgbF16 display mismatch (compression={compression:?} \
                          predictor={predictor} planar={planar} tiling={tiling:?})"
                     );
@@ -263,8 +263,8 @@ fn encode_f16_nonfinite_samples_render_at_display_floor() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let img = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
-    assert_eq!(img.frame.planes[0].data, want);
+    let img = decode_page(&encode_page(&page).unwrap()).unwrap();
+    assert_eq!(img.image.planes[0].data, want);
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +286,7 @@ fn encode_f16_ifd_fields_and_verbatim_strip() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let file = encode_tiff(&page).unwrap();
+    let file = encode_page(&page).unwrap();
     let hdr = parse_header(&file).unwrap();
     let (entries, next) = parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset)
         .expect("parse encoded IFD");
@@ -316,7 +316,7 @@ fn encode_f16_ifd_fields_and_verbatim_strip() {
         predictor: true,
         ..page
     };
-    let file_p = encode_tiff(&page_p).unwrap();
+    let file_p = encode_page(&page_p).unwrap();
     let hdr_p = parse_header(&file_p).unwrap();
     let (entries_p, _) = parse_ifd(
         &file_p,
@@ -343,7 +343,7 @@ fn encode_f16_rejects_ccitt() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    assert!(encode_tiff(&page).is_err(), "CCITT is bilevel-only");
+    assert!(encode_page(&page).is_err(), "CCITT is bilevel-only");
 }
 
 #[test]
@@ -361,7 +361,7 @@ fn encode_gray_f16_rejects_planar() {
         extras: PageExtras::default(),
     };
     assert!(
-        encode_tiff(&page).is_err(),
+        encode_page(&page).is_err(),
         "PlanarConfiguration=2 is irrelevant at SamplesPerPixel=1"
     );
 }
@@ -380,5 +380,5 @@ fn encode_f16_wrong_buffer_length_rejected() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    assert!(encode_tiff(&page).is_err());
+    assert!(encode_page(&page).is_err());
 }

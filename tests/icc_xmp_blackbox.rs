@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
 };
 
 fn binary_available(name: &str) -> bool {
@@ -126,7 +126,7 @@ fn encode_gray_with(xmp: Option<&[u8]>, icc: Option<&[u8]>, bigtiff: bool) -> Ve
         icc_profile: icc,
         ..Default::default()
     };
-    encode_tiff(&EncodePage {
+    encode_page(&EncodePage {
         width: 8,
         height: 8,
         kind: EncodePixelFormat::Gray8 { pixels: &px },
@@ -221,7 +221,7 @@ fn magick_to_ours_both_payloads_byte_exact() {
         .expect("run magick embed");
     assert!(st.success(), "magick profile embedding failed");
     let theirs = fs::read(&out).unwrap();
-    let d = decode_tiff(&theirs).expect("decode externally-written file");
+    let d = decode_page(&theirs).expect("decode externally-written file");
     assert_eq!(
         d.metadata.icc_profile.as_deref(),
         Some(icc.as_slice()),
@@ -259,7 +259,7 @@ fn tiffcp_rewrite_preserves_icc() {
         .expect("run tiffcp");
     assert!(st.success(), "tiffcp rewrite failed");
     let copied = fs::read(&out_path).unwrap();
-    let d = decode_tiff(&copied).expect("decode tiffcp output");
+    let d = decode_page(&copied).expect("decode tiffcp output");
     assert_eq!(
         d.metadata.icc_profile.as_deref(),
         Some(icc.as_slice()),

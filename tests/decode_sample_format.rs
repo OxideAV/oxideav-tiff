@@ -10,7 +10,7 @@
 //!
 //! These tests build minimal hand-crafted classic-TIFF byte strings
 //! (8-byte header + one IFD + a one-pixel strip) and exercise each
-//! relevant `SampleFormat` value through the public `decode_tiff`
+//! relevant `SampleFormat` value through the public `decode_page`
 //! entry point.
 //!
 //! ## On-disk layout each test produces
@@ -42,7 +42,7 @@
 //! Some tests add a SampleFormat (339) entry on the end to drive the
 //! §SampleFormat reader rule under test.
 
-use oxideav_tiff::decode_tiff;
+use oxideav_tiff::decode_page;
 
 /// IFD entry, SHORT (field-type = 3) with a single inline value.
 fn entry_short(tag: u16, value: u16) -> [u8; 12] {
@@ -101,9 +101,9 @@ fn sample_format_absent_decodes_as_unsigned() {
     // integer data." An IFD without the tag must decode without
     // touching the SampleFormat path.
     let bytes = build_1x1_gray8(None);
-    let d = decode_tiff(&bytes).expect("baseline 1x1 Gray8 must decode");
-    assert_eq!((d.width, d.height), (1, 1));
-    assert_eq!(d.frame.planes[0].data, vec![0xAB]);
+    let d = decode_page(&bytes).expect("baseline 1x1 Gray8 must decode");
+    assert_eq!((d.image.width, d.image.height), (1, 1));
+    assert_eq!(d.image.planes[0].data, vec![0xAB]);
 }
 
 #[test]
@@ -111,8 +111,8 @@ fn sample_format_uint_decodes_as_unsigned() {
     // SampleFormat = 1 is the spec default; even when written
     // explicitly the decoder must accept it as unsigned data.
     let bytes = build_1x1_gray8(Some(1));
-    let d = decode_tiff(&bytes).expect("SampleFormat=1 must decode");
-    assert_eq!(d.frame.planes[0].data, vec![0xAB]);
+    let d = decode_page(&bytes).expect("SampleFormat=1 must decode");
+    assert_eq!(d.image.planes[0].data, vec![0xAB]);
 }
 
 #[test]
@@ -122,16 +122,16 @@ fn sample_format_undefined_falls_back_to_unsigned() {
     // unsigned integer data)." We follow the spec's recommendation
     // and decode value 4 as unsigned.
     let bytes = build_1x1_gray8(Some(4));
-    let d = decode_tiff(&bytes).expect("SampleFormat=4 must fall back to unsigned");
-    assert_eq!(d.frame.planes[0].data, vec![0xAB]);
+    let d = decode_page(&bytes).expect("SampleFormat=4 must fall back to unsigned");
+    assert_eq!(d.image.planes[0].data, vec![0xAB]);
 }
 
-/// Helper: assert `decode_tiff` returned an error whose Display
-/// includes the given substring. `DecodedTiff` does not implement
+/// Helper: assert `decode_page` returned an error whose Display
+/// includes the given substring. `Page` does not implement
 /// `Debug`, so we can't use `.unwrap_err()` and instead drive the
 /// outcome through a `match`.
 fn expect_err_containing(bytes: &[u8], needle: &str) {
-    match decode_tiff(bytes) {
+    match decode_page(bytes) {
         Ok(_) => panic!("expected an error containing {needle:?}, got Ok(..)"),
         Err(e) => {
             let msg = format!("{e}");
@@ -153,9 +153,9 @@ fn sample_format_signed_int_8bit_gray_offset_binary() {
     // 0x80. The mapping is a sign-bit flip (XOR 0x80). Our fixture
     // stores 0xAB, which is signed -85: XOR 0x80 -> 0x2B.
     let bytes = build_1x1_gray8(Some(2));
-    let d = decode_tiff(&bytes).expect("8-bit signed grayscale must decode");
-    assert_eq!((d.width, d.height), (1, 1));
-    assert_eq!(d.frame.planes[0].data, vec![0x2Bu8]); // 0xAB ^ 0x80
+    let d = decode_page(&bytes).expect("8-bit signed grayscale must decode");
+    assert_eq!((d.image.width, d.image.height), (1, 1));
+    assert_eq!(d.image.planes[0].data, vec![0x2Bu8]); // 0xAB ^ 0x80
 }
 
 #[test]

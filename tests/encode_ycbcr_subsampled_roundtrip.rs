@@ -27,7 +27,7 @@
 //!      combinations are rejected with a precise error.
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
     TiffPixelFormat,
 };
 
@@ -115,7 +115,7 @@ fn encoded_strip_matches_reference_data_unit_order() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
 
     // Find StripOffsets (273) + StripByteCounts (279) via a byte walker
     // and compare the on-disk strip bytes to the reference packing.
@@ -166,11 +166,15 @@ fn block_uniform_chroma_roundtrips_all_pairs_and_compressors() {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            let bytes = encode_tiff(&page).unwrap();
-            let d = decode_tiff(&bytes).unwrap();
-            assert_eq!((d.width, d.height), (w as u32, h as u32), "{sh}x{sv}");
-            assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
-            let got = d.frame.planes[0].data.clone();
+            let bytes = encode_page(&page).unwrap();
+            let d = decode_page(&bytes).unwrap();
+            assert_eq!(
+                (d.image.width, d.image.height),
+                (w as u32, h as u32),
+                "{sh}x{sv}"
+            );
+            assert_eq!(d.image.format, TiffPixelFormat::Rgb24);
+            let got = d.image.planes[0].data.clone();
             match &oracle {
                 None => oracle = Some(got),
                 Some(o) => assert_eq!(&got, o, "compressor mismatch at {sh}x{sv}"),
@@ -214,9 +218,9 @@ fn subsampled_roundtrip_equals_full_resolution_splat() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let dsub = decode_tiff(&encode_tiff(&sub).unwrap()).unwrap();
-    let dfull = decode_tiff(&encode_tiff(&full).unwrap()).unwrap();
-    assert_eq!(dsub.frame.planes[0].data, dfull.frame.planes[0].data);
+    let dsub = decode_page(&encode_page(&sub).unwrap()).unwrap();
+    let dfull = decode_page(&encode_page(&full).unwrap()).unwrap();
+    assert_eq!(dsub.image.planes[0].data, dfull.image.planes[0].data);
 }
 
 #[test]
@@ -237,12 +241,12 @@ fn bigtiff_subsampled_roundtrips() {
         bigtiff: true,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     // BigTIFF magic 43.
     assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 43);
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (w as u32, h as u32));
-    assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (w as u32, h as u32));
+    assert_eq!(d.image.format, TiffPixelFormat::Rgb24);
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +272,7 @@ fn writes_actual_subsampling_factors_in_tag_530() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
+        let bytes = encode_page(&page).unwrap();
         assert_eq!(read_short(&bytes, 262), Some(6), "photometric YCbCr");
         assert_eq!(read_short(&bytes, 277), Some(3), "SamplesPerPixel");
         assert_eq!(read_short(&bytes, 284), Some(1), "PlanarConfiguration");
@@ -290,9 +294,9 @@ fn decoder_reads_handbuilt_subsampled_strip() {
     let pixels = block_uniform_chroma(w as usize, h as usize, sh, sv);
     let strip = reference_pack(&pixels, w as usize, h as usize, sh, sv);
     let tiff = build_classic_subsampled(w, h, sh as u16, sv as u16, &strip);
-    let d = decode_tiff(&tiff).unwrap();
-    assert_eq!((d.width, d.height), (w, h));
-    assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
+    let d = decode_page(&tiff).unwrap();
+    assert_eq!((d.image.width, d.image.height), (w, h));
+    assert_eq!(d.image.format, TiffPixelFormat::Rgb24);
 
     // Cross-check: encoder output decodes to the same RGB.
     let page = EncodePage {
@@ -309,8 +313,8 @@ fn decoder_reads_handbuilt_subsampled_strip() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let enc = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
-    assert_eq!(d.frame.planes[0].data, enc.frame.planes[0].data);
+    let enc = decode_page(&encode_page(&page).unwrap()).unwrap();
+    assert_eq!(d.image.planes[0].data, enc.image.planes[0].data);
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +339,7 @@ fn rejects_illegal_subsampling_pair() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    assert!(encode_tiff(&page).is_err());
+    assert!(encode_page(&page).is_err());
 }
 
 #[test]
@@ -356,7 +360,7 @@ fn rejects_non_multiple_dimensions() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    assert!(encode_tiff(&page).is_err());
+    assert!(encode_page(&page).is_err());
 }
 
 #[test]
@@ -376,7 +380,7 @@ fn rejects_wrong_buffer_length() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    assert!(encode_tiff(&page).is_err());
+    assert!(encode_page(&page).is_err());
 }
 
 #[test]
@@ -403,10 +407,10 @@ fn rejects_chunky_predictor_and_ccitt() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    assert!(encode_tiff(&base(TiffCompression::None, true, false, None)).is_err());
+    assert!(encode_page(&base(TiffCompression::None, true, false, None)).is_err());
     // Tiled planar subsampled now encodes (TN2-amended §21).
-    assert!(encode_tiff(&base(TiffCompression::None, false, true, Some((16, 16)))).is_ok());
-    assert!(encode_tiff(&base(
+    assert!(encode_page(&base(TiffCompression::None, false, true, Some((16, 16)))).is_ok());
+    assert!(encode_page(&base(
         TiffCompression::CcittT6 {
             uncompressed: false
         },
@@ -416,10 +420,10 @@ fn rejects_chunky_predictor_and_ccitt() {
     ))
     .is_err());
     // Planar *strips* now encode.
-    assert!(encode_tiff(&base(TiffCompression::None, false, true, None)).is_ok());
+    assert!(encode_page(&base(TiffCompression::None, false, true, None)).is_ok());
     // A tile geometry that is not a multiple of the subsampling factors
     // is rejected (§21 page 90); TileLength 18 is not a multiple of sv=2.
-    assert!(encode_tiff(&base(TiffCompression::None, false, false, Some((16, 18)))).is_err());
+    assert!(encode_page(&base(TiffCompression::None, false, false, Some((16, 18)))).is_err());
 }
 
 #[test]
@@ -473,12 +477,12 @@ fn subsampled_tiled_matches_strip() {
                     tiling: Some(tile),
                     ..strip.clone()
                 };
-                let ds = decode_tiff(&encode_tiff(&strip).unwrap()).unwrap();
-                let dt = decode_tiff(&encode_tiff(&tiled).unwrap()).unwrap();
-                assert_eq!((dt.width, dt.height), (w, h));
-                assert_eq!(dt.pixel_format, TiffPixelFormat::Rgb24);
+                let ds = decode_page(&encode_page(&strip).unwrap()).unwrap();
+                let dt = decode_page(&encode_page(&tiled).unwrap()).unwrap();
+                assert_eq!((dt.image.width, dt.image.height), (w, h));
+                assert_eq!(dt.image.format, TiffPixelFormat::Rgb24);
                 assert_eq!(
-                    dt.frame.planes[0].data, ds.frame.planes[0].data,
+                    dt.image.planes[0].data, ds.image.planes[0].data,
                     "tiled subsampled ({sh},{sv}) diverged from strip for {w}x{h} \
                      tile {tile:?} comp {comp:?}"
                 );

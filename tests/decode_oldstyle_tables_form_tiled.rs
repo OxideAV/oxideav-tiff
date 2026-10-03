@@ -23,7 +23,7 @@
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd, ByteOrder};
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, rgb24_to_ycbcr24, EncodePage, EncodePixelFormat, JpegOptions,
+    decode_page, encode_page, rgb24_to_ycbcr24, EncodePage, EncodePixelFormat, JpegOptions,
     JpegTablesLayout, PageExtras, TiffCompression, TiffError,
 };
 
@@ -346,7 +346,7 @@ fn c7_page<'a>(
 /// Convert the reference file into the §22 tiled tables-form layout
 /// and check both decodes agree byte-for-byte.
 fn roundtrip_as_tables_form(c7: &[u8], cfg: TileCfg, bpp: usize) -> Vec<u8> {
-    let oracle = decode_tiff(c7).expect("Compression=7 reference decode");
+    let oracle = decode_page(c7).expect("Compression=7 reference decode");
     let streams = tile_streams(c7);
     let decomposed: Vec<Decomposed> = streams.iter().map(|s| decompose(s)).collect();
     // Every tile carries the same table set (same quality, same
@@ -378,13 +378,16 @@ fn roundtrip_as_tables_form(c7: &[u8], cfg: TileCfg, bpp: usize) -> Vec<u8> {
         .collect();
     let tiles: Vec<Vec<u8>> = decomposed.iter().map(|d| d.entropy.clone()).collect();
     let tf = build_tiled_tables_form(&cfg, &per_comp, &tiles);
-    let got = decode_tiff(&tf).expect("§22 tiled tables-form decode");
-    assert_eq!(got.format.compression, Some(COMPRESSION_JPEG_OLD));
-    assert!(got.format.tiled);
-    assert_eq!((got.width, got.height), (oracle.width, oracle.height));
+    let got = decode_page(&tf).expect("§22 tiled tables-form decode");
+    assert_eq!(got.layout.compression, Some(COMPRESSION_JPEG_OLD));
+    assert!(got.layout.tiled);
     assert_eq!(
-        frame_bytes(&got.frame, bpp),
-        frame_bytes(&oracle.frame, bpp)
+        (got.image.width, got.image.height),
+        (oracle.image.width, oracle.image.height)
+    );
+    assert_eq!(
+        frame_bytes(&got.image, bpp),
+        frame_bytes(&oracle.image, bpp)
     );
     tf
 }
@@ -393,7 +396,7 @@ fn roundtrip_as_tables_form(c7: &[u8], cfg: TileCfg, bpp: usize) -> Vec<u8> {
 fn tiled_tables_form_gray_with_edge_tiles_matches_c7() {
     let (w, h) = (40u32, 24u32);
     let src = smooth_gray(w as usize, h as usize, 5);
-    let c7 = encode_tiff(&c7_page(
+    let c7 = encode_page(&c7_page(
         w,
         h,
         EncodePixelFormat::Gray8 { pixels: &src },
@@ -422,7 +425,7 @@ fn tiled_tables_form_gray_with_edge_tiles_matches_c7() {
 fn tiled_tables_form_ycbcr420_chunky_matches_c7() {
     let (w, h) = (48u32, 32u32);
     let ycc = rgb24_to_ycbcr24(&smooth_rgb(w as usize, h as usize));
-    let c7 = encode_tiff(&c7_page(
+    let c7 = encode_page(&c7_page(
         w,
         h,
         EncodePixelFormat::YCbCrSubsampled24 {
@@ -453,7 +456,7 @@ fn tiled_tables_form_ycbcr420_chunky_matches_c7() {
 fn tiled_tables_form_planar_rgb_and_subsampled_ycbcr_match_c7() {
     let (w, h) = (40u32, 24u32);
     let rgb = smooth_rgb(w as usize, h as usize);
-    let c7 = encode_tiff(&c7_page(
+    let c7 = encode_page(&c7_page(
         w,
         h,
         EncodePixelFormat::Rgb24 { pixels: &rgb },
@@ -478,7 +481,7 @@ fn tiled_tables_form_planar_rgb_and_subsampled_ycbcr_match_c7() {
     );
     // 4:2:2 planar: 32x16 luma tiles, 16x16 chroma tiles.
     let ycc = rgb24_to_ycbcr24(&rgb);
-    let c7 = encode_tiff(&c7_page(
+    let c7 = encode_page(&c7_page(
         w,
         h,
         EncodePixelFormat::YCbCrSubsampled24 {
@@ -520,7 +523,7 @@ fn tiled_tables_form_planar_rgb_and_subsampled_ycbcr_match_c7() {
 fn tiled_tables_form_rejects_bad_tile_counts_precisely() {
     let (w, h) = (16u32, 16u32);
     let src = smooth_gray(16, 16, 1);
-    let c7 = encode_tiff(&c7_page(
+    let c7 = encode_page(&c7_page(
         w,
         h,
         EncodePixelFormat::Gray8 { pixels: &src },
@@ -547,7 +550,7 @@ fn tiled_tables_form_rejects_bad_tile_counts_precisely() {
     };
     // Two tile entries for a one-tile image.
     let tf = build_tiled_tables_form(&cfg, &per_comp, &[d.entropy.clone(), d.entropy.clone()]);
-    let Err(e) = decode_tiff(&tf) else {
+    let Err(e) = decode_page(&tf) else {
         panic!("tile-count mismatch must not decode");
     };
     assert!(matches!(e, TiffError::InvalidData(_)), "{e:?}");

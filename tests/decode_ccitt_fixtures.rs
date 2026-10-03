@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use oxideav_tiff::decode_tiff;
+use oxideav_tiff::decode_page;
 
 fn bin_available(name: &str) -> bool {
     Command::new(name)
@@ -97,8 +97,8 @@ fn tiffcp_recompress_fill(src: &PathBuf, dst: &PathBuf, copts: &str, fill: &str)
 
 fn decode(path: &PathBuf) -> Vec<u8> {
     let bytes = std::fs::read(path).expect("read tiff");
-    let img = decode_tiff(&bytes).expect("decode_tiff");
-    img.frame.planes[0].data.clone()
+    let img = decode_page(&bytes).expect("decode_page");
+    img.image.planes[0].data.clone()
 }
 
 fn unique_tmp(prefix: &str) -> PathBuf {

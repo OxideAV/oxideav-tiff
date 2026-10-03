@@ -5,7 +5,7 @@
 //!
 //! These tests are deliberately decoder-agnostic to the extent
 //! possible: every BigTIFF byte stream is then handed to our own
-//! `decode_tiff` / `decode_tiff_all` (which already accept both
+//! `decode_page` / `decode_all` (which already accept both
 //! variants via `parse_header` / `parse_ifd`) and the decoded pixels
 //! are compared against the original input.
 //!
@@ -15,8 +15,8 @@
 //! classic TIFF bytes when `bigtiff = true` is requested.
 
 use oxideav_tiff::{
-    decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    PageExtras, RgbColor, TiffCompression,
+    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
+    RgbColor, TiffCompression, TiffPixelFormat,
 };
 
 fn ramp_gray8(w: u32, h: u32) -> Vec<u8> {
@@ -68,7 +68,7 @@ fn bigtiff_header_is_16_bytes_with_magic_43_off_size_8_reserved_0() {
         bigtiff: true,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     // II + 43 + off_size + reserved + first-IFD u64
     assert!(bytes.len() >= 16);
     assert_eq!(&bytes[0..2], b"II");
@@ -98,7 +98,7 @@ fn classic_header_unchanged_when_bigtiff_false() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     assert_eq!(&bytes[0..2], b"II");
     assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 42);
 }
@@ -148,7 +148,7 @@ fn bigtiff_strip_fields_use_long8_type_16() {
         bigtiff: true,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     let (entries, next) = parse_bigtiff_ifd0(&bytes);
     assert_eq!(next, 0, "single-page chain ends with next-IFD=0");
     // Tags must be ascending.
@@ -186,7 +186,7 @@ fn bigtiff_bitspersample_rgb_inlines_into_8byte_slot() {
         bigtiff: true,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     let (entries, _next) = parse_bigtiff_ifd0(&bytes);
     let bps = entries.iter().find(|e| e.0 == 258).expect("BitsPerSample");
     assert_eq!(bps.1, 3, "BitsPerSample is SHORT");
@@ -215,10 +215,10 @@ fn bigtiff_gray8_roundtrip_uncompressed() {
         bigtiff: true,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (40, 24));
-    assert_eq!(d.frame.planes[0].data, pixels);
+    let bytes = encode_page(&page).unwrap();
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (40, 24));
+    assert_eq!(d.image.planes[0].data, pixels);
 }
 
 #[test]
@@ -235,10 +235,10 @@ fn bigtiff_gray8_roundtrip_lzw_with_predictor() {
         bigtiff: true,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (33, 17));
-    assert_eq!(d.frame.planes[0].data, pixels);
+    let bytes = encode_page(&page).unwrap();
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (33, 17));
+    assert_eq!(d.image.planes[0].data, pixels);
 }
 
 #[test]
@@ -255,10 +255,10 @@ fn bigtiff_gray16_roundtrip_deflate() {
         bigtiff: true,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (20, 16));
-    assert_eq!(d.frame.planes[0].data, pixels);
+    let bytes = encode_page(&page).unwrap();
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (20, 16));
+    assert_eq!(d.image.planes[0].data, pixels);
 }
 
 #[test]
@@ -275,10 +275,10 @@ fn bigtiff_rgb24_roundtrip_packbits() {
         bigtiff: true,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (24, 18));
-    assert_eq!(d.frame.planes[0].data, pixels);
+    let bytes = encode_page(&page).unwrap();
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (24, 18));
+    assert_eq!(d.image.planes[0].data, pixels);
 }
 
 #[test]
@@ -298,10 +298,10 @@ fn bigtiff_rgb24_planar_lzw_roundtrip() {
         bigtiff: true,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (16, 16));
-    assert_eq!(d.frame.planes[0].data, pixels);
+    let bytes = encode_page(&page).unwrap();
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (16, 16));
+    assert_eq!(d.image.planes[0].data, pixels);
     // Spot-check: the StripOffsets / StripByteCounts entries are LONG8
     // arrays of length 3, stored out-of-line (offsets point past the
     // strip payloads).
@@ -340,11 +340,14 @@ fn bigtiff_palette8_roundtrip() {
         bigtiff: true,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (12, 8));
-    // Decoded palette pixels are RGB24 — verify a few colours match.
-    let plane = &d.frame.planes[0].data;
+    let bytes = encode_page(&page).unwrap();
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (12, 8));
+    // Decoded palette pixels are native Pal8 (indices verbatim); the
+    // display render expands the ColorMap — verify a few colours match.
+    assert_eq!(d.image.format, TiffPixelFormat::Pal8);
+    assert_eq!(d.image.planes[0].data, indices);
+    let plane = d.image.to_rgb8();
     assert_eq!(plane.len(), (12 * 8 * 3) as usize);
     for (i, &idx) in indices.iter().enumerate() {
         let dr = plane[i * 3];
@@ -371,10 +374,10 @@ fn bigtiff_rgb24_tiled_roundtrip() {
         bigtiff: true,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (32, 32));
-    assert_eq!(d.frame.planes[0].data, pixels);
+    let bytes = encode_page(&page).unwrap();
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (32, 32));
+    assert_eq!(d.image.planes[0].data, pixels);
     let (entries, _) = parse_bigtiff_ifd0(&bytes);
     let to = entries.iter().find(|e| e.0 == 324).expect("TileOffsets");
     assert_eq!(to.1, 16, "TileOffsets must be LONG8 in BigTIFF");
@@ -412,15 +415,15 @@ fn bigtiff_multipage_chain() {
             extras: PageExtras::default(),
         },
     ];
-    let bytes = encode_tiff_multi(&pages).unwrap();
+    let bytes = encode_pages(&pages).unwrap();
     // Header is BigTIFF, first IFD chain valid.
     assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 43);
-    let imgs = decode_tiff_all(&bytes).unwrap();
+    let imgs = decode_all(&bytes).unwrap();
     assert_eq!(imgs.len(), 2);
-    assert_eq!((imgs[0].width, imgs[0].height), (16, 12));
-    assert_eq!(imgs[0].planes[0].data, p1);
-    assert_eq!((imgs[1].width, imgs[1].height), (8, 8));
-    assert_eq!(imgs[1].planes[0].data, p2);
+    assert_eq!((imgs[0].image.width, imgs[0].image.height), (16, 12));
+    assert_eq!(imgs[0].image.planes[0].data, p1);
+    assert_eq!((imgs[1].image.width, imgs[1].image.height), (8, 8));
+    assert_eq!(imgs[1].image.planes[0].data, p2);
 }
 
 #[test]
@@ -454,7 +457,7 @@ fn bigtiff_multipage_must_agree_on_variant() {
             extras: PageExtras::default(),
         },
     ];
-    let err = encode_tiff_multi(&pages).unwrap_err();
+    let err = encode_pages(&pages).unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("bigtiff"), "error mentions bigtiff: {msg}");
 }
@@ -485,12 +488,12 @@ fn bigtiff_bilevel_ccitt_mh_roundtrip() {
         bigtiff: true,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (24, 8));
+    let bytes = encode_page(&page).unwrap();
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (24, 8));
     // The decoded plane is Gray8; alternating rows of 0xFF and 0x00
     // following the WhiteIsZero photometric the bilevel encoder writes.
-    let plane = &d.frame.planes[0].data;
+    let plane = &d.image.planes[0].data;
     assert_eq!(plane.len(), 24 * 8);
     for y in 0..8 {
         let want = if y % 2 == 0 { 0x00 } else { 0xFF };

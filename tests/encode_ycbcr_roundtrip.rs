@@ -31,7 +31,7 @@
 //!      writer remain rejected with a precise error.
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
     TiffPixelFormat,
 };
 
@@ -159,7 +159,7 @@ fn encoder_ycbcr24_neutral_gradient_matches_handbuilt() {
     let pixels: Vec<u8> = vec![0, 128, 128, 85, 128, 128, 170, 128, 128, 255, 128, 128];
 
     let handbuilt = build_classic_ycbcr_tiff(4, 1, &pixels);
-    let want = decode_tiff(&handbuilt).unwrap().frame.planes[0]
+    let want = decode_page(&handbuilt).unwrap().image.planes[0]
         .data
         .clone();
 
@@ -174,11 +174,11 @@ fn encoder_ycbcr24_neutral_gradient_matches_handbuilt() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (4, 1));
-    assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
-    assert_eq!(d.frame.planes[0].data, want);
+    let bytes = encode_page(&page).unwrap();
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (4, 1));
+    assert_eq!(d.image.format, TiffPixelFormat::Rgb24);
+    assert_eq!(d.image.planes[0].data, want);
 }
 
 #[test]
@@ -196,7 +196,7 @@ fn encoder_ycbcr24_chromatic_primaries_match_handbuilt() {
     for (y, cb, cr, label) in cases {
         let pixels = vec![*y, *cb, *cr];
         let handbuilt = build_classic_ycbcr_tiff(1, 1, &pixels);
-        let want = decode_tiff(&handbuilt).unwrap().frame.planes[0]
+        let want = decode_page(&handbuilt).unwrap().image.planes[0]
             .data
             .clone();
 
@@ -211,9 +211,9 @@ fn encoder_ycbcr24_chromatic_primaries_match_handbuilt() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!(d.frame.planes[0].data, want, "case {label}");
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!(d.image.planes[0].data, want, "case {label}");
     }
 }
 
@@ -243,9 +243,9 @@ fn encoder_ycbcr24_compressors_lossless() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        decode_tiff(&encode_tiff(&page).unwrap())
+        decode_page(&encode_page(&page).unwrap())
             .unwrap()
-            .frame
+            .image
             .planes[0]
             .data
             .clone()
@@ -267,8 +267,8 @@ fn encoder_ycbcr24_compressors_lossless() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
-        assert_eq!(d.frame.planes[0].data, baseline, "compressor {:?}", c);
+        let d = decode_page(&encode_page(&page).unwrap()).unwrap();
+        assert_eq!(d.image.planes[0].data, baseline, "compressor {:?}", c);
     }
 }
 
@@ -294,7 +294,7 @@ fn encoder_ycbcr24_444_rejects_ccitt_only() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    assert!(encode_tiff(&page).is_err(), "CCITT must reject");
+    assert!(encode_page(&page).is_err(), "CCITT must reject");
 }
 
 #[test]
@@ -325,7 +325,7 @@ fn encoder_ycbcr_subsampled_rejects_chunky_predictor_tiled_planar_encodes() {
             extras: PageExtras::default(),
         };
         assert!(
-            encode_tiff(&tiled_planar_page).is_ok(),
+            encode_page(&tiled_planar_page).is_ok(),
             "subsampled ({sh},{sv}) tiled planar must encode (TN2-amended §21)"
         );
 
@@ -344,7 +344,7 @@ fn encoder_ycbcr_subsampled_rejects_chunky_predictor_tiled_planar_encodes() {
             extras: PageExtras::default(),
         };
         assert!(
-            encode_tiff(&pred_page).is_err(),
+            encode_page(&pred_page).is_err(),
             "subsampled ({sh},{sv}) predictor must reject"
         );
     }
@@ -410,12 +410,12 @@ fn encoder_ycbcr24_tiled_444_roundtrips_against_strip() {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            let ds = decode_tiff(&encode_tiff(&strip).unwrap()).unwrap();
-            let dt = decode_tiff(&encode_tiff(&tiled).unwrap()).unwrap();
-            assert_eq!((dt.width, dt.height), (w, h));
-            assert_eq!(dt.pixel_format, TiffPixelFormat::Rgb24);
+            let ds = decode_page(&encode_page(&strip).unwrap()).unwrap();
+            let dt = decode_page(&encode_page(&tiled).unwrap()).unwrap();
+            assert_eq!((dt.image.width, dt.image.height), (w, h));
+            assert_eq!(dt.image.format, TiffPixelFormat::Rgb24);
             assert_eq!(
-                dt.frame.planes[0].data, ds.frame.planes[0].data,
+                dt.image.planes[0].data, ds.image.planes[0].data,
                 "tiled 4:4:4 YCbCr diverged from strip for {w}x{h} tile {tile:?} comp {comp:?}"
             );
         }
@@ -472,12 +472,12 @@ fn encoder_ycbcr24_planar_444_roundtrips_against_chunky() {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            let dc = decode_tiff(&encode_tiff(&chunky).unwrap()).unwrap();
-            let dp = decode_tiff(&encode_tiff(&planar).unwrap()).unwrap();
-            assert_eq!((dp.width, dp.height), (w, h));
-            assert_eq!(dp.pixel_format, TiffPixelFormat::Rgb24);
+            let dc = decode_page(&encode_page(&chunky).unwrap()).unwrap();
+            let dp = decode_page(&encode_page(&planar).unwrap()).unwrap();
+            assert_eq!((dp.image.width, dp.image.height), (w, h));
+            assert_eq!(dp.image.format, TiffPixelFormat::Rgb24);
             assert_eq!(
-                dp.frame.planes[0].data, dc.frame.planes[0].data,
+                dp.image.planes[0].data, dc.image.planes[0].data,
                 "planar 4:4:4 YCbCr diverged from chunky for {w}x{h} tile {tile:?} comp {comp:?}"
             );
         }
@@ -534,11 +534,11 @@ fn encoder_ycbcr24_predictor_444_roundtrips_against_unpredicted() {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            let d0 = decode_tiff(&encode_tiff(&plain).unwrap()).unwrap();
-            let d1 = decode_tiff(&encode_tiff(&predicted).unwrap()).unwrap();
-            assert_eq!((d1.width, d1.height), (w, h));
+            let d0 = decode_page(&encode_page(&plain).unwrap()).unwrap();
+            let d1 = decode_page(&encode_page(&predicted).unwrap()).unwrap();
+            assert_eq!((d1.image.width, d1.image.height), (w, h));
             assert_eq!(
-                d1.frame.planes[0].data, d0.frame.planes[0].data,
+                d1.image.planes[0].data, d0.image.planes[0].data,
                 "predicted 4:4:4 YCbCr diverged from plain for {w}x{h} planar={planar} \
                  tile {tile:?} comp {comp:?}"
             );
@@ -567,9 +567,9 @@ fn encoder_ycbcr24_planar_predictor_compose() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        decode_tiff(&encode_tiff(&page).unwrap())
+        decode_page(&encode_page(&page).unwrap())
             .unwrap()
-            .frame
+            .image
             .planes[0]
             .data
             .clone()
@@ -591,9 +591,9 @@ fn encoder_ycbcr24_planar_predictor_compose() {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
+            let d = decode_page(&encode_page(&page).unwrap()).unwrap();
             assert_eq!(
-                d.frame.planes[0].data, oracle,
+                d.image.planes[0].data, oracle,
                 "planar+predictor 4:4:4 YCbCr diverged for comp {comp:?} tile {tile:?}"
             );
         }
@@ -620,9 +620,9 @@ fn encoder_ycbcr24_subsampled_111_planar_predictor_compose() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        decode_tiff(&encode_tiff(&page).unwrap())
+        decode_page(&encode_page(&page).unwrap())
             .unwrap()
-            .frame
+            .image
             .planes[0]
             .data
             .clone()
@@ -641,9 +641,9 @@ fn encoder_ycbcr24_subsampled_111_planar_predictor_compose() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
+    let d = decode_page(&encode_page(&page).unwrap()).unwrap();
     assert_eq!(
-        d.frame.planes[0].data, oracle,
+        d.image.planes[0].data, oracle,
         "subsampled(1,1) planar+predictor diverged from chunky 4:4:4"
     );
 }
@@ -670,7 +670,7 @@ fn encoder_ycbcr_subsampled_tiled_rejects_non_multiple_tile() {
         extras: PageExtras::default(),
     };
     assert!(
-        encode_tiff(&page).is_err(),
+        encode_page(&page).is_err(),
         "non-multiple tile geometry must reject"
     );
 }
@@ -691,7 +691,7 @@ fn encoder_ycbcr24_rejects_size_mismatch() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    assert!(encode_tiff(&page).is_err());
+    assert!(encode_page(&page).is_err());
 }
 
 #[test]
@@ -720,9 +720,9 @@ fn encoder_ycbcr24_bigtiff_composes() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        decode_tiff(&encode_tiff(&page).unwrap())
+        decode_page(&encode_page(&page).unwrap())
             .unwrap()
-            .frame
+            .image
             .planes[0]
             .data
             .clone()
@@ -739,9 +739,9 @@ fn encoder_ycbcr24_bigtiff_composes() {
             bigtiff: true,
             extras: PageExtras::default(),
         };
-        decode_tiff(&encode_tiff(&page).unwrap())
+        decode_page(&encode_page(&page).unwrap())
             .unwrap()
-            .frame
+            .image
             .planes[0]
             .data
             .clone()
@@ -847,7 +847,7 @@ fn encoder_ycbcr24_writes_photometric_samples_subsampling_positioning_rbw() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
 
     // 262 PhotometricInterpretation = 6 (YCbCr).
     assert_eq!(read_ifd_entry_value_short(&bytes, 262), Some(6));
@@ -869,8 +869,8 @@ fn encoder_ycbcr24_writes_photometric_samples_subsampling_positioning_rbw() {
 #[test]
 fn encoder_ycbcr24_multi_page_chain() {
     // Multi-IFD chain mixing a YCbCr page with a Gray8 page must walk
-    // cleanly via decode_tiff_all.
-    use oxideav_tiff::encode_tiff_multi;
+    // cleanly via decode_all.
+    use oxideav_tiff::encode_pages;
     let ycbcr = vec![100u8, 128, 128, 150u8, 130, 120];
     let gray = vec![10u8, 20, 30, 40];
     let pages = vec![
@@ -897,10 +897,10 @@ fn encoder_ycbcr24_multi_page_chain() {
             extras: PageExtras::default(),
         },
     ];
-    let bytes = encode_tiff_multi(&pages).unwrap();
-    let imgs = oxideav_tiff::decode_tiff_all(&bytes).unwrap();
+    let bytes = encode_pages(&pages).unwrap();
+    let imgs = oxideav_tiff::decode_all(&bytes).unwrap();
     assert_eq!(imgs.len(), 2);
-    assert_eq!(imgs[0].pixel_format, TiffPixelFormat::Rgb24);
-    assert_eq!(imgs[1].pixel_format, TiffPixelFormat::Gray8);
-    assert_eq!(imgs[1].planes[0].data, gray);
+    assert_eq!(imgs[0].image.format, TiffPixelFormat::Rgb24);
+    assert_eq!(imgs[1].image.format, TiffPixelFormat::Gray8);
+    assert_eq!(imgs[1].image.planes[0].data, gray);
 }

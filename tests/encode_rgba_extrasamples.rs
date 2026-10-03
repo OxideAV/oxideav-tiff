@@ -14,7 +14,7 @@
 
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, ExtraSampleKind, PageExtras,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, ExtraSampleKind, PageExtras,
     TiffCompression, TiffPixelFormat,
 };
 
@@ -60,16 +60,31 @@ fn page<'a>(
     }
 }
 
+/// The display render of a decoded RGB(+extra) page: `Rgb24` pages
+/// (unspecified / associated-alpha extras, dropped per the decoder's
+/// §ExtraSamples policy) are returned as stored; an unassociated-alpha
+/// page comes back in the native `Rgba` layout and `to_rgb8` drops the
+/// straight alpha. Either way the bytes equal the leading RGB triples.
 fn decode_rgb(tiff: &[u8]) -> Vec<u8> {
-    let d = decode_tiff(tiff).expect("decode failed");
-    assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
-    let stride = d.frame.planes[0].stride;
-    let row_bytes = d.width as usize * 3;
-    let mut out = Vec::with_capacity(row_bytes * d.height as usize);
-    for y in 0..d.height as usize {
-        out.extend_from_slice(&d.frame.planes[0].data[y * stride..y * stride + row_bytes]);
-    }
-    out
+    let d = decode_page(tiff).expect("decode failed");
+    assert!(
+        matches!(
+            d.image.format,
+            TiffPixelFormat::Rgb24 | TiffPixelFormat::Rgba
+        ),
+        "{:?}",
+        d.image.format
+    );
+    d.image.to_rgb8()
+}
+
+/// Native-layout check for the unassociated-alpha kind: the decoder
+/// hands the straight RGBA quadruples back verbatim as `Rgba`.
+fn decode_rgba_native(tiff: &[u8]) -> Vec<u8> {
+    let d = decode_page(tiff).expect("decode failed");
+    assert_eq!(d.image.format, TiffPixelFormat::Rgba);
+    assert_eq!(d.image.planes[0].stride, d.image.width as usize * 4);
+    d.image.planes[0].data.clone()
 }
 
 const COMPRESSORS: [TiffCompression; 5] = [
@@ -101,12 +116,19 @@ fn rgba_strip_roundtrip() {
                     predictor,
                     ..page(w, h, &rgba, kind, compression)
                 };
-                let tiff = encode_tiff(&p).expect("encode failed");
+                let tiff = encode_page(&p).expect("encode failed");
                 assert_eq!(
                     decode_rgb(&tiff),
                     want,
                     "rgba {kind:?} {compression:?} predictor={predictor}"
                 );
+                if kind == ExtraSampleKind::UnassociatedAlpha {
+                    assert_eq!(
+                        decode_rgba_native(&tiff),
+                        rgba,
+                        "rgba native {compression:?} predictor={predictor}"
+                    );
+                }
             }
         }
     }
@@ -132,7 +154,7 @@ fn rgba_tiled_and_planar_roundtrip() {
             )
         };
         assert_eq!(
-            decode_rgb(&encode_tiff(&p).expect("tiled encode")),
+            decode_rgb(&encode_page(&p).expect("tiled encode")),
             want,
             "tiled predictor={predictor}"
         );
@@ -148,7 +170,7 @@ fn rgba_tiled_and_planar_roundtrip() {
             )
         };
         assert_eq!(
-            decode_rgb(&encode_tiff(&p).expect("planar encode")),
+            decode_rgb(&encode_page(&p).expect("planar encode")),
             want,
             "planar predictor={predictor}"
         );
@@ -172,7 +194,7 @@ fn rgba_bigtiff_roundtrip() {
             TiffCompression::Zstd,
         )
     };
-    assert_eq!(decode_rgb(&encode_tiff(&p).expect("encode")), rgb_of(&rgba));
+    assert_eq!(decode_rgb(&encode_page(&p).expect("encode")), rgb_of(&rgba));
 }
 
 /// The written IFD carries the §ExtraSamples field set, and the raw
@@ -195,7 +217,7 @@ fn rgba_ifd_tags_and_raw_bytes() {
         ),
     ] {
         let tiff =
-            encode_tiff(&page(w, h, &rgba, kind, TiffCompression::None)).expect("encode failed");
+            encode_page(&page(w, h, &rgba, kind, TiffCompression::None)).expect("encode failed");
         let hd = parse_header(&tiff).unwrap();
         let (entries, _) =
             parse_ifd(&tiff, hd.byte_order, hd.variant, hd.first_ifd_offset).unwrap();
@@ -230,7 +252,7 @@ fn rgba_ifd_tags_and_raw_bytes() {
 #[test]
 fn rgba_rejections() {
     let rgba = pixels_rgba(4, 4);
-    let e = encode_tiff(&page(
+    let e = encode_page(&page(
         8,
         8,
         &rgba,
@@ -239,7 +261,7 @@ fn rgba_rejections() {
     ))
     .unwrap_err();
     assert!(format!("{e:?}").contains("Rgba32"), "{e:?}");
-    let e = encode_tiff(&page(
+    let e = encode_page(&page(
         4,
         4,
         &rgba,
@@ -280,7 +302,7 @@ fn rgba_imagemagick_reads_our_output() {
             TiffCompression::Lzw,
         )
     };
-    let tiff = encode_tiff(&p).expect("encode failed");
+    let tiff = encode_page(&p).expect("encode failed");
 
     let dir = std::env::temp_dir().join(format!("oxideav-tiff-rgba-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

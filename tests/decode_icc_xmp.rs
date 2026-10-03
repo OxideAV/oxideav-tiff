@@ -21,7 +21,7 @@
 //! two-page chain) so the reader is exercised against layouts this
 //! crate's encoder does not produce.
 
-use oxideav_tiff::{decode_tiff, decode_tiff_all_pages};
+use oxideav_tiff::{decode_page, decode_pages};
 
 // Field types (TIFF 6.0 §2).
 const TYPE_BYTE: u16 = 1;
@@ -244,10 +244,10 @@ fn classic_le_xmp_and_icc_extract_byte_exact() {
         spec(TAG_ICC, TYPE_UNDEFINED, icc.len() as u64, icc.clone()),
     ];
     let file = build_classic(true, &[extras]);
-    let d = decode_tiff(&file).expect("decode");
+    let d = decode_page(&file).expect("decode");
     assert_eq!(d.metadata.xmp.as_deref(), Some(xmp.as_slice()));
     assert_eq!(d.metadata.icc_profile.as_deref(), Some(icc.as_slice()));
-    assert_eq!(d.width, 1);
+    assert_eq!(d.image.width, 1);
 }
 
 #[test]
@@ -262,8 +262,8 @@ fn classic_be_payloads_identical_to_le() {
         spec(TAG_XMP, TYPE_BYTE, xmp.len() as u64, xmp.clone()),
         spec(TAG_ICC, TYPE_UNDEFINED, icc.len() as u64, icc.clone()),
     ];
-    let le = decode_tiff(&build_classic(true, std::slice::from_ref(&extras))).expect("decode II");
-    let be = decode_tiff(&build_classic(false, &[extras])).expect("decode MM");
+    let le = decode_page(&build_classic(true, std::slice::from_ref(&extras))).expect("decode II");
+    let be = decode_page(&build_classic(false, &[extras])).expect("decode MM");
     assert_eq!(le.metadata.xmp, be.metadata.xmp);
     assert_eq!(le.metadata.icc_profile, be.metadata.icc_profile);
     assert_eq!(be.metadata.xmp.as_deref(), Some(xmp.as_slice()));
@@ -280,7 +280,7 @@ fn type_variants_accepted_both_ways() {
         spec(TAG_XMP, TYPE_UNDEFINED, xmp.len() as u64, xmp.clone()),
         spec(TAG_ICC, TYPE_BYTE, icc.len() as u64, icc.clone()),
     ];
-    let d = decode_tiff(&build_classic(true, &[extras])).expect("decode");
+    let d = decode_page(&build_classic(true, &[extras])).expect("decode");
     assert_eq!(d.metadata.xmp.as_deref(), Some(xmp.as_slice()));
     assert_eq!(d.metadata.icc_profile.as_deref(), Some(icc.as_slice()));
 }
@@ -290,9 +290,9 @@ fn wrong_field_type_drops_field_without_gating_decode() {
     // A SHORT-typed tag 700 is not an opaque byte payload; the field
     // is dropped, the pixels still decode.
     let extras = vec![spec(TAG_XMP, TYPE_SHORT, 2, vec![1, 0, 2, 0])];
-    let d = decode_tiff(&build_classic(true, &[extras])).expect("decode");
+    let d = decode_page(&build_classic(true, &[extras])).expect("decode");
     assert_eq!(d.metadata.xmp, None);
-    assert_eq!(d.width, 1);
+    assert_eq!(d.image.width, 1);
 }
 
 #[test]
@@ -301,7 +301,7 @@ fn inline_small_xmp_payload_extracts() {
     // "rare, essentially never for real ICC/XMP", but must work.
     let payload = vec![0x58, 0x4D, 0x50]; // 3 bytes, inline
     let extras = vec![spec(TAG_XMP, TYPE_BYTE, 3, payload.clone())];
-    let d = decode_tiff(&build_classic(true, &[extras])).expect("decode");
+    let d = decode_page(&build_classic(true, &[extras])).expect("decode");
     assert_eq!(d.metadata.xmp.as_deref(), Some(payload.as_slice()));
 }
 
@@ -312,9 +312,9 @@ fn icc_size_field_mismatch_is_malformed() {
     let mut icc = minimal_icc(160);
     icc[0..4].copy_from_slice(&159u32.to_be_bytes()); // lies by one
     let extras = vec![spec(TAG_ICC, TYPE_UNDEFINED, icc.len() as u64, icc)];
-    let d = decode_tiff(&build_classic(true, &[extras])).expect("decode");
+    let d = decode_page(&build_classic(true, &[extras])).expect("decode");
     assert_eq!(d.metadata.icc_profile, None);
-    assert_eq!(d.width, 1); // pixel decode not gated
+    assert_eq!(d.image.width, 1); // pixel decode not gated
 }
 
 #[test]
@@ -325,7 +325,7 @@ fn icc_size_field_swapped_for_le_file_is_malformed() {
     let le_size = 160u32.to_le_bytes();
     icc[0..4].copy_from_slice(&le_size);
     let extras = vec![spec(TAG_ICC, TYPE_UNDEFINED, icc.len() as u64, icc)];
-    let d = decode_tiff(&build_classic(true, &[extras])).expect("decode");
+    let d = decode_page(&build_classic(true, &[extras])).expect("decode");
     assert_eq!(d.metadata.icc_profile, None);
 }
 
@@ -336,14 +336,14 @@ fn icc_shorter_than_header_is_malformed() {
     let mut icc = vec![0u8; 100];
     icc[0..4].copy_from_slice(&100u32.to_be_bytes());
     let extras = vec![spec(TAG_ICC, TYPE_UNDEFINED, icc.len() as u64, icc)];
-    let d = decode_tiff(&build_classic(true, &[extras])).expect("decode");
+    let d = decode_page(&build_classic(true, &[extras])).expect("decode");
     assert_eq!(d.metadata.icc_profile, None);
 }
 
 #[test]
 fn empty_payload_is_dropped() {
     let extras = vec![spec(TAG_XMP, TYPE_BYTE, 0, vec![])];
-    let d = decode_tiff(&build_classic(true, &[extras])).expect("decode");
+    let d = decode_page(&build_classic(true, &[extras])).expect("decode");
     assert_eq!(d.metadata.xmp, None);
 }
 
@@ -358,7 +358,7 @@ fn xmp_non_utf8_bytes_surface_verbatim() {
         payload.len() as u64,
         payload.clone(),
     )];
-    let d = decode_tiff(&build_classic(true, &[extras])).expect("decode");
+    let d = decode_page(&build_classic(true, &[extras])).expect("decode");
     assert_eq!(d.metadata.xmp.as_deref(), Some(payload.as_slice()));
 }
 
@@ -372,7 +372,7 @@ fn bigtiff_both_orders_extract() {
             spec(TAG_ICC, TYPE_UNDEFINED, icc.len() as u64, icc.clone()),
         ];
         let file = build_bigtiff(le, &extras);
-        let d = decode_tiff(&file).expect("decode BigTIFF");
+        let d = decode_page(&file).expect("decode BigTIFF");
         assert_eq!(d.metadata.xmp.as_deref(), Some(xmp.as_slice()), "le={le}");
         assert_eq!(
             d.metadata.icc_profile.as_deref(),
@@ -388,15 +388,15 @@ fn bigtiff_inline_8_byte_payload_extracts() {
     // payload lives in the value slot itself.
     let payload = vec![1, 2, 3, 4, 5, 6, 7, 8];
     let extras = vec![spec(TAG_XMP, TYPE_BYTE, 8, payload.clone())];
-    let d = decode_tiff(&build_bigtiff(true, &extras)).expect("decode");
+    let d = decode_page(&build_bigtiff(true, &extras)).expect("decode");
     assert_eq!(d.metadata.xmp.as_deref(), Some(payload.as_slice()));
 }
 
 #[test]
 fn multi_page_chain_keeps_per_page_payloads() {
     // Two chained IFDs, each with its own XMP packet; page 2 also
-    // carries an ICC profile. decode_tiff_all_pages must keep them
-    // separate; decode_tiff sees only IFD0's.
+    // carries an ICC profile. decode_pages must keep them
+    // separate; decode_page sees only IFD0's.
     let xmp1 = b"<x:xmpmeta>page one</x:xmpmeta>".to_vec();
     let xmp2 = b"<x:xmpmeta>page two, different bytes</x:xmpmeta>".to_vec();
     let icc2 = minimal_icc(144);
@@ -406,7 +406,7 @@ fn multi_page_chain_keeps_per_page_payloads() {
         spec(TAG_ICC, TYPE_UNDEFINED, icc2.len() as u64, icc2.clone()),
     ];
     let file = build_classic(true, &[page1, page2]);
-    let pages = decode_tiff_all_pages(&file).expect("decode all");
+    let pages = decode_pages(&file).expect("decode all");
     assert_eq!(pages.len(), 2);
     assert_eq!(pages[0].metadata.xmp.as_deref(), Some(xmp1.as_slice()));
     assert_eq!(pages[0].metadata.icc_profile, None);
@@ -415,6 +415,6 @@ fn multi_page_chain_keeps_per_page_payloads() {
         pages[1].metadata.icc_profile.as_deref(),
         Some(icc2.as_slice())
     );
-    let first = decode_tiff(&file).expect("decode first");
+    let first = decode_page(&file).expect("decode first");
     assert_eq!(first.metadata.xmp.as_deref(), Some(xmp1.as_slice()));
 }

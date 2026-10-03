@@ -15,7 +15,7 @@
 
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, RgbColor, TiffCompression,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, RgbColor, TiffCompression,
     TiffPixelFormat,
 };
 
@@ -71,13 +71,13 @@ fn gray_page<'a>(w: u32, h: u32, packed: &'a [u8], compression: TiffCompression)
 }
 
 fn decode_plane(tiff: &[u8], expect_pf: TiffPixelFormat, bytes_per_pixel: usize) -> Vec<u8> {
-    let d = decode_tiff(tiff).expect("decode failed");
-    assert_eq!(d.pixel_format, expect_pf);
-    let stride = d.frame.planes[0].stride;
-    let row_bytes = d.width as usize * bytes_per_pixel;
-    let mut out = Vec::with_capacity(row_bytes * d.height as usize);
-    for y in 0..d.height as usize {
-        out.extend_from_slice(&d.frame.planes[0].data[y * stride..y * stride + row_bytes]);
+    let d = decode_page(tiff).expect("decode failed");
+    assert_eq!(d.image.format, expect_pf);
+    let stride = d.image.planes[0].stride;
+    let row_bytes = d.image.width as usize * bytes_per_pixel;
+    let mut out = Vec::with_capacity(row_bytes * d.image.height as usize);
+    for y in 0..d.image.height as usize {
+        out.extend_from_slice(&d.image.planes[0].data[y * stride..y * stride + row_bytes]);
     }
     out
 }
@@ -104,7 +104,7 @@ fn gray4_strip_roundtrip() {
                 predictor,
                 ..gray_page(w, h, &packed, compression)
             };
-            let tiff = encode_tiff(&p).expect("encode failed");
+            let tiff = encode_page(&p).expect("encode failed");
             let got = decode_plane(&tiff, TiffPixelFormat::Gray8, 1);
             assert_eq!(got, want, "gray4 {compression:?} predictor={predictor}");
         }
@@ -137,12 +137,12 @@ fn gray4_tiled_matches_strip() {
                 ..gray_page(w, h, &packed, compression)
             };
             let t = decode_plane(
-                &encode_tiff(&tiled).expect("tiled encode"),
+                &encode_page(&tiled).expect("tiled encode"),
                 TiffPixelFormat::Gray8,
                 1,
             );
             let s = decode_plane(
-                &encode_tiff(&strip).expect("strip encode"),
+                &encode_page(&strip).expect("strip encode"),
                 TiffPixelFormat::Gray8,
                 1,
             );
@@ -166,7 +166,7 @@ fn gray4_oversized_single_tile() {
         tiling: Some((16, 16)),
         ..gray_page(w, h, &packed, TiffCompression::PackBits)
     };
-    let tiff = encode_tiff(&p).expect("encode failed");
+    let tiff = encode_page(&p).expect("encode failed");
     assert_eq!(
         decode_plane(&tiff, TiffPixelFormat::Gray8, 1),
         expected_gray(&nibs)
@@ -185,15 +185,16 @@ fn gray4_bigtiff_roundtrip() {
         predictor: true,
         ..gray_page(w, h, &packed, TiffCompression::Deflate)
     };
-    let tiff = encode_tiff(&p).expect("encode failed");
+    let tiff = encode_page(&p).expect("encode failed");
     assert_eq!(
         decode_plane(&tiff, TiffPixelFormat::Gray8, 1),
         expected_gray(&nibs)
     );
 }
 
-/// 4-bit palette: strip and tiled layouts render through the 48-SHORT
-/// ColorMap back to the palette's Rgb24 colors.
+/// 4-bit palette: strip and tiled layouts come back as native `Pal8`
+/// (one unpacked index per byte) with the 48-SHORT ColorMap as the
+/// palette, and render through it to the palette's Rgb24 colors.
 #[test]
 fn palette4_roundtrip() {
     let (w, h) = (21u32, 9u32);
@@ -220,9 +221,23 @@ fn palette4_roundtrip() {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            let tiff = encode_tiff(&p).expect("encode failed");
-            let got = decode_plane(&tiff, TiffPixelFormat::Rgb24, 3);
-            assert_eq!(got, want, "palette4 {compression:?} tiling={tiling:?}");
+            let tiff = encode_page(&p).expect("encode failed");
+            let got = decode_plane(&tiff, TiffPixelFormat::Pal8, 1);
+            assert_eq!(
+                got, nibs,
+                "palette4 indices {compression:?} tiling={tiling:?}"
+            );
+            let d = decode_page(&tiff).expect("decode failed");
+            assert_eq!(
+                d.image.palette.as_ref().map(|p| p.to_rgb_triples()),
+                Some(palette.clone()),
+                "palette4 ColorMap {compression:?} tiling={tiling:?}"
+            );
+            assert_eq!(
+                d.image.to_rgb8(),
+                want,
+                "palette4 {compression:?} tiling={tiling:?}"
+            );
         }
     }
 }
@@ -251,7 +266,7 @@ fn subbyte4_ifd_tags() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let tiff = encode_tiff(&p).expect("encode failed");
+    let tiff = encode_page(&p).expect("encode failed");
     let hd = parse_header(&tiff).unwrap();
     let (entries, _) = parse_ifd(&tiff, hd.byte_order, hd.variant, hd.first_ifd_offset).unwrap();
     let bps = find(&entries, TAG_BITS_PER_SAMPLE)
@@ -275,7 +290,7 @@ fn subbyte4_rejections() {
     let nibs = nibbles(8, 4);
     let packed = pack4(&nibs, 8, 4);
     // Wrong buffer size.
-    let e = encode_tiff(&gray_page(16, 16, &packed, TiffCompression::None)).unwrap_err();
+    let e = encode_page(&gray_page(16, 16, &packed, TiffCompression::None)).unwrap_err();
     assert!(format!("{e:?}").contains("Gray4"), "{e:?}");
     // Palette with 17 entries.
     let palette: Vec<RgbColor> = (0..17u8).map(|i| [i, i, i]).collect();
@@ -293,17 +308,17 @@ fn subbyte4_rejections() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let e = encode_tiff(&p).unwrap_err();
+    let e = encode_page(&p).unwrap_err();
     assert!(format!("{e:?}").contains("1..=16"), "{e:?}");
     // CCITT requires Bilevel / TransparencyMask input.
-    let e = encode_tiff(&gray_page(8, 4, &packed, TiffCompression::CcittRle)).unwrap_err();
+    let e = encode_page(&gray_page(8, 4, &packed, TiffCompression::CcittRle)).unwrap_err();
     assert!(format!("{e:?}").contains("Bilevel"), "{e:?}");
     // Planar is irrelevant at SamplesPerPixel = 1.
     let p = EncodePage {
         planar: true,
         ..gray_page(8, 4, &packed, TiffCompression::None)
     };
-    let e = encode_tiff(&p).unwrap_err();
+    let e = encode_page(&p).unwrap_err();
     assert!(format!("{e:?}").contains("PlanarConfiguration"), "{e:?}");
 }
 
@@ -334,7 +349,7 @@ fn gray4_imagemagick_reads_our_output() {
         predictor: true,
         ..gray_page(w, h, &packed, TiffCompression::Lzw)
     };
-    let tiff = encode_tiff(&p).expect("encode failed");
+    let tiff = encode_page(&p).expect("encode failed");
 
     let dir = std::env::temp_dir().join(format!("oxideav-tiff-gray4-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

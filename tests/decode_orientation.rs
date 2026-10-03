@@ -26,7 +26,7 @@
 //! A minimal `w`×`h` Gray8 classic-II TIFF carrying the raw pixel
 //! bytes in a single strip, optionally with an Orientation (274) entry.
 
-use oxideav_tiff::decode_tiff;
+use oxideav_tiff::decode_page;
 
 /// IFD entry, SHORT (field-type = 3) with a single inline value.
 fn entry_short(tag: u16, value: u16) -> [u8; 12] {
@@ -113,25 +113,25 @@ const FIXTURE: [u8; 6] = [10, 20, 30, 40, 50, 60];
 /// (width, height) and row-major Gray8 plane bytes.
 fn check(orientation: Option<u16>, exp_w: u32, exp_h: u32, exp: &[u8]) {
     let bytes = build_gray8(FW, FH, &FIXTURE, orientation);
-    let d = decode_tiff(&bytes).expect("fixture must decode");
+    let d = decode_page(&bytes).expect("fixture must decode");
     assert_eq!(
-        (d.width, d.height),
+        (d.image.width, d.image.height),
         (exp_w, exp_h),
         "orientation={orientation:?}: display dimensions"
     );
     assert_eq!(
-        d.frame.planes[0].data, exp,
+        d.image.planes[0].data, exp,
         "orientation={orientation:?}: display pixels"
     );
     // The single-plane Gray8 stride is exactly the display width.
-    assert_eq!(d.frame.planes[0].stride, exp_w as usize);
+    assert_eq!(d.image.planes[0].stride, exp_w as usize);
 }
 
-/// Helper: assert `decode_tiff` returned an error whose Display
-/// includes the given substring. `DecodedTiff` does not implement
+/// Helper: assert `decode_page` returned an error whose Display
+/// includes the given substring. `Page` does not implement
 /// `Debug`, so we drive the outcome through a `match`.
 fn expect_err_containing(bytes: &[u8], needle: &str) {
-    match decode_tiff(bytes) {
+    match decode_page(bytes) {
         Ok(_) => panic!("expected an error containing {needle:?}, got Ok(..)"),
         Err(e) => {
             let msg = format!("{e}");
@@ -226,12 +226,12 @@ fn orientation_round_trip_chain_is_consistent() {
     // would restore the original; here we just confirm 2 and 4 are
     // distinct from each other and from the identity, guarding against
     // a remap that collapses cases.
-    let id = decode_tiff(&build_gray8(FW, FH, &FIXTURE, Some(1))).unwrap();
-    let two = decode_tiff(&build_gray8(FW, FH, &FIXTURE, Some(2))).unwrap();
-    let four = decode_tiff(&build_gray8(FW, FH, &FIXTURE, Some(4))).unwrap();
-    assert_ne!(id.frame.planes[0].data, two.frame.planes[0].data);
-    assert_ne!(id.frame.planes[0].data, four.frame.planes[0].data);
-    assert_ne!(two.frame.planes[0].data, four.frame.planes[0].data);
+    let id = decode_page(&build_gray8(FW, FH, &FIXTURE, Some(1))).unwrap();
+    let two = decode_page(&build_gray8(FW, FH, &FIXTURE, Some(2))).unwrap();
+    let four = decode_page(&build_gray8(FW, FH, &FIXTURE, Some(4))).unwrap();
+    assert_ne!(id.image.planes[0].data, two.image.planes[0].data);
+    assert_ne!(id.image.planes[0].data, four.image.planes[0].data);
+    assert_ne!(two.image.planes[0].data, four.image.planes[0].data);
 }
 
 /// Assemble a minimal `w`×`h` RGB (3-channel, 8-bit, BlackIsZero
@@ -304,10 +304,10 @@ fn orientation_rgb24_rotates_90_cw() {
     // order is preserved top-to-bottom).
     let pixels = [11u8, 12, 13, 21, 22, 23];
     let bytes = build_rgb24(2, 1, &pixels, Some(6));
-    let d = decode_tiff(&bytes).expect("rgb fixture must decode");
-    assert_eq!((d.width, d.height), (1, 2));
-    assert_eq!(d.frame.planes[0].data, vec![11, 12, 13, 21, 22, 23]);
-    assert_eq!(d.frame.planes[0].stride, 3);
+    let d = decode_page(&bytes).expect("rgb fixture must decode");
+    assert_eq!((d.image.width, d.image.height), (1, 2));
+    assert_eq!(d.image.planes[0].data, vec![11, 12, 13, 21, 22, 23]);
+    assert_eq!(d.image.planes[0].stride, 3);
 }
 
 #[test]
@@ -315,9 +315,9 @@ fn orientation_rgb24_mirrors_horizontally() {
     // bpp = 3, Orientation 2 on a 2×1 image swaps the two pixels.
     let pixels = [11u8, 12, 13, 21, 22, 23];
     let bytes = build_rgb24(2, 1, &pixels, Some(2));
-    let d = decode_tiff(&bytes).expect("rgb fixture must decode");
-    assert_eq!((d.width, d.height), (2, 1));
-    assert_eq!(d.frame.planes[0].data, vec![21, 22, 23, 11, 12, 13]);
+    let d = decode_page(&bytes).expect("rgb fixture must decode");
+    assert_eq!((d.image.width, d.image.height), (2, 1));
+    assert_eq!(d.image.planes[0].data, vec![21, 22, 23, 11, 12, 13]);
 }
 
 #[test]

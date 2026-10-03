@@ -11,7 +11,7 @@ use std::io::Cursor;
 
 use oxideav_core::CodecRegistry;
 use oxideav_tiff::container::open_demuxer;
-use oxideav_tiff::{encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression};
+use oxideav_tiff::{encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression};
 
 fn minimal_icc(total_len: usize) -> Vec<u8> {
     assert!(total_len >= 132);
@@ -38,7 +38,7 @@ fn demuxer_exposes_metadata_and_attachments() {
         icc_profile: Some(&icc),
         ..Default::default()
     };
-    let tiff = encode_tiff(&EncodePage {
+    let tiff = encode_page(&EncodePage {
         width: 8,
         height: 8,
         kind: EncodePixelFormat::Gray8 { pixels: &px },
@@ -81,7 +81,7 @@ fn demuxer_exposes_metadata_and_attachments() {
 #[test]
 fn demuxer_without_payloads_has_empty_surfaces() {
     let px: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
-    let tiff = encode_tiff(&EncodePage {
+    let tiff = encode_page(&EncodePage {
         width: 8,
         height: 8,
         kind: EncodePixelFormat::Gray8 { pixels: &px },

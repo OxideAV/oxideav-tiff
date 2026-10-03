@@ -28,7 +28,7 @@
 //! the fixture so it is always appended last in tag-order — no
 //! re-ordering of the existing entry stream is required.
 
-use oxideav_tiff::decode_tiff;
+use oxideav_tiff::decode_page;
 
 /// IFD entry, SHORT (field-type = 3) with a single inline value.
 fn entry_short(tag: u16, value: u16) -> [u8; 12] {
@@ -84,12 +84,12 @@ fn build_1x1_gray8(resolution_unit: Option<u16>) -> Vec<u8> {
     out
 }
 
-/// Helper: assert `decode_tiff` returned an error whose Display
-/// includes the given substring. `DecodedTiff` does not implement
+/// Helper: assert `decode_page` returned an error whose Display
+/// includes the given substring. `Page` does not implement
 /// `Debug`, so we can't use `.unwrap_err()` and instead drive the
 /// outcome through a `match`.
 fn expect_err_containing(bytes: &[u8], needle: &str) {
-    match decode_tiff(bytes) {
+    match decode_page(bytes) {
         Ok(_) => panic!("expected an error containing {needle:?}, got Ok(..)"),
         Err(e) => {
             let msg = format!("{e}");
@@ -108,9 +108,9 @@ fn resolution_unit_absent_decodes_with_default() {
     // the existing pixel path — the decoder treats the field as
     // metadata only.
     let bytes = build_1x1_gray8(None);
-    let d = decode_tiff(&bytes).expect("baseline 1x1 Gray8 must decode");
-    assert_eq!((d.width, d.height), (1, 1));
-    assert_eq!(d.frame.planes[0].data, vec![0xAB]);
+    let d = decode_page(&bytes).expect("baseline 1x1 Gray8 must decode");
+    assert_eq!((d.image.width, d.image.height), (1, 1));
+    assert_eq!(d.image.planes[0].data, vec![0xAB]);
 }
 
 #[test]
@@ -119,9 +119,9 @@ fn resolution_unit_one_no_absolute_unit_decodes() {
     // permitted value per §"Physical Dimensions". The decoder must
     // accept it.
     let bytes = build_1x1_gray8(Some(1));
-    let d = decode_tiff(&bytes).expect("ResolutionUnit=1 must decode");
-    assert_eq!((d.width, d.height), (1, 1));
-    assert_eq!(d.frame.planes[0].data, vec![0xAB]);
+    let d = decode_page(&bytes).expect("ResolutionUnit=1 must decode");
+    assert_eq!((d.image.width, d.image.height), (1, 1));
+    assert_eq!(d.image.planes[0].data, vec![0xAB]);
 }
 
 #[test]
@@ -131,9 +131,9 @@ fn resolution_unit_two_inch_decodes() {
     // unchanged pixel path. Output is identical to the absent-tag
     // case.
     let bytes = build_1x1_gray8(Some(2));
-    let d = decode_tiff(&bytes).expect("ResolutionUnit=2 must decode");
-    assert_eq!((d.width, d.height), (1, 1));
-    assert_eq!(d.frame.planes[0].data, vec![0xAB]);
+    let d = decode_page(&bytes).expect("ResolutionUnit=2 must decode");
+    assert_eq!((d.image.width, d.image.height), (1, 1));
+    assert_eq!(d.image.planes[0].data, vec![0xAB]);
 }
 
 #[test]
@@ -141,9 +141,9 @@ fn resolution_unit_three_centimeter_decodes() {
     // `ResolutionUnit = 3` ("Centimeter") is the third spec-defined
     // value. The decoder must accept it.
     let bytes = build_1x1_gray8(Some(3));
-    let d = decode_tiff(&bytes).expect("ResolutionUnit=3 must decode");
-    assert_eq!((d.width, d.height), (1, 1));
-    assert_eq!(d.frame.planes[0].data, vec![0xAB]);
+    let d = decode_page(&bytes).expect("ResolutionUnit=3 must decode");
+    assert_eq!((d.image.width, d.image.height), (1, 1));
+    assert_eq!(d.image.planes[0].data, vec![0xAB]);
 }
 
 #[test]

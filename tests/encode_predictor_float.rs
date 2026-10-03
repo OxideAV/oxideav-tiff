@@ -11,7 +11,7 @@
 //! Two complementary, binary-independent oracles run here:
 //!
 //!   * **Display-plane oracle.** Encode float pixels, decode through the
-//!     public `decode_tiff`, and compare against the decoder's display
+//!     public `decode_page`, and compare against the decoder's display
 //!     map computed *directly in the test* from the input floats (a
 //!     linear map of the finite sample extent onto 0..=255). A predictor
 //!     that did not reverse exactly, or a SampleFormat tag that misrouted
@@ -31,8 +31,8 @@
 //! §SampleFormat and the §14 floating-point predictor.
 
 use oxideav_tiff::{
-    decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    PageExtras, TiffCompression, TiffPixelFormat,
+    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
+    TiffCompression, TiffPixelFormat,
 };
 
 // ---------------------------------------------------------------------------
@@ -177,11 +177,11 @@ fn grayf32_predictor_roundtrip_matches_unpredicted() {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            let bytes = encode_tiff(&page).expect("encode GrayF32");
-            let dec = decode_tiff(&bytes).expect("decode GrayF32");
-            assert_eq!(dec.frame.pixel_format, TiffPixelFormat::Gray8);
+            let bytes = encode_page(&page).expect("encode GrayF32");
+            let dec = decode_page(&bytes).expect("decode GrayF32");
+            assert_eq!(dec.image.format, TiffPixelFormat::Gray8);
             assert_eq!(
-                dec.frame.planes[0].data, want,
+                dec.image.planes[0].data, want,
                 "GrayF32 comp={comp:?} predictor={predictor} display plane mismatch"
             );
         }
@@ -204,7 +204,7 @@ fn grayf32_emits_sampleformat_and_predictor_tags() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let t1 = encode_tiff(&p1).unwrap();
+    let t1 = encode_page(&p1).unwrap();
     let (sf_type, sf_count, sf_val) = find_tag(&t1, 339).expect("SampleFormat tag present");
     assert_eq!(sf_type, 3, "SampleFormat field type SHORT");
     assert_eq!(sf_count, 1, "one SampleFormat value for grayscale");
@@ -216,7 +216,7 @@ fn grayf32_emits_sampleformat_and_predictor_tags() {
         predictor: true,
         ..p1.clone()
     };
-    let t2 = encode_tiff(&p2).unwrap();
+    let t2 = encode_page(&p2).unwrap();
     let (_, _, pv) = find_tag(&t2, 317).expect("Predictor tag present");
     assert_eq!(pv & 0xFFFF, 3, "Predictor = 3 (float predictor)");
 }
@@ -239,7 +239,7 @@ fn grayf32_raw_predictor_reverses_to_input() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let tiff = encode_tiff(&page).unwrap();
+    let tiff = encode_page(&page).unwrap();
     let mut strip = single_strip(&tiff);
     reverse_float_predictor(&mut strip, w as usize, h as usize, 4);
     assert_eq!(
@@ -267,10 +267,10 @@ fn grayf64_predictor_roundtrip_matches_unpredicted() {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            let bytes = encode_tiff(&page).unwrap();
-            let dec = decode_tiff(&bytes).unwrap();
+            let bytes = encode_page(&page).unwrap();
+            let dec = decode_page(&bytes).unwrap();
             assert_eq!(
-                dec.frame.planes[0].data, want,
+                dec.image.planes[0].data, want,
                 "GrayF64 comp={comp:?} pred={predictor}"
             );
         }
@@ -314,11 +314,11 @@ fn rgbf32_predictor_roundtrip_matches_unpredicted() {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            let bytes = encode_tiff(&page).unwrap();
-            let dec = decode_tiff(&bytes).unwrap();
-            assert_eq!(dec.frame.pixel_format, TiffPixelFormat::Rgb24);
+            let bytes = encode_page(&page).unwrap();
+            let dec = decode_page(&bytes).unwrap();
+            assert_eq!(dec.image.format, TiffPixelFormat::Rgb24);
             assert_eq!(
-                dec.frame.planes[0].data, want,
+                dec.image.planes[0].data, want,
                 "RgbF32 comp={comp:?} predictor={predictor} display plane mismatch"
             );
         }
@@ -339,7 +339,7 @@ fn rgbf32_sampleformat_is_three_values() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let tiff = encode_tiff(&page).unwrap();
+    let tiff = encode_page(&page).unwrap();
     let (sf_type, sf_count, _off) = find_tag(&tiff, 339).expect("SampleFormat present");
     assert_eq!(sf_type, 3);
     assert_eq!(sf_count, 3, "one SampleFormat value per RGB component");
@@ -369,7 +369,7 @@ fn rgbf32_raw_predictor_reverses_to_input() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let tiff = encode_tiff(&page).unwrap();
+    let tiff = encode_page(&page).unwrap();
     let mut strip = single_strip(&tiff);
     // Width in samples = image width * 3 components.
     reverse_float_predictor(&mut strip, w as usize * 3, h as usize, 4);
@@ -393,9 +393,9 @@ fn rgbf64_predictor_roundtrip_matches_unpredicted() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let dec = decode_tiff(&bytes).unwrap();
-        assert_eq!(dec.frame.planes[0].data, want, "RgbF64 pred={predictor}");
+        let bytes = encode_page(&page).unwrap();
+        let dec = decode_page(&bytes).unwrap();
+        assert_eq!(dec.image.planes[0].data, want, "RgbF64 pred={predictor}");
     }
 }
 
@@ -423,10 +423,10 @@ fn grayf32_tiled_matches_strip() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let dec = decode_tiff(&bytes).unwrap();
+        let bytes = encode_page(&page).unwrap();
+        let dec = decode_page(&bytes).unwrap();
         assert_eq!(
-            dec.frame.planes[0].data, want,
+            dec.image.planes[0].data, want,
             "GrayF32 tiled predictor={predictor} must match the strip display map"
         );
     }
@@ -448,15 +448,15 @@ fn rgbf32_bigtiff_roundtrip() {
         bigtiff: true,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     assert_eq!(&bytes[0..2], b"II");
     assert_eq!(
         u16::from_le_bytes([bytes[2], bytes[3]]),
         43,
         "BigTIFF magic 43"
     );
-    let dec = decode_tiff(&bytes).unwrap();
-    assert_eq!(dec.frame.planes[0].data, want);
+    let dec = decode_page(&bytes).unwrap();
+    assert_eq!(dec.image.planes[0].data, want);
 }
 
 #[test]
@@ -489,10 +489,10 @@ fn rgbf32_planar_matches_chunky() {
                     bigtiff: false,
                     extras: PageExtras::default(),
                 };
-                let bytes = encode_tiff(&page).unwrap();
-                let dec = decode_tiff(&bytes).unwrap();
+                let bytes = encode_page(&page).unwrap();
+                let dec = decode_page(&bytes).unwrap();
                 assert_eq!(
-                    dec.frame.planes[0].data, want,
+                    dec.image.planes[0].data, want,
                     "RgbF32 planar comp={comp:?} predictor={predictor} tiling={tiling:?} \
                      must match the chunky display map"
                 );
@@ -517,9 +517,9 @@ fn rgbf64_planar_predictor_matches_chunky() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let dec = decode_tiff(&bytes).unwrap();
-    assert_eq!(dec.frame.planes[0].data, want);
+    let bytes = encode_page(&page).unwrap();
+    let dec = decode_page(&bytes).unwrap();
+    assert_eq!(dec.image.planes[0].data, want);
 }
 
 #[test]
@@ -538,7 +538,7 @@ fn float_rejects_grayscale_planar_and_ccitt() {
         extras: PageExtras::default(),
     };
     assert!(
-        encode_tiff(&planar).is_err(),
+        encode_page(&planar).is_err(),
         "single-sample float planar must be rejected (PlanarConfiguration irrelevant)"
     );
 
@@ -554,14 +554,14 @@ fn float_rejects_grayscale_planar_and_ccitt() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    assert!(encode_tiff(&ccitt).is_err(), "CCITT float must be rejected");
+    assert!(encode_page(&ccitt).is_err(), "CCITT float must be rejected");
 }
 
 #[test]
 fn float_multipage_chain_roundtrips() {
-    // A multi-IFD float chain (encode_tiff_multi): a GrayF32 page with the
+    // A multi-IFD float chain (encode_pages): a GrayF32 page with the
     // float predictor, then an RgbF64 page, then a GrayF64 tiled page.
-    // Each must decode (via decode_tiff_all) to its own display plane.
+    // Each must decode (via decode_all) to its own display plane.
     let (gw, gh, gpix) = gray_samples_f32();
     let gwant = display_map(&gpix.iter().map(|&x| x as f64).collect::<Vec<_>>());
 
@@ -608,12 +608,15 @@ fn float_multipage_chain_roundtrips() {
             extras: PageExtras::default(),
         },
     ];
-    let bytes = encode_tiff_multi(&pages).unwrap();
-    let frames = decode_tiff_all(&bytes).unwrap();
+    let bytes = encode_pages(&pages).unwrap();
+    let frames = decode_all(&bytes).unwrap();
     assert_eq!(frames.len(), 3, "three-page float chain");
-    assert_eq!(frames[0].planes[0].data, gwant, "page 0 GrayF32");
-    assert_eq!(frames[1].planes[0].data, rwant, "page 1 RgbF64");
-    assert_eq!(frames[2].planes[0].data, twant, "page 2 GrayF64 tiled");
+    assert_eq!(frames[0].image.planes[0].data, gwant, "page 0 GrayF32");
+    assert_eq!(frames[1].image.planes[0].data, rwant, "page 1 RgbF64");
+    assert_eq!(
+        frames[2].image.planes[0].data, twant,
+        "page 2 GrayF64 tiled"
+    );
 }
 
 #[test]
@@ -630,5 +633,5 @@ fn float_wrong_buffer_size_rejected() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    assert!(encode_tiff(&page).is_err());
+    assert!(encode_page(&page).is_err());
 }

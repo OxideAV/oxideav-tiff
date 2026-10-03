@@ -11,7 +11,7 @@
 //! facts). Round-trips walk the written bytes with the crate's own
 //! public `parse_header` / `parse_ifd` and compare tag / type / count /
 //! value-bytes exactly; SubIFD child images decode through
-//! `decode_tiff_at` and must match a standalone encode of the same
+//! `decode_page_at` and must match a standalone encode of the same
 //! page. `tiffinfo` (black-box) is not used here — the aux-IFD tests
 //! in `encode_imagemagick_validators.rs` stay focused on baseline
 //! structures it prints.
@@ -19,7 +19,7 @@
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd, ByteOrder, Entry, TiffVariant};
 use oxideav_tiff::types::{TAG_EXIF_IFD, TAG_GPS_IFD, TAG_NEW_SUBFILE_TYPE, TAG_SUB_IFDS};
 use oxideav_tiff::{
-    decode_tiff, decode_tiff_at, encode_tiff, encode_tiff_multi, AuxIfdEntry, EncodePage,
+    decode_page, decode_page_at, encode_page, encode_pages, AuxIfdEntry, EncodePage,
     EncodePixelFormat, PageExtras, TiffCompression,
 };
 
@@ -58,7 +58,7 @@ fn page_number_and_subfile_bits_roundtrip() {
         reduced_resolution: true,
         ..Default::default()
     };
-    let file = encode_tiff(&gray_page(&px, 8, 8, extras)).unwrap();
+    let file = encode_page(&gray_page(&px, 8, 8, extras)).unwrap();
     let hdr = parse_header(&file).unwrap();
     let (entries, _) = parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
     let bo = hdr.byte_order;
@@ -70,14 +70,14 @@ fn page_number_and_subfile_bits_roundtrip() {
         .unwrap();
     assert_eq!(nst & 0b11, 0b11, "bits 0 (reduced) + 1 (multi-page) set");
     // The page still decodes normally.
-    let img = decode_tiff(&file).unwrap();
-    assert_eq!(img.frame.planes[0].data, px);
+    let img = decode_page(&file).unwrap();
+    assert_eq!(img.image.planes[0].data, px);
 }
 
 #[test]
 fn default_extras_write_no_new_fields() {
     let px = ramp(8, 8);
-    let file = encode_tiff(&gray_page(&px, 8, 8, PageExtras::default())).unwrap();
+    let file = encode_page(&gray_page(&px, 8, 8, PageExtras::default())).unwrap();
     let hdr = parse_header(&file).unwrap();
     let (entries, _) = parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
     for tag in [297, TAG_SUB_IFDS, TAG_EXIF_IFD, TAG_GPS_IFD] {
@@ -151,9 +151,9 @@ fn aux_exif_and_gps_ifds_roundtrip_verbatim() {
             bigtiff,
             ..gray_page(&px, 16, 8, extras.clone())
         };
-        let file = encode_tiff(&page).unwrap();
+        let file = encode_page(&page).unwrap();
         // The image still decodes.
-        assert_eq!(decode_tiff(&file).unwrap().frame.planes[0].data, px);
+        assert_eq!(decode_page(&file).unwrap().image.planes[0].data, px);
         let hdr = parse_header(&file).unwrap();
         let (entries, _) =
             parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
@@ -215,7 +215,7 @@ fn aux_ifd_validation_rejects_bad_entries() {
         count: 2,
         value: &[0, 0],
     }];
-    assert!(encode_tiff(&gray_page(&px, 4, 4, mk(&BAD_SIZE))).is_err());
+    assert!(encode_page(&gray_page(&px, 4, 4, mk(&BAD_SIZE))).is_err());
     // Unknown field type.
     static BAD_TYPE: [AuxIfdEntry<'static>; 1] = [AuxIfdEntry {
         tag: 1,
@@ -223,7 +223,7 @@ fn aux_ifd_validation_rejects_bad_entries() {
         count: 1,
         value: &[0],
     }];
-    assert!(encode_tiff(&gray_page(&px, 4, 4, mk(&BAD_TYPE))).is_err());
+    assert!(encode_page(&gray_page(&px, 4, 4, mk(&BAD_TYPE))).is_err());
     // Duplicate tags.
     static DUP: [AuxIfdEntry<'static>; 2] = [
         AuxIfdEntry {
@@ -239,10 +239,10 @@ fn aux_ifd_validation_rejects_bad_entries() {
             value: &[2, 0],
         },
     ];
-    assert!(encode_tiff(&gray_page(&px, 4, 4, mk(&DUP))).is_err());
+    assert!(encode_page(&gray_page(&px, 4, 4, mk(&DUP))).is_err());
     // Empty child IFD.
     static EMPTY: [AuxIfdEntry<'static>; 0] = [];
-    assert!(encode_tiff(&gray_page(&px, 4, 4, mk(&EMPTY))).is_err());
+    assert!(encode_page(&gray_page(&px, 4, 4, mk(&EMPTY))).is_err());
     // BigTIFF-only type on a classic page.
     static LONG8: [AuxIfdEntry<'static>; 1] = [AuxIfdEntry {
         tag: 1,
@@ -250,7 +250,7 @@ fn aux_ifd_validation_rejects_bad_entries() {
         count: 1,
         value: &[0; 8],
     }];
-    assert!(encode_tiff(&gray_page(&px, 4, 4, mk(&LONG8))).is_err());
+    assert!(encode_page(&gray_page(&px, 4, 4, mk(&LONG8))).is_err());
 }
 
 #[test]
@@ -258,7 +258,7 @@ fn sub_ifds_tree_roundtrips_and_decodes() {
     // Main image + two reduced-resolution SubIFD children (tag 330),
     // one of which nests its own child — exercising the recursive
     // planner, the out-of-line offsets array (2 children × LONG = 8
-    // bytes > classic inline 4), and decode_tiff_at.
+    // bytes > classic inline 4), and decode_page_at.
     let main_px = ramp(32, 32);
     let thumb_px = ramp(8, 8);
     let micro_px = ramp(4, 4);
@@ -298,10 +298,10 @@ fn sub_ifds_tree_roundtrips_and_decodes() {
             ..Default::default()
         },
     );
-    let file = encode_tiff(&main).unwrap();
+    let file = encode_page(&main).unwrap();
 
     // The main chain is unaffected: one page, decodes normally.
-    assert_eq!(decode_tiff(&file).unwrap().frame.planes[0].data, main_px);
+    assert_eq!(decode_page(&file).unwrap().image.planes[0].data, main_px);
     let hdr = parse_header(&file).unwrap();
     let (entries, next) =
         parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
@@ -314,9 +314,9 @@ fn sub_ifds_tree_roundtrips_and_decodes() {
     assert_eq!(subs.len(), 2);
 
     // Child A: LZW thumb with its own nested child.
-    let a = decode_tiff_at(&file, subs[0]).unwrap();
-    assert_eq!((a.width, a.height), (8, 8));
-    assert_eq!(a.frame.planes[0].data, thumb_px);
+    let a = decode_page_at(&file, subs[0]).unwrap();
+    assert_eq!((a.image.width, a.image.height), (8, 8));
+    assert_eq!(a.image.planes[0].data, thumb_px);
     let (a_entries, a_next, ..) = read_child(&file, subs[0]);
     assert_eq!(a_next, 0);
     let nst = find(&a_entries, TAG_NEW_SUBFILE_TYPE)
@@ -329,18 +329,18 @@ fn sub_ifds_tree_roundtrips_and_decodes() {
         .as_u64_vec(bo)
         .unwrap();
     assert_eq!(nested.len(), 1);
-    let micro_dec = decode_tiff_at(&file, nested[0]).unwrap();
-    assert_eq!(micro_dec.frame.planes[0].data, micro_px);
+    let micro_dec = decode_page_at(&file, nested[0]).unwrap();
+    assert_eq!(micro_dec.image.planes[0].data, micro_px);
 
     // Child B: Deflate thumb.
-    let b = decode_tiff_at(&file, subs[1]).unwrap();
-    assert_eq!(b.frame.planes[0].data, thumb_px);
+    let b = decode_page_at(&file, subs[1]).unwrap();
+    assert_eq!(b.image.planes[0].data, thumb_px);
 
     // Every child must byte-decode identically to a standalone encode
     // of the same page (the child planner is the page planner).
-    let standalone = encode_tiff(&gray_page(&thumb_px, 8, 8, PageExtras::default())).unwrap();
-    let sd = decode_tiff(&standalone).unwrap();
-    assert_eq!(sd.frame.planes[0].data, b.frame.planes[0].data);
+    let standalone = encode_page(&gray_page(&thumb_px, 8, 8, PageExtras::default())).unwrap();
+    let sd = decode_page(&standalone).unwrap();
+    assert_eq!(sd.image.planes[0].data, b.image.planes[0].data);
 }
 
 #[test]
@@ -369,7 +369,7 @@ fn sub_ifds_single_child_stays_inline_and_bigtiff_composes() {
                 },
             )
         };
-        let file = encode_tiff(&main).unwrap();
+        let file = encode_page(&main).unwrap();
         let hdr = parse_header(&file).unwrap();
         let (entries, _) =
             parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
@@ -378,8 +378,8 @@ fn sub_ifds_single_child_stays_inline_and_bigtiff_composes() {
             .as_u64_vec(hdr.byte_order)
             .unwrap();
         assert_eq!(subs.len(), 1);
-        let t = decode_tiff_at(&file, subs[0]).unwrap();
-        assert_eq!(t.frame.planes[0].data, thumb_px, "bigtiff={bigtiff}");
+        let t = decode_page_at(&file, subs[0]).unwrap();
+        assert_eq!(t.image.planes[0].data, thumb_px, "bigtiff={bigtiff}");
     }
 }
 
@@ -423,7 +423,7 @@ fn sub_ifd_depth_cap_enforced() {
         },
     );
     assert!(
-        encode_tiff(&root).is_err(),
+        encode_page(&root).is_err(),
         "SubIFDs deeper than the cap must be rejected"
     );
     // A shallow tree stays fine.
@@ -436,7 +436,7 @@ fn sub_ifd_depth_cap_enforced() {
             ..Default::default()
         },
     );
-    assert!(encode_tiff(&ok_root).is_ok());
+    assert!(encode_page(&ok_root).is_ok());
 }
 
 #[test]
@@ -475,8 +475,8 @@ fn multi_page_chain_with_extras_and_children() {
             },
         ),
     ];
-    let file = encode_tiff_multi(&pages).unwrap();
-    let all = oxideav_tiff::decode_tiff_all(&file).unwrap();
+    let file = encode_pages(&pages).unwrap();
+    let all = oxideav_tiff::decode_all(&file).unwrap();
     assert_eq!(all.len(), 2, "Exif child must not join the page chain");
     let hdr = parse_header(&file).unwrap();
     let (e0, next0) = parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
@@ -566,8 +566,8 @@ fn foreign_subifd_pointer_typed_ifd13_reads() {
     f.extend_from_slice(&0u32.to_le_bytes());
     f[4..8].copy_from_slice(&main_ifd_off.to_le_bytes());
 
-    let main = decode_tiff(&f).unwrap();
-    assert_eq!(main.frame.planes[0].data, main_px.to_vec());
+    let main = decode_page(&f).unwrap();
+    assert_eq!(main.image.planes[0].data, main_px.to_vec());
     let hdr = parse_header(&f).unwrap();
     let (entries, _) = parse_ifd(&f, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
     let sub = find(&entries, TAG_SUB_IFDS).expect("tag 330 present");
@@ -576,8 +576,8 @@ fn foreign_subifd_pointer_typed_ifd13_reads() {
         .as_u64_vec(hdr.byte_order)
         .expect("type 13 reads as offset");
     assert_eq!(offs, vec![child_ifd_off as u64]);
-    let child = decode_tiff_at(&f, offs[0]).unwrap();
-    assert_eq!(child.frame.planes[0].data, child_px.to_vec());
+    let child = decode_page_at(&f, offs[0]).unwrap();
+    assert_eq!(child.image.planes[0].data, child_px.to_vec());
 }
 
 #[test]
@@ -609,8 +609,8 @@ fn bigtiff_two_sub_ifds_spill_out_of_line() {
             },
         )
     };
-    let file = encode_tiff(&main).unwrap();
-    assert_eq!(decode_tiff(&file).unwrap().frame.planes[0].data, main_px);
+    let file = encode_page(&main).unwrap();
+    assert_eq!(decode_page(&file).unwrap().image.planes[0].data, main_px);
     let hdr = parse_header(&file).unwrap();
     let (entries, _) = parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
     let sub = find(&entries, TAG_SUB_IFDS).unwrap();
@@ -618,11 +618,11 @@ fn bigtiff_two_sub_ifds_spill_out_of_line() {
     let offs = sub.as_u64_vec(hdr.byte_order).unwrap();
     assert_eq!(offs.len(), 2);
     assert_eq!(
-        decode_tiff_at(&file, offs[0]).unwrap().frame.planes[0].data,
+        decode_page_at(&file, offs[0]).unwrap().image.planes[0].data,
         t1
     );
     assert_eq!(
-        decode_tiff_at(&file, offs[1]).unwrap().frame.planes[0].data,
+        decode_page_at(&file, offs[1]).unwrap().image.planes[0].data,
         t2
     );
 }
@@ -653,8 +653,8 @@ fn resolution_and_ascii_metadata_roundtrip() {
             bigtiff,
             ..gray_page(&px, 8, 8, extras.clone())
         };
-        let file = encode_tiff(&page).unwrap();
-        assert_eq!(decode_tiff(&file).unwrap().frame.planes[0].data, px);
+        let file = encode_page(&page).unwrap();
+        assert_eq!(decode_page(&file).unwrap().image.planes[0].data, px);
         let hdr = parse_header(&file).unwrap();
         let (entries, _) =
             parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
@@ -701,7 +701,7 @@ fn metadata_validation_rejects_bad_values() {
         }),
         ..Default::default()
     };
-    assert!(encode_tiff(&gray_page(&px, 4, 4, bad_unit)).is_err());
+    assert!(encode_page(&gray_page(&px, 4, 4, bad_unit)).is_err());
     // Zero denominator.
     let bad_den = PageExtras {
         resolution: Some(PageResolution {
@@ -711,7 +711,7 @@ fn metadata_validation_rejects_bad_values() {
         }),
         ..Default::default()
     };
-    assert!(encode_tiff(&gray_page(&px, 4, 4, bad_den)).is_err());
+    assert!(encode_page(&gray_page(&px, 4, 4, bad_den)).is_err());
     // Malformed DateTime shapes.
     for dt in ["2026-07-04 12:34:56", "2026:07:04", "2026:07:04 12:34:5"] {
         let bad_dt = PageExtras {
@@ -719,7 +719,7 @@ fn metadata_validation_rejects_bad_values() {
             ..Default::default()
         };
         assert!(
-            encode_tiff(&gray_page(&px, 4, 4, bad_dt)).is_err(),
+            encode_page(&gray_page(&px, 4, 4, bad_dt)).is_err(),
             "DateTime {dt:?} must reject"
         );
     }
@@ -728,12 +728,12 @@ fn metadata_validation_rejects_bad_values() {
         artist: Some("Karpelès"),
         ..Default::default()
     };
-    assert!(encode_tiff(&gray_page(&px, 4, 4, non_ascii)).is_err());
+    assert!(encode_page(&gray_page(&px, 4, 4, non_ascii)).is_err());
     let embedded_nul = PageExtras {
         software: Some("abc\0def"),
         ..Default::default()
     };
-    assert!(encode_tiff(&gray_page(&px, 4, 4, embedded_nul)).is_err());
+    assert!(encode_page(&gray_page(&px, 4, 4, embedded_nul)).is_err());
 }
 
 #[test]
@@ -744,7 +744,7 @@ fn orientation_write_roundtrips_through_decoder_reorientation() {
     // stored (row, col) appearing at display (col, h-1-row).
     let (w, h) = (4u32, 2u32);
     let px: Vec<u8> = (0..w * h).map(|i| (i * 10) as u8).collect();
-    let file = encode_tiff(&gray_page(
+    let file = encode_page(&gray_page(
         &px,
         w,
         h,
@@ -760,9 +760,13 @@ fn orientation_write_roundtrips_through_decoder_reorientation() {
         find(&entries, 274).unwrap().as_u32(hdr.byte_order).unwrap(),
         6
     );
-    let d = decode_tiff(&file).unwrap();
-    assert_eq!((d.width, d.height), (h, w), "transpose-family swap");
-    let disp = &d.frame.planes[0].data;
+    let d = decode_page(&file).unwrap();
+    assert_eq!(
+        (d.image.width, d.image.height),
+        (h, w),
+        "transpose-family swap"
+    );
+    let disp = &d.image.planes[0].data;
     for row in 0..h as usize {
         for col in 0..w as usize {
             let stored = px[row * w as usize + col];
@@ -778,7 +782,7 @@ fn orientation_write_roundtrips_through_decoder_reorientation() {
     }
     // Out-of-range rejected; orientation 1 written explicitly decodes
     // identically to the untagged default.
-    assert!(encode_tiff(&gray_page(
+    assert!(encode_page(&gray_page(
         &px,
         w,
         h,
@@ -788,7 +792,7 @@ fn orientation_write_roundtrips_through_decoder_reorientation() {
         }
     ))
     .is_err());
-    let f1 = encode_tiff(&gray_page(
+    let f1 = encode_page(&gray_page(
         &px,
         w,
         h,
@@ -798,5 +802,5 @@ fn orientation_write_roundtrips_through_decoder_reorientation() {
         },
     ))
     .unwrap();
-    assert_eq!(decode_tiff(&f1).unwrap().frame.planes[0].data, px);
+    assert_eq!(decode_page(&f1).unwrap().image.planes[0].data, px);
 }

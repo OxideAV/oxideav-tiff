@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use oxideav_tiff::{
-    decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    PageExtras, TiffCompression,
+    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
+    TiffCompression, TiffPixelFormat,
 };
 
 fn binary_available(name: &str) -> bool {
@@ -154,11 +154,11 @@ fn encoder_gray8_lzw_roundtrips_through_convert() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     // Round-trip through our own decoder first.
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (32, 32));
-    assert_eq!(d.frame.planes[0].data, pixels);
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (32, 32));
+    assert_eq!(d.image.planes[0].data, pixels);
     // Round-trip through ImageMagick's reader.
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, false) {
         assert_eq!(im_bytes.len(), pixels.len());
@@ -180,10 +180,10 @@ fn encoder_rgb24_packbits_roundtrips_through_convert() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (40, 30));
-    assert_eq!(d.frame.planes[0].data, pixels);
+    let bytes = encode_page(&page).unwrap();
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (40, 30));
+    assert_eq!(d.image.planes[0].data, pixels);
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         assert_eq!(im_bytes.len(), pixels.len());
         assert_eq!(im_bytes, pixels, "ImageMagick decoded RGB pixels mismatch");
@@ -204,7 +204,7 @@ fn encoder_rgb24_deflate_roundtrips_through_convert() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         assert_eq!(im_bytes, pixels);
     }
@@ -233,7 +233,7 @@ fn encoder_palette_roundtrips_through_convert() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         // Reconstruct expected RGB pixels.
         let mut want = Vec::with_capacity(8 * 8 * 3);
@@ -259,7 +259,7 @@ fn encoder_tiffinfo_reports_expected_metadata() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         assert!(
             info.contains("Image Width: 64") && info.contains("Image Length: 48"),
@@ -327,8 +327,8 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
             extras: PageExtras::default(),
         },
     ];
-    let bytes = encode_tiff_multi(&pages).unwrap();
-    let imgs = decode_tiff_all(&bytes).unwrap();
+    let bytes = encode_pages(&pages).unwrap();
+    let imgs = decode_all(&bytes).unwrap();
     assert_eq!(imgs.len(), 3);
     if let Some(info) = run_tiffinfo(&bytes) {
         // tiffinfo reports a TIFF Directory header for each page.
@@ -372,12 +372,15 @@ fn decoder_reads_imagemagick_cmyk() {
     let bytes = fs::read(&tif_path).unwrap();
     let _ = fs::remove_dir_all(&dir);
     // Decode our way; just assert dims and that it parses.
-    let d = decode_tiff(&bytes).expect("CMYK decode");
-    assert_eq!((d.width, d.height), (32, 32));
-    // CMYK -> RGB via our converter; precise pixel comparison would
-    // require a colour-management round-trip identical to ImageMagick's,
-    // which we don't pursue. Just confirm the buffer sizes line up.
-    assert_eq!(d.frame.planes[0].data.len(), 32 * 32 * 3);
+    let d = decode_page(&bytes).expect("CMYK decode");
+    assert_eq!((d.image.width, d.image.height), (32, 32));
+    // Native Cmyk layout (ink coverages verbatim); the §16 display
+    // inversion is `to_rgb8`. Precise pixel comparison would require a
+    // colour-management round-trip identical to the validator's, which
+    // we don't pursue. Just confirm the buffer sizes line up.
+    assert_eq!(d.image.format, TiffPixelFormat::Cmyk);
+    assert_eq!(d.image.planes[0].data.len(), 32 * 32 * 4);
+    assert_eq!(d.image.to_rgb8().len(), 32 * 32 * 3);
 }
 
 #[test]
@@ -422,7 +425,7 @@ fn decoder_reads_imagemagick_ycbcr() {
     }
     let bytes = fs::read(&tif_path).unwrap();
     let _ = fs::remove_dir_all(&dir);
-    let d = match decode_tiff(&bytes) {
+    let d = match decode_page(&bytes) {
         Ok(d) => d,
         Err(e) => {
             // Some convert builds emit a different layout; skip
@@ -431,8 +434,8 @@ fn decoder_reads_imagemagick_ycbcr() {
             return;
         }
     };
-    assert_eq!((d.width, d.height), (32, 32));
-    assert_eq!(d.frame.planes[0].data.len(), 32 * 32 * 3);
+    assert_eq!((d.image.width, d.image.height), (32, 32));
+    assert_eq!(d.image.planes[0].data.len(), 32 * 32 * 3);
 }
 
 #[test]
@@ -469,9 +472,9 @@ fn decoder_reads_imagemagick_tiled_rgb() {
     }
     let bytes = fs::read(&tif_path).unwrap();
     let _ = fs::remove_dir_all(&dir);
-    let d = decode_tiff(&bytes).expect("tiled decode");
-    assert_eq!((d.width, d.height), (64, 64));
-    assert_eq!(d.frame.planes[0].data, pixels);
+    let d = decode_page(&bytes).expect("tiled decode");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
+    assert_eq!(d.image.planes[0].data, pixels);
 }
 
 #[test]
@@ -509,10 +512,10 @@ fn decoder_reads_imagemagick_multipage() {
     }
     let bytes = fs::read(&tif).unwrap();
     let _ = fs::remove_dir_all(&dir);
-    let imgs = decode_tiff_all(&bytes).expect("multi-page decode");
+    let imgs = decode_all(&bytes).expect("multi-page decode");
     assert_eq!(imgs.len(), 2, "expected 2 pages");
-    assert_eq!(imgs[0].planes[0].data, p1);
-    assert_eq!(imgs[1].planes[0].data, p2);
+    assert_eq!(imgs[0].image.planes[0].data, p1);
+    assert_eq!(imgs[1].image.planes[0].data, p2);
 }
 
 /// Build an MSB-first packed bilevel buffer with a stripe pattern.
@@ -551,10 +554,10 @@ fn encoder_ccitt_rle_visible_to_tiffinfo() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     // Self-roundtrip first.
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (64, 16));
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (64, 16));
     if let Some(info) = run_tiffinfo(&bytes) {
         assert!(
             info.contains("Image Width: 64") && info.contains("Image Length: 16"),
@@ -600,7 +603,7 @@ fn encoder_ccitt_t4_1d_decodes_via_tiffcp_to_uncompressed() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     let dir = tmp_dir();
     let in_path = dir.join("ccitt_t4.tiff");
     let out_path = dir.join("none.tiff");
@@ -628,12 +631,12 @@ fn encoder_ccitt_t4_1d_decodes_via_tiffcp_to_uncompressed() {
     }
     let trans = fs::read(&out_path).unwrap();
     let _ = fs::remove_dir_all(&dir);
-    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
-    assert_eq!((d.width, d.height), (48, 8));
+    let d = decode_page(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
+    assert_eq!((d.image.width, d.image.height), (48, 8));
     // After transcoding, our decoder must match the expected Gray8
     // rendering of the original input.
     assert_eq!(
-        d.frame.planes[0].data, gray_expected,
+        d.image.planes[0].data, gray_expected,
         "pixel mismatch after CCITT T.4 1-D encode + tiffcp -c none"
     );
 }
@@ -659,7 +662,7 @@ fn encoder_ccitt_t4_1d_byte_aligned_decodes_via_tiffcp() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     let dir = tmp_dir();
     let in_path = dir.join("ccitt_t4_bf.tiff");
     let out_path = dir.join("none.tiff");
@@ -685,9 +688,9 @@ fn encoder_ccitt_t4_1d_byte_aligned_decodes_via_tiffcp() {
     }
     let trans = fs::read(&out_path).unwrap();
     let _ = fs::remove_dir_all(&dir);
-    let d = decode_tiff(&trans).expect("decode transcoded TIFF");
-    assert_eq!((d.width, d.height), (64, 8));
-    assert_eq!(d.frame.planes[0].data, gray_expected);
+    let d = decode_page(&trans).expect("decode transcoded TIFF");
+    assert_eq!((d.image.width, d.image.height), (64, 8));
+    assert_eq!(d.image.planes[0].data, gray_expected);
 }
 
 #[test]
@@ -728,9 +731,9 @@ fn decoder_reads_tiffcp_bigtiff() {
     let _ = fs::remove_dir_all(&dir);
     // Confirm it's a BigTIFF by header.
     assert_eq!(&bytes[0..4], &[b'I', b'I', 0x2B, 0x00]);
-    let d = decode_tiff(&bytes).expect("BigTIFF decode");
-    assert_eq!((d.width, d.height), (32, 32));
-    assert_eq!(d.frame.planes[0].data, pixels);
+    let d = decode_page(&bytes).expect("BigTIFF decode");
+    assert_eq!((d.image.width, d.image.height), (32, 32));
+    assert_eq!(d.image.planes[0].data, pixels);
 }
 
 // ---- Predictor=2 (horizontal differencing, TIFF 6.0 §14) on encode ----
@@ -766,10 +769,10 @@ fn tiffcp_transcode_predictor_matches(tiff_bytes: &[u8], width: u32, height: u32
     }
     let trans = fs::read(&out_path).unwrap();
     let _ = fs::remove_dir_all(&dir);
-    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
-    assert_eq!((d.width, d.height), (width, height));
+    let d = decode_page(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
+    assert_eq!((d.image.width, d.image.height), (width, height));
     assert_eq!(
-        d.frame.planes[0].data, expected,
+        d.image.planes[0].data, expected,
         "pixel mismatch after Predictor=2 encode + tiffcp -c none"
     );
 }
@@ -788,7 +791,7 @@ fn encoder_predictor_tiffinfo_reports_horizontal_differencing() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         assert!(
             info.to_lowercase().contains("predictor") && info.contains("horizontal differencing"),
@@ -817,7 +820,7 @@ fn encoder_gray8_predictor_lzw_transcodes_via_tiffcp() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     tiffcp_transcode_predictor_matches(&bytes, 50, 30, &pixels);
 }
 
@@ -842,7 +845,7 @@ fn encoder_rgb24_predictor_deflate_transcodes_via_tiffcp() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     tiffcp_transcode_predictor_matches(&bytes, 40, 24, &pixels);
 }
 
@@ -860,10 +863,10 @@ fn encoder_gray8_predictor_lzw_roundtrips_through_convert() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     // Our own decoder first.
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!(d.frame.planes[0].data, pixels);
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!(d.image.planes[0].data, pixels);
     // ImageMagick's reader (which honours the Predictor tag).
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, false) {
         assert_eq!(
@@ -887,7 +890,7 @@ fn encoder_rgb24_predictor_lzw_roundtrips_through_convert() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         assert_eq!(im_bytes, pixels, "ImageMagick mismatch on Predictor=2 RGB");
     }
@@ -919,7 +922,7 @@ fn encoder_planar_rgb_transcodes_via_tiffcp() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     let dir = tmp_dir();
     let in_path = dir.join("planar.tiff");
     let out_path = dir.join("none.tiff");
@@ -944,10 +947,10 @@ fn encoder_planar_rgb_transcodes_via_tiffcp() {
     }
     let trans = fs::read(&out_path).unwrap();
     let _ = fs::remove_dir_all(&dir);
-    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded planar TIFF");
-    assert_eq!((d.width, d.height), (40, 24));
+    let d = decode_page(&trans).expect("decode tiffcp-transcoded planar TIFF");
+    assert_eq!((d.image.width, d.image.height), (40, 24));
     assert_eq!(
-        d.frame.planes[0].data, pixels,
+        d.image.planes[0].data, pixels,
         "pixel mismatch after PlanarConfiguration=2 encode + tiffcp -c none"
     );
 }
@@ -973,7 +976,7 @@ fn encoder_planar_predictor_lzw_transcodes_via_tiffcp() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     let dir = tmp_dir();
     let in_path = dir.join("planar.tiff");
     let out_path = dir.join("none.tiff");
@@ -998,9 +1001,9 @@ fn encoder_planar_predictor_lzw_transcodes_via_tiffcp() {
     }
     let trans = fs::read(&out_path).unwrap();
     let _ = fs::remove_dir_all(&dir);
-    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded planar+predictor TIFF");
+    let d = decode_page(&trans).expect("decode tiffcp-transcoded planar+predictor TIFF");
     assert_eq!(
-        d.frame.planes[0].data, pixels,
+        d.image.planes[0].data, pixels,
         "pixel mismatch after planar Predictor=2 encode + tiffcp -c none"
     );
 }
@@ -1021,7 +1024,7 @@ fn encoder_planar_rgb_roundtrips_through_convert() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         assert_eq!(
             im_bytes, pixels,
@@ -1045,7 +1048,7 @@ fn encoder_planar_tiffinfo_reports_separate_planes() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         let lc = info.to_lowercase();
         assert!(
@@ -1089,10 +1092,10 @@ fn tiffcp_transcode_tiled_matches(tiff_bytes: &[u8], width: u32, height: u32, ex
     }
     let trans = fs::read(&out_path).unwrap();
     let _ = fs::remove_dir_all(&dir);
-    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
-    assert_eq!((d.width, d.height), (width, height));
+    let d = decode_page(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
+    assert_eq!((d.image.width, d.image.height), (width, height));
     assert_eq!(
-        d.frame.planes[0].data, expected,
+        d.image.planes[0].data, expected,
         "pixel mismatch after tiled encode + tiffcp -c none"
     );
 }
@@ -1118,7 +1121,7 @@ fn encoder_tiled_gray8_transcodes_via_tiffcp() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 50, 30, &pixels);
 }
 
@@ -1142,7 +1145,7 @@ fn encoder_tiled_rgb24_predictor_transcodes_via_tiffcp() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 48, 32, &pixels);
 }
 
@@ -1161,7 +1164,7 @@ fn encoder_tiled_rgb24_roundtrips_through_convert() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         assert_eq!(im_bytes, pixels, "ImageMagick mismatch on tiled RGB");
     }
@@ -1181,7 +1184,7 @@ fn encoder_tiled_tiffinfo_reports_tile_geometry() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         let lc = info.to_lowercase();
         assert!(
@@ -1223,7 +1226,7 @@ fn encoder_tiled_planar_rgb24_transcodes_via_tiffcp() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 50, 30, &pixels);
 }
 
@@ -1248,7 +1251,7 @@ fn encoder_tiled_planar_rgb24_predictor_transcodes_via_tiffcp() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 48, 32, &pixels);
 }
 
@@ -1268,7 +1271,7 @@ fn encoder_tiled_planar_rgb24_roundtrips_through_convert() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         assert_eq!(im_bytes, pixels, "ImageMagick mismatch on planar-tiled RGB");
     }
@@ -1288,7 +1291,7 @@ fn encoder_tiled_planar_tiffinfo_reports_tiles_and_separate_planes() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         let lc = info.to_lowercase();
         assert!(
@@ -1329,7 +1332,7 @@ fn encoder_ccitt_t4_2d_decodes_via_tiffcp_to_uncompressed() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     let dir = tmp_dir();
     let in_path = dir.join("ccitt_t4_2d.tiff");
     let out_path = dir.join("none.tiff");
@@ -1354,10 +1357,10 @@ fn encoder_ccitt_t4_2d_decodes_via_tiffcp_to_uncompressed() {
     }
     let trans = fs::read(&out_path).unwrap();
     let _ = fs::remove_dir_all(&dir);
-    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
-    assert_eq!((d.width, d.height), (48, 8));
+    let d = decode_page(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
+    assert_eq!((d.image.width, d.image.height), (48, 8));
     assert_eq!(
-        d.frame.planes[0].data, gray_expected,
+        d.image.planes[0].data, gray_expected,
         "pixel mismatch after CCITT T.4 2-D encode + tiffcp -c none"
     );
 }
@@ -1385,7 +1388,7 @@ fn encoder_ccitt_t6_decodes_via_tiffcp_to_uncompressed() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     let dir = tmp_dir();
     let in_path = dir.join("ccitt_t6.tiff");
     let out_path = dir.join("none.tiff");
@@ -1410,10 +1413,10 @@ fn encoder_ccitt_t6_decodes_via_tiffcp_to_uncompressed() {
     }
     let trans = fs::read(&out_path).unwrap();
     let _ = fs::remove_dir_all(&dir);
-    let d = decode_tiff(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
-    assert_eq!((d.width, d.height), (64, 8));
+    let d = decode_page(&trans).expect("decode tiffcp-transcoded uncompressed TIFF");
+    assert_eq!((d.image.width, d.image.height), (64, 8));
     assert_eq!(
-        d.frame.planes[0].data, gray_expected,
+        d.image.planes[0].data, gray_expected,
         "pixel mismatch after CCITT T.6 encode + tiffcp -c none"
     );
 }
@@ -1437,7 +1440,7 @@ fn encoder_ccitt_t4_2d_tiffinfo_reports_2d_coding() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         let lc = info.to_lowercase();
         assert!(
@@ -1470,7 +1473,7 @@ fn encoder_ccitt_t6_tiffinfo_reports_group4() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         let lc = info.to_lowercase();
         assert!(
@@ -1512,10 +1515,10 @@ fn encoder_planar_subsampled_ycbcr_tiffinfo_reports_geometry() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     // Our own decoder first.
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (w, h));
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (w, h));
     if let Some(info) = run_tiffinfo(&bytes) {
         let lc = info.to_lowercase();
         assert!(
@@ -1556,9 +1559,9 @@ fn encoder_f16_tiffinfo_reports_ieee_float_16() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (w, h));
+    let bytes = encode_page(&page).unwrap();
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (w, h));
     if let Some(info) = run_tiffinfo(&bytes) {
         let lc = info.to_lowercase();
         assert!(
@@ -1624,8 +1627,8 @@ fn encoder_extras_page_number_and_subifd_visible_to_tiffinfo() {
             ..Default::default()
         },
     };
-    let bytes = encode_tiff(&page).unwrap();
-    assert_eq!(decode_tiff(&bytes).unwrap().frame.planes[0].data, px);
+    let bytes = encode_page(&page).unwrap();
+    assert_eq!(decode_page(&bytes).unwrap().image.planes[0].data, px);
     if let Some(info) = run_tiffinfo(&bytes) {
         assert!(
             info.contains("Page Number: 0-1"),
@@ -1664,8 +1667,8 @@ fn encoder_multi_strip_visible_to_tiffinfo_and_convert() {
             ..Default::default()
         },
     };
-    let bytes = encode_tiff(&page).unwrap();
-    assert_eq!(decode_tiff(&bytes).unwrap().frame.planes[0].data, pixels);
+    let bytes = encode_page(&page).unwrap();
+    assert_eq!(decode_page(&bytes).unwrap().image.planes[0].data, pixels);
     if let Some(info) = run_tiffinfo(&bytes) {
         assert!(
             info.contains("Rows/Strip: 6"),
@@ -1702,7 +1705,7 @@ fn encoder_resolution_and_ascii_metadata_visible_to_tiffinfo() {
             ..Default::default()
         },
     };
-    let bytes = encode_tiff(&page).unwrap();
+    let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         assert!(
             info.contains("Resolution: 300, 300"),

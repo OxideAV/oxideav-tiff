@@ -21,7 +21,7 @@
 //! against the encoder's own output, so a regression in either path
 //! would surface as a divergence here or there.
 
-use oxideav_tiff::{decode_tiff, TiffPixelFormat};
+use oxideav_tiff::{decode_page, TiffPixelFormat};
 
 // ---------------------------------------------------------------------------
 // Reference data-unit packer (mirrors TIFF 6.0 §21 page 93 / 94)
@@ -388,13 +388,13 @@ fn assert_tiled_matches_strip(w: u32, h: u32, sh: usize, sv: usize, tile_w: u32,
     let strip_tiff = build_strip(w, h, sh as u16, sv as u16, &whole);
     let tiled_tiff = build_tiled(w, h, sh as u16, sv as u16, tile_w, tile_h, &tiles);
 
-    let ds = decode_tiff(&strip_tiff).unwrap();
-    let dt = decode_tiff(&tiled_tiff).unwrap();
+    let ds = decode_page(&strip_tiff).unwrap();
+    let dt = decode_page(&tiled_tiff).unwrap();
 
-    assert_eq!((dt.width, dt.height), (w, h), "tiled dims");
-    assert_eq!(dt.pixel_format, TiffPixelFormat::Rgb24, "tiled format");
+    assert_eq!((dt.image.width, dt.image.height), (w, h), "tiled dims");
+    assert_eq!(dt.image.format, TiffPixelFormat::Rgb24, "tiled format");
     assert_eq!(
-        dt.frame.planes[0].data, ds.frame.planes[0].data,
+        dt.image.planes[0].data, ds.image.planes[0].data,
         "tiled vs strip decode diverged for {w}x{h} sub ({sh},{sv}) tile {tile_w}x{tile_h}"
     );
 }
@@ -463,10 +463,10 @@ fn tiled_subsampled_decodes_to_expected_dims() {
         unit_bytes,
     );
     let tiff = build_tiled(w, h, sh as u16, sv as u16, 16, 16, &tiles);
-    let d = decode_tiff(&tiff).unwrap();
-    assert_eq!((d.width, d.height), (w, h));
-    assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
-    assert_eq!(d.frame.planes[0].data.len(), (w * h * 3) as usize);
+    let d = decode_page(&tiff).unwrap();
+    assert_eq!((d.image.width, d.image.height), (w, h));
+    assert_eq!(d.image.format, TiffPixelFormat::Rgb24);
+    assert_eq!(d.image.planes[0].data.len(), (w * h * 3) as usize);
 }
 
 #[test]
@@ -492,10 +492,10 @@ fn tiled_422_packbits_compressed() {
     // Compression = 32773 (PackBits).
     let tiled_tiff = build_tiled_comp(w, h, sh as u16, sv as u16, tw, th, 32773, &payloads);
 
-    let ds = decode_tiff(&strip_tiff).unwrap();
-    let dt = decode_tiff(&tiled_tiff).unwrap();
-    assert_eq!((dt.width, dt.height), (w, h));
-    assert_eq!(dt.frame.planes[0].data, ds.frame.planes[0].data);
+    let ds = decode_page(&strip_tiff).unwrap();
+    let dt = decode_page(&tiled_tiff).unwrap();
+    assert_eq!((dt.image.width, dt.image.height), (w, h));
+    assert_eq!(dt.image.planes[0].data, ds.image.planes[0].data);
 }
 
 #[test]
@@ -522,7 +522,7 @@ fn tiled_subsampled_rejects_non_multiple_tile_dims() {
     );
     // TileWidth 16 (mult of 4) but TileLength 18 (NOT a mult of 4).
     let tiff = build_tiled(w, h, sh as u16, sv as u16, 16, 18, &tiles);
-    let err = match decode_tiff(&tiff) {
+    let err = match decode_page(&tiff) {
         Ok(_) => panic!("expected §21 multiple-constraint rejection, but decode succeeded"),
         Err(e) => e,
     };

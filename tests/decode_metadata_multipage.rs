@@ -1,7 +1,7 @@
 //! Per-page metadata over a multi-IFD chain
-//! ([`oxideav_tiff::decode_tiff_all_pages`]).
+//! ([`oxideav_tiff::decode_pages`]).
 //!
-//! `decode_tiff_all` returns bare pixels; the pages variant carries
+//! `decode_all` returns bare pixels; the pages variant carries
 //! each IFD's [`oxideav_tiff::TiffMetadata`] so a caller can read the
 //! §8 descriptive fields, page number and structural flags that differ
 //! from page to page. Oracle: encode a 3-page chain with distinct
@@ -9,8 +9,8 @@
 //! back.
 
 use oxideav_tiff::{
-    decode_tiff_all, decode_tiff_all_pages, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    PageExtras, PageResolution, ResolutionUnit, TiffCompression,
+    decode_all, decode_pages, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
+    PageResolution, ResolutionUnit, TiffCompression,
 };
 
 fn page<'a>(w: u32, h: u32, pixels: &'a [u8], extras: PageExtras<'a>) -> EncodePage<'a> {
@@ -71,9 +71,9 @@ fn three_page_chain_carries_distinct_per_page_metadata() {
             },
         ),
     ];
-    let tiff = encode_tiff_multi(&pages).expect("encode multi");
+    let tiff = encode_pages(&pages).expect("encode multi");
 
-    let all = decode_tiff_all_pages(&tiff).expect("decode pages");
+    let all = decode_pages(&tiff).expect("decode pages");
     assert_eq!(all.len(), 3);
 
     assert_eq!(all[0].metadata.image_description.as_deref(), Some("first"));
@@ -90,10 +90,10 @@ fn three_page_chain_carries_distinct_per_page_metadata() {
     assert_eq!(all[2].metadata.resolution_unit, Some(ResolutionUnit::Inch));
 
     // The pixel content matches the bare multi-page decode page-for-page.
-    let bare = decode_tiff_all(&tiff).expect("decode bare");
+    let bare = decode_all(&tiff).expect("decode bare");
     assert_eq!(bare.len(), all.len());
     for (b, p) in bare.iter().zip(&all) {
-        assert_eq!(b.planes[0].data, p.frame.planes[0].data);
-        assert_eq!((b.width, b.height), (p.width, p.height));
+        assert_eq!(b.image.planes[0].data, p.image.planes[0].data);
+        assert_eq!((b.image.width, b.image.height), (p.width(), p.height()));
     }
 }

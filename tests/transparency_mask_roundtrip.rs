@@ -19,8 +19,8 @@
 //! byte layout a downstream compositor multiplies with the main image).
 
 use oxideav_tiff::{
-    decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    PageExtras, TiffCompression, TiffPixelFormat,
+    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
+    TiffCompression, TiffPixelFormat,
 };
 
 // A small 16x8 mask: top half = exterior (all 0-bits), bottom half =
@@ -84,15 +84,18 @@ fn encode_mask(w: u32, h: u32, bytes: &[u8], compression: TiffCompression) -> Ve
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    encode_tiff(&page).expect("encode_tiff TransparencyMask")
+    encode_page(&page).expect("encode_page TransparencyMask")
 }
 
 fn decode_one_image(buf: &[u8]) -> (u32, u32, Vec<u8>) {
-    let d = decode_tiff(buf).expect("decode_tiff");
-    assert_eq!(d.pixel_format, TiffPixelFormat::Gray8);
-    let plane = d.frame.planes.first().expect("one plane").clone();
-    assert_eq!(plane.stride, d.width as usize, "Gray8 stride == width");
-    (d.width, d.height, plane.data)
+    let d = decode_page(buf).expect("decode_page");
+    assert_eq!(d.image.format, TiffPixelFormat::Gray8);
+    let plane = d.image.planes.first().expect("one plane").clone();
+    assert_eq!(
+        plane.stride, d.image.width as usize,
+        "Gray8 stride == width"
+    );
+    (d.image.width, d.image.height, plane.data)
 }
 
 #[test]
@@ -248,17 +251,17 @@ fn multipage_main_image_plus_mask() {
             extras: PageExtras::default(),
         },
     ];
-    let buf = encode_tiff_multi(&pages).expect("multipage encode");
-    let images = decode_tiff_all(&buf).expect("multipage decode");
+    let buf = encode_pages(&pages).expect("multipage encode");
+    let images = decode_all(&buf).expect("multipage decode");
     assert_eq!(images.len(), 2);
     // Page 0: greyscale plane is the original ramp.
-    assert_eq!(images[0].pixel_format, TiffPixelFormat::Gray8);
-    assert_eq!(images[0].planes[0].data, gray);
+    assert_eq!(images[0].image.format, TiffPixelFormat::Gray8);
+    assert_eq!(images[0].image.planes[0].data, gray);
     // Page 1: mask page decodes as Gray8 with interior=0xFF /
     // exterior=0x00, matching the canonical mask polarity.
-    assert_eq!(images[1].pixel_format, TiffPixelFormat::Gray8);
+    assert_eq!(images[1].image.format, TiffPixelFormat::Gray8);
     assert_eq!(
-        images[1].planes[0].data,
+        images[1].image.planes[0].data,
         expand_mask_to_gray8(&packed_mask, w, h)
     );
 }
@@ -330,7 +333,7 @@ fn gray8_page_does_not_set_mask_bit() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let buf = encode_tiff(&page).expect("encode Gray8");
+    let buf = encode_page(&page).expect("encode Gray8");
     let header = parse_header(&buf).expect("parse_header");
     let (entries, _next) = parse_ifd(
         &buf,
@@ -373,9 +376,9 @@ fn transparency_mask_tiled_matches_strip() {
         tiling: Some((16, 16)),
         ..strip.clone()
     };
-    let ds = decode_tiff(&encode_tiff(&strip).expect("encode strip mask")).expect("decode strip");
-    let dt = decode_tiff(&encode_tiff(&tiled).expect("encode tiled mask")).expect("decode tiled");
-    assert_eq!(dt.frame.planes[0].data, ds.frame.planes[0].data);
+    let ds = decode_page(&encode_page(&strip).expect("encode strip mask")).expect("decode strip");
+    let dt = decode_page(&encode_page(&tiled).expect("encode tiled mask")).expect("decode tiled");
+    assert_eq!(dt.image.planes[0].data, ds.image.planes[0].data);
 }
 
 /// `PlanarConfiguration = 2` is irrelevant for a single-sample page;
@@ -396,7 +399,7 @@ fn transparency_mask_planar_rejected() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let err = encode_tiff(&page).expect_err("planar TransparencyMask must fail");
+    let err = encode_page(&page).expect_err("planar TransparencyMask must fail");
     let msg = format!("{err}");
     assert!(
         msg.contains("PlanarConfiguration") || msg.contains("multi-sample"),
@@ -420,7 +423,7 @@ fn transparency_mask_predictor_rejected() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let err = encode_tiff(&page).expect_err("predictor + TransparencyMask must fail");
+    let err = encode_page(&page).expect_err("predictor + TransparencyMask must fail");
     let msg = format!("{err}");
     assert!(
         msg.contains("Predictor") || msg.contains("1-bit"),
@@ -445,7 +448,7 @@ fn transparency_mask_wrong_buffer_size_rejected() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let err = encode_tiff(&page).expect_err("size-mismatch TransparencyMask must fail");
+    let err = encode_page(&page).expect_err("size-mismatch TransparencyMask must fail");
     let msg = format!("{err}");
     assert!(
         msg.contains("TransparencyMask") && msg.contains("16"),

@@ -38,7 +38,7 @@
 //! Tag 338 sorts after every other tag in the fixture so it is always
 //! appended last in tag-order.
 
-use oxideav_tiff::decode_tiff;
+use oxideav_tiff::{decode_page, TiffPixelFormat};
 
 /// IFD entry, SHORT (field-type = 3) with a single inline value.
 fn entry_short(tag: u16, value: u16) -> [u8; 12] {
@@ -168,10 +168,10 @@ fn build_1x1_gray8_with_extras(extra_samples: &[u16]) -> Vec<u8> {
     out
 }
 
-/// Helper: assert `decode_tiff` returned an error whose Display
+/// Helper: assert `decode_page` returned an error whose Display
 /// includes the given substring.
 fn expect_err_containing(bytes: &[u8], needle: &str) {
-    match decode_tiff(bytes) {
+    match decode_page(bytes) {
         Ok(_) => panic!("expected an error containing {needle:?}, got Ok(..)"),
         Err(e) => {
             let msg = format!("{e}");
@@ -190,9 +190,9 @@ fn rgb_spp4_without_extra_samples_decodes_by_skipping() {
     // trailing-component skip path (regression pin of the
     // pre-inspection behaviour).
     let bytes = build_1x1_rgb(4, &[10, 20, 30, 99], None);
-    let d = decode_tiff(&bytes).expect("RGB SamplesPerPixel=4 without tag 338 must decode");
-    assert_eq!((d.width, d.height), (1, 1));
-    assert_eq!(d.frame.planes[0].data, vec![10, 20, 30]);
+    let d = decode_page(&bytes).expect("RGB SamplesPerPixel=4 without tag 338 must decode");
+    assert_eq!((d.image.width, d.image.height), (1, 1));
+    assert_eq!(d.image.planes[0].data, vec![10, 20, 30]);
 }
 
 #[test]
@@ -201,9 +201,9 @@ fn extra_samples_zero_unspecified_decodes_by_skipping() {
     // carries no defined meaning, so the R, G, B triple renders
     // correctly without it.
     let bytes = build_1x1_rgb(4, &[10, 20, 30, 99], Some(&[0]));
-    let d = decode_tiff(&bytes).expect("ExtraSamples=[0] must decode");
-    assert_eq!((d.width, d.height), (1, 1));
-    assert_eq!(d.frame.planes[0].data, vec![10, 20, 30]);
+    let d = decode_page(&bytes).expect("ExtraSamples=[0] must decode");
+    assert_eq!((d.image.width, d.image.height), (1, 1));
+    assert_eq!(d.image.planes[0].data, vec![10, 20, 30]);
 }
 
 #[test]
@@ -213,10 +213,17 @@ fn extra_samples_two_unassociated_alpha_decodes_by_skipping() {
     // the color components are stored straight (not pre-multiplied),
     // so skipping the soft matte yields the correctly-colored
     // fully-opaque render.
+    //
+    // Since the image-crate contract, the four straight samples are the
+    // crate's native `Rgba` layout and are handed back verbatim; the
+    // alpha-less display render is `to_rgb8` (alpha dropped).
     let bytes = build_1x1_rgb(4, &[10, 20, 30, 99], Some(&[2]));
-    let d = decode_tiff(&bytes).expect("ExtraSamples=[2] must decode");
-    assert_eq!((d.width, d.height), (1, 1));
-    assert_eq!(d.frame.planes[0].data, vec![10, 20, 30]);
+    let d = decode_page(&bytes).expect("ExtraSamples=[2] must decode");
+    assert_eq!((d.image.width, d.image.height), (1, 1));
+    assert_eq!(d.image.format, TiffPixelFormat::Rgba);
+    assert_eq!(d.image.planes[0].data, vec![10, 20, 30, 99]);
+    assert_eq!(d.image.to_rgb8(), vec![10, 20, 30]);
+    assert_eq!(d.image.to_rgba8(), vec![10, 20, 30, 99]);
 }
 
 #[test]
@@ -233,9 +240,9 @@ fn extra_samples_one_associated_alpha_displays_premultiplied_rgb() {
     // trailing alpha. The stored `(10, 20, 30)` is already
     // pre-multiplied by alpha = 99, so it renders verbatim.
     let bytes = build_1x1_rgb(4, &[10, 20, 30, 99], Some(&[1]));
-    let d = decode_tiff(&bytes).expect("ExtraSamples=[1] (associated alpha) must decode");
-    assert_eq!((d.width, d.height), (1, 1));
-    assert_eq!(d.frame.planes[0].data, vec![10, 20, 30]);
+    let d = decode_page(&bytes).expect("ExtraSamples=[1] (associated alpha) must decode");
+    assert_eq!((d.image.width, d.image.height), (1, 1));
+    assert_eq!(d.image.planes[0].data, vec![10, 20, 30]);
 }
 
 #[test]
@@ -247,8 +254,8 @@ fn extra_samples_associated_alpha_zero_alpha_renders_stored_black() {
     // fully-transparent pixel as black, which is the §18 naive-display
     // result.
     let bytes = build_1x1_rgb(4, &[0, 0, 0, 0], Some(&[1]));
-    let d = decode_tiff(&bytes).expect("ExtraSamples=[1] alpha=0 must decode");
-    assert_eq!(d.frame.planes[0].data, vec![0, 0, 0]);
+    let d = decode_page(&bytes).expect("ExtraSamples=[1] alpha=0 must decode");
+    assert_eq!(d.image.planes[0].data, vec![0, 0, 0]);
 }
 
 #[test]
@@ -257,9 +264,9 @@ fn extra_samples_two_extras_spp5_decode_by_skipping() {
     // ExtraSamples will contain 2 values, one for each extra
     // sample." Both extras are skippable kinds (0 and 2).
     let bytes = build_1x1_rgb(5, &[10, 20, 30, 99, 77], Some(&[0, 2]));
-    let d = decode_tiff(&bytes).expect("ExtraSamples=[0,2] on SamplesPerPixel=5 must decode");
-    assert_eq!((d.width, d.height), (1, 1));
-    assert_eq!(d.frame.planes[0].data, vec![10, 20, 30]);
+    let d = decode_page(&bytes).expect("ExtraSamples=[0,2] on SamplesPerPixel=5 must decode");
+    assert_eq!((d.image.width, d.image.height), (1, 1));
+    assert_eq!(d.image.planes[0].data, vec![10, 20, 30]);
 }
 
 #[test]
@@ -270,9 +277,9 @@ fn extra_samples_mixed_with_associated_alpha_decodes() {
     // meaning and the associated-alpha pre-multiplied color is the §18
     // composite-over-black display value. Both trailing extras drop.
     let bytes = build_1x1_rgb(5, &[10, 20, 30, 99, 77], Some(&[0, 1]));
-    let d = decode_tiff(&bytes).expect("ExtraSamples=[0,1] must decode");
-    assert_eq!((d.width, d.height), (1, 1));
-    assert_eq!(d.frame.planes[0].data, vec![10, 20, 30]);
+    let d = decode_page(&bytes).expect("ExtraSamples=[0,1] must decode");
+    assert_eq!((d.image.width, d.image.height), (1, 1));
+    assert_eq!(d.image.planes[0].data, vec![10, 20, 30]);
 }
 
 #[test]

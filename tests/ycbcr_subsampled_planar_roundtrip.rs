@@ -30,7 +30,7 @@
 
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
     TiffPixelFormat,
 };
 
@@ -92,11 +92,11 @@ fn planar_subsampled_matches_chunky_subsampled_decode() {
             ..planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false)
         };
         let planar = planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false);
-        let want = decode_tiff(&encode_tiff(&chunky).unwrap()).unwrap();
-        let got = decode_tiff(&encode_tiff(&planar).unwrap()).unwrap();
-        assert_eq!(got.frame.pixel_format, TiffPixelFormat::Rgb24);
+        let want = decode_page(&encode_page(&chunky).unwrap()).unwrap();
+        let got = decode_page(&encode_page(&planar).unwrap()).unwrap();
+        assert_eq!(got.image.format, TiffPixelFormat::Rgb24);
         assert_eq!(
-            got.frame.planes[0].data, want.frame.planes[0].data,
+            got.image.planes[0].data, want.image.planes[0].data,
             "planar vs chunky decode mismatch at ({sh},{sv})"
         );
     }
@@ -107,8 +107,8 @@ fn planar_subsampled_compressor_predictor_matrix() {
     let (sh, sv) = (2u16, 2u16);
     let (w, h) = (20u32, 12u32);
     let pixels = block_constant_ycbcr(w, h, 2, 2);
-    let baseline = decode_tiff(
-        &encode_tiff(&planar_page(
+    let baseline = decode_page(
+        &encode_page(&planar_page(
             &pixels,
             w,
             h,
@@ -122,9 +122,9 @@ fn planar_subsampled_compressor_predictor_matrix() {
     for compression in COMPRESSORS {
         for predictor in [false, true] {
             let page = planar_page(&pixels, w, h, (sh, sv), compression, predictor);
-            let img = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
+            let img = decode_page(&encode_page(&page).unwrap()).unwrap();
             assert_eq!(
-                img.frame.planes[0].data, baseline.frame.planes[0].data,
+                img.image.planes[0].data, baseline.image.planes[0].data,
                 "matrix mismatch (compression={compression:?} predictor={predictor})"
             );
         }
@@ -137,7 +137,7 @@ fn planar_subsampled_ifd_and_verbatim_planes() {
     let (w, h) = (8u32, 4u32);
     let (cw, ch) = (4usize, 2usize);
     let pixels = block_constant_ycbcr(w, h, 2, 2);
-    let file = encode_tiff(&planar_page(
+    let file = encode_page(&planar_page(
         &pixels,
         w,
         h,
@@ -277,9 +277,9 @@ fn hand_built_multi_strip_planar_subsampled_decodes() {
     let cb: [u8; 4] = [128, 90, 200, 60];
     let cr: [u8; 4] = [128, 180, 40, 220];
     let file = hand_built_two_strip_planar(&y, &cb, &cr);
-    let got = decode_tiff(&file).expect("hand-built planar subsampled decodes");
-    assert_eq!((got.width, got.height), (4, 4));
-    assert_eq!(got.frame.pixel_format, TiffPixelFormat::Rgb24);
+    let got = decode_page(&file).expect("hand-built planar subsampled decodes");
+    assert_eq!((got.image.width, got.image.height), (4, 4));
+    assert_eq!(got.image.format, TiffPixelFormat::Rgb24);
 
     // Cross-check against our encoder's single-strip planar write of
     // the equivalent full-resolution pixels (chroma splatted per 2×2
@@ -294,8 +294,8 @@ fn hand_built_multi_strip_planar_subsampled_decodes() {
             full.push(cr[ci]);
         }
     }
-    let want = decode_tiff(
-        &encode_tiff(&planar_page(
+    let want = decode_page(
+        &encode_page(&planar_page(
             &full,
             4,
             4,
@@ -306,7 +306,7 @@ fn hand_built_multi_strip_planar_subsampled_decodes() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(got.frame.planes[0].data, want.frame.planes[0].data);
+    assert_eq!(got.image.planes[0].data, want.image.planes[0].data);
 }
 
 // ---------------------------------------------------------------------------
@@ -325,7 +325,7 @@ fn tiled_planar_subsampled_roundtrips() {
         let (w, h) = (32u32, 32u32);
         let pixels = block_constant_ycbcr(w, h, sh as u32, sv as u32);
         let strip = planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false);
-        let want = decode_tiff(&encode_tiff(&strip).unwrap()).unwrap();
+        let want = decode_page(&encode_page(&strip).unwrap()).unwrap();
         for compression in [
             TiffCompression::None,
             TiffCompression::Lzw,
@@ -338,10 +338,10 @@ fn tiled_planar_subsampled_roundtrips() {
                     predictor,
                     ..planar_page(&pixels, w, h, (sh, sv), compression, predictor)
                 };
-                let got = decode_tiff(&encode_tiff(&tiled).unwrap()).unwrap();
-                assert_eq!(got.frame.pixel_format, TiffPixelFormat::Rgb24);
+                let got = decode_page(&encode_page(&tiled).unwrap()).unwrap();
+                assert_eq!(got.image.format, TiffPixelFormat::Rgb24);
                 assert_eq!(
-                    got.frame.planes[0].data, want.frame.planes[0].data,
+                    got.image.planes[0].data, want.image.planes[0].data,
                     "tiled planar ({sh},{sv}) compression={compression:?} \
                      predictor={predictor} must match the strip planar decode"
                 );
@@ -359,13 +359,13 @@ fn tiled_planar_subsampled_partial_edge_tiles() {
     let (w, h) = (40u32, 24u32);
     let pixels = block_constant_ycbcr(w, h, 2, 2);
     let strip = planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false);
-    let want = decode_tiff(&encode_tiff(&strip).unwrap()).unwrap();
+    let want = decode_page(&encode_page(&strip).unwrap()).unwrap();
     let tiled = EncodePage {
         tiling: Some((16, 16)),
         ..planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false)
     };
-    let got = decode_tiff(&encode_tiff(&tiled).unwrap()).unwrap();
-    assert_eq!(got.frame.planes[0].data, want.frame.planes[0].data);
+    let got = decode_page(&encode_page(&tiled).unwrap()).unwrap();
+    assert_eq!(got.image.planes[0].data, want.image.planes[0].data);
 }
 
 #[test]
@@ -375,7 +375,7 @@ fn chunky_subsampled_predictor_encode_still_rejected() {
         planar: false,
         ..planar_page(&pixels, 8, 8, (2, 2), TiffCompression::Lzw, true)
     };
-    let err = encode_tiff(&page).unwrap_err().to_string();
+    let err = encode_page(&page).unwrap_err().to_string();
     assert!(
         err.contains("chunky chroma-subsampled"),
         "unexpected error: {err}"
@@ -388,7 +388,7 @@ fn planar_subsampled_dimension_constraint_enforced() {
     // subsampling factors — also with planar on.
     let pixels = block_constant_ycbcr(7, 4, 1, 1);
     let page = planar_page(&pixels, 7, 4, (2, 2), TiffCompression::None, false);
-    assert!(encode_tiff(&page).is_err());
+    assert!(encode_page(&page).is_err());
 }
 
 #[test]
@@ -413,7 +413,7 @@ fn decode_rejects_bad_rows_per_strip_multiple() {
         }
     }
     assert!(patched);
-    let err = match decode_tiff(&file) {
+    let err = match decode_page(&file) {
         Err(e) => e.to_string(),
         Ok(_) => panic!("bad RowsPerStrip multiple must not decode"),
     };

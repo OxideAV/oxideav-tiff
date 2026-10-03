@@ -21,7 +21,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use oxideav_tiff::{decode_tiff, DecodedTiff};
+use oxideav_tiff::{decode_page, Page};
 
 // ---------------------------------------------------------------------------
 // Hand-built planar TIFF
@@ -182,16 +182,16 @@ fn rgb_pattern(w: u32, h: u32) -> Vec<u8> {
     p
 }
 
-fn frame_to_rgb24_bytes(d: &DecodedTiff) -> Vec<u8> {
-    assert_eq!(d.frame.planes.len(), 1);
-    let stride = d.frame.planes[0].stride;
-    let row_bytes = d.width as usize * 3;
+fn frame_to_rgb24_bytes(d: &Page) -> Vec<u8> {
+    assert_eq!(d.image.planes.len(), 1);
+    let stride = d.image.planes[0].stride;
+    let row_bytes = d.image.width as usize * 3;
     if stride == row_bytes {
-        d.frame.planes[0].data.clone()
+        d.image.planes[0].data.clone()
     } else {
-        let mut out = Vec::with_capacity(row_bytes * d.height as usize);
-        for y in 0..d.height as usize {
-            out.extend_from_slice(&d.frame.planes[0].data[y * stride..y * stride + row_bytes]);
+        let mut out = Vec::with_capacity(row_bytes * d.image.height as usize);
+        for y in 0..d.image.height as usize {
+            out.extend_from_slice(&d.image.planes[0].data[y * stride..y * stride + row_bytes]);
         }
         out
     }
@@ -201,8 +201,8 @@ fn frame_to_rgb24_bytes(d: &DecodedTiff) -> Vec<u8> {
 fn hand_built_planar_rgb_uncompressed_8bit() {
     let pixels = rgb_pattern(32, 16);
     let tiff = build_planar_rgb_tiff(32, 16, &pixels);
-    let d = decode_tiff(&tiff).expect("hand-built planar RGB decode");
-    assert_eq!((d.width, d.height), (32, 16));
+    let d = decode_page(&tiff).expect("hand-built planar RGB decode");
+    assert_eq!((d.image.width, d.image.height), (32, 16));
     let got = frame_to_rgb24_bytes(&d);
     assert_eq!(
         got, pixels,
@@ -224,7 +224,7 @@ fn hand_built_planar_rgb_solid_color() {
         pixels.push(0xFF); // B
     }
     let tiff = build_planar_rgb_tiff(8, 8, &pixels);
-    let d = decode_tiff(&tiff).expect("solid-blue planar decode");
+    let d = decode_page(&tiff).expect("solid-blue planar decode");
     let got = frame_to_rgb24_bytes(&d);
     assert_eq!(got, pixels, "solid-blue planar pixels mismatch");
 }
@@ -245,7 +245,7 @@ fn hand_built_planar_rgb_distinct_planes() {
         }
     }
     let tiff = build_planar_rgb_tiff(16, 16, &pixels);
-    let d = decode_tiff(&tiff).expect("distinct-planes decode");
+    let d = decode_page(&tiff).expect("distinct-planes decode");
     let got = frame_to_rgb24_bytes(&d);
     assert_eq!(got, pixels, "distinct-plane RGB pixels mismatch");
 }
@@ -353,8 +353,8 @@ fn decode_64x64_rgb_planar_tiffcp() {
     let tiff = std::fs::read(&planar_path).expect("read planar.tiff");
     let _ = std::fs::remove_dir_all(&dir);
 
-    let d = decode_tiff(&tiff).expect("decode planar RGB TIFF (tiffcp)");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&tiff).expect("decode planar RGB TIFF (tiffcp)");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_to_rgb24_bytes(&d);
     assert_eq!(got, pixels, "tiffcp planar RGB pixels mismatch");
 }
@@ -420,8 +420,8 @@ fn decode_64x64_rgb_planar_lzw_tiffcp() {
     let tiff = std::fs::read(&planar_path).expect("read planar-lzw.tiff");
     let _ = std::fs::remove_dir_all(&dir);
 
-    let d = decode_tiff(&tiff).expect("decode planar LZW TIFF");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&tiff).expect("decode planar LZW TIFF");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_to_rgb24_bytes(&d);
     // LZW with predictor=1 (no prediction) is lossless; pixels must
     // match exactly. (tiffcp does not enable Predictor=2 by default.)

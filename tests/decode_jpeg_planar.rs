@@ -26,7 +26,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use oxideav_tiff::types::*;
-use oxideav_tiff::{decode_tiff, TiffPixelFormat};
+use oxideav_tiff::{decode_page, TiffPixelFormat};
 
 fn rand_suffix() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -304,7 +304,7 @@ fn planar_rgb_lossless_exact() {
             }
         }
     }
-    let d = decode_tiff(&build_tiff(
+    let d = decode_page(&build_tiff(
         &PlanarCfg {
             width: w as u32,
             height: h as u32,
@@ -320,8 +320,8 @@ fn planar_rgb_lossless_exact() {
         &segs,
     ))
     .expect("planar RGB decode");
-    assert_eq!(d.frame.pixel_format, TiffPixelFormat::Rgb24);
-    let got = image_bytes(&d.frame, 3);
+    assert_eq!(d.image.format, TiffPixelFormat::Rgb24);
+    let got = image_bytes(&d.image, 3);
     let mut want = Vec::with_capacity(w * h * 3);
     for (i, &r) in planes[0].iter().enumerate() {
         want.push(r);
@@ -359,8 +359,8 @@ fn planar_ycbcr_subsampled_matches_chunky_path() {
             },
             &[pack_data_units(&y, &cb, &cr, w, h, sh, sv)],
         );
-        let ref_d = decode_tiff(&chunky).expect("chunky reference decode");
-        let reference = image_bytes(&ref_d.frame, 3);
+        let ref_d = decode_page(&chunky).expect("chunky reference decode");
+        let reference = image_bytes(&ref_d.image, 3);
 
         // Planar JPEG wraps: single strip and 16-luma-row strips.
         for rps in [h as u32, 16u32] {
@@ -405,10 +405,10 @@ fn planar_ycbcr_subsampled_matches_chunky_path() {
                 },
                 &segs,
             );
-            let d = decode_tiff(&planar_tiff).expect("planar YCbCr decode");
-            assert_eq!(d.frame.pixel_format, TiffPixelFormat::Rgb24);
+            let d = decode_page(&planar_tiff).expect("planar YCbCr decode");
+            assert_eq!(d.image.format, TiffPixelFormat::Rgb24);
             assert_eq!(
-                image_bytes(&d.frame, 3),
+                image_bytes(&d.image, 3),
                 reference,
                 "planar JPEG ({sh},{sv}) rps={rps} must match the chunky data-unit path"
             );
@@ -444,7 +444,7 @@ fn planar_ycbcr_subsampled_tiled_matches_chunky_path() {
         },
         &[pack_data_units(&y, &cb, &cr, w, h, sh, sv)],
     );
-    let reference = image_bytes(&decode_tiff(&chunky).expect("chunky reference").frame, 3);
+    let reference = image_bytes(&decode_page(&chunky).expect("chunky reference").image, 3);
 
     // Per-plane tile grids, plane-major, row-major within a plane.
     let mut segs = Vec::new();
@@ -471,7 +471,7 @@ fn planar_ycbcr_subsampled_tiled_matches_chunky_path() {
             }
         }
     }
-    let d = decode_tiff(&build_tiff(
+    let d = decode_page(&build_tiff(
         &PlanarCfg {
             width: w as u32,
             height: h as u32,
@@ -488,7 +488,7 @@ fn planar_ycbcr_subsampled_tiled_matches_chunky_path() {
     ))
     .expect("tiled planar YCbCr decode");
     assert_eq!(
-        image_bytes(&d.frame, 3),
+        image_bytes(&d.image, 3),
         reference,
         "tiled planar JPEG must match the chunky data-unit path"
     );
@@ -524,7 +524,7 @@ fn planar_cmyk_matches_chunky_path() {
         },
         &[chunky_samples],
     );
-    let reference = image_bytes(&decode_tiff(&chunky).expect("chunky CMYK").frame, 3);
+    let reference = image_bytes(&decode_page(&chunky).expect("chunky CMYK").image, 3);
 
     let mut segs = Vec::new();
     for p in &planes {
@@ -536,7 +536,7 @@ fn planar_cmyk_matches_chunky_path() {
             }
         }
     }
-    let d = decode_tiff(&build_tiff(
+    let d = decode_page(&build_tiff(
         &PlanarCfg {
             width: w as u32,
             height: h as u32,
@@ -553,7 +553,7 @@ fn planar_cmyk_matches_chunky_path() {
     ))
     .expect("planar CMYK decode");
     assert_eq!(
-        image_bytes(&d.frame, 3),
+        image_bytes(&d.image, 3),
         reference,
         "planar CMYK JPEG must match the chunky CMYK path"
     );
@@ -642,14 +642,14 @@ fn oldstyle_planar_flag_decodes_interchange() {
         out
     };
 
-    let chunky = decode_tiff(&build_old(PLANAR_CHUNKY)).expect("planar=1 wrap");
-    let planar = decode_tiff(&build_old(PLANAR_SEPARATE)).expect("planar=2 wrap");
+    let chunky = decode_page(&build_old(PLANAR_CHUNKY)).expect("planar=1 wrap");
+    let planar = decode_page(&build_old(PLANAR_SEPARATE)).expect("planar=2 wrap");
     assert_eq!(
-        image_bytes(&chunky.frame, 1),
-        image_bytes(&planar.frame, 1),
+        image_bytes(&chunky.image, 1),
+        image_bytes(&planar.image, 1),
         "§22 planar flag must not change the interchange decode"
     );
-    assert_eq!(image_bytes(&chunky.frame, 1), gray, "lossless exact");
+    assert_eq!(image_bytes(&chunky.image, 1), gray, "lossless exact");
 }
 
 /// Structural gates: wrong segment count and a multi-channel segment
@@ -678,7 +678,7 @@ fn planar_structural_gates() {
         },
         &[jpeg.clone(), jpeg.clone()],
     );
-    let Err(e) = decode_tiff(&tiff) else {
+    let Err(e) = decode_page(&tiff) else {
         panic!("wrong planar segment count must not decode");
     };
     let msg = format!("{e:?}");

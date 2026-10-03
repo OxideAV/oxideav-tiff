@@ -29,7 +29,7 @@
 //! Three layers of validation:
 //!
 //! 1. **Independent-fixture cross-reads** (run unconditionally): the
-//!    committed reference files decode through [`decode_tiff`] and the
+//!    committed reference files decode through [`decode_page`] and the
 //!    pixels match the generating formulas (exactly for the `VP8L`
 //!    lossless files; within a small tolerance for the `VP8 ` lossy
 //!    file, whose YUV→RGB display conversion is reader-defined).
@@ -48,9 +48,16 @@
 //!    planar) and decoder-side (a 50001 IFD declaring a Predictor must
 //!    be rejected per the TIFF 6.0 §14 reader rule).
 
+// The black-box cross-checks below call the *published* `oxideav-webp`
+// 0.2.x surface (what this crate's CI resolves). The sibling's master
+// deprecates those names in favour of its image-crate-contract
+// successors, which are unreleased; the umbrella path build therefore
+// warns here until that release lands.
+#![allow(deprecated)]
+
 use oxideav_tiff::{
-    decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, DecodedTiff, EncodePage,
-    EncodePixelFormat, ExtraSampleKind, PageExtras, TiffCompression, TiffPixelFormat,
+    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat,
+    ExtraSampleKind, Page, PageExtras, TiffCompression, TiffPixelFormat,
 };
 
 // ---- Deterministic pixel formulas (mirror the fixture generators) ----
@@ -110,13 +117,18 @@ fn fixture_rgb_lossy(w: u32, h: u32) -> Vec<u8> {
 
 /// Extract the decoded RGB rows (dropping any stride padding) as one
 /// packed `width * height * 3` buffer.
-fn packed_rgb(d: &DecodedTiff) -> Vec<u8> {
-    assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
-    let stride = d.frame.planes[0].stride;
-    let row_bytes = (d.width as usize) * 3;
-    let mut out = Vec::with_capacity(row_bytes * d.height as usize);
-    for y in 0..d.height as usize {
-        out.extend_from_slice(&d.frame.planes[0].data[y * stride..y * stride + row_bytes]);
+fn packed_rgb(d: &Page) -> Vec<u8> {
+    // An RGBA (unassociated alpha) page is native `Rgba` since the
+    // image-crate contract; its display render drops the straight alpha.
+    if d.image.format == TiffPixelFormat::Rgba {
+        return d.image.to_rgb8();
+    }
+    assert_eq!(d.image.format, TiffPixelFormat::Rgb24);
+    let stride = d.image.planes[0].stride;
+    let row_bytes = (d.image.width as usize) * 3;
+    let mut out = Vec::with_capacity(row_bytes * d.image.height as usize);
+    for y in 0..d.image.height as usize {
+        out.extend_from_slice(&d.image.planes[0].data[y * stride..y * stride + row_bytes]);
     }
     out
 }
@@ -132,8 +144,8 @@ fn fixture_bytes(name: &str) -> Vec<u8> {
 
 #[test]
 fn fixture_rgb_lossless_single_strip() {
-    let d = decode_tiff(&fixture_bytes("ref_rgb_lossless.tif")).expect("decode");
-    assert_eq!((d.width, d.height), (48, 40));
+    let d = decode_page(&fixture_bytes("ref_rgb_lossless.tif")).expect("decode");
+    assert_eq!((d.image.width, d.image.height), (48, 40));
     assert_eq!(packed_rgb(&d), fixture_rgb(48, 40));
 }
 
@@ -141,8 +153,8 @@ fn fixture_rgb_lossless_single_strip() {
 fn fixture_rgb_lossless_multi_strip() {
     // RowsPerStrip = 16 over 40 rows: three WebP segments of 16/16/8
     // rows — exercises the short final strip.
-    let d = decode_tiff(&fixture_bytes("ref_rgb_strips.tif")).expect("decode");
-    assert_eq!((d.width, d.height), (48, 40));
+    let d = decode_page(&fixture_bytes("ref_rgb_strips.tif")).expect("decode");
+    assert_eq!((d.image.width, d.image.height), (48, 40));
     assert_eq!(packed_rgb(&d), fixture_rgb(48, 40));
 }
 
@@ -150,8 +162,8 @@ fn fixture_rgb_lossless_multi_strip() {
 fn fixture_rgba_lossless() {
     // SamplesPerPixel = 4 + ExtraSamples: the decode drops the alpha
     // (crate §ExtraSamples policy) and must return the RGB part.
-    let d = decode_tiff(&fixture_bytes("ref_rgba_lossless.tif")).expect("decode");
-    assert_eq!((d.width, d.height), (48, 40));
+    let d = decode_page(&fixture_bytes("ref_rgba_lossless.tif")).expect("decode");
+    assert_eq!((d.image.width, d.image.height), (48, 40));
     assert_eq!(packed_rgb(&d), fixture_rgb(48, 40));
 }
 
@@ -160,8 +172,8 @@ fn fixture_rgb_tiled_partial_edge_tiles() {
     // 32×32 tiles over 48×40: 2×2 grid where the right column shows
     // 16 px and the bottom row 8 px — the WebP frames stay padded to
     // the full 32×32 tile geometry.
-    let d = decode_tiff(&fixture_bytes("ref_rgb_tiled.tif")).expect("decode");
-    assert_eq!((d.width, d.height), (48, 40));
+    let d = decode_page(&fixture_bytes("ref_rgb_tiled.tif")).expect("decode");
+    assert_eq!((d.image.width, d.image.height), (48, 40));
     assert_eq!(packed_rgb(&d), fixture_rgb_tiled(48, 40));
 }
 
@@ -177,8 +189,8 @@ fn fixture_rgb_lossy_vp8_payload() {
     // frame is reader-defined, so cross-reader pixel values differ by
     // design — only gross mis-carriage would blow this bound).
     let bytes = fixture_bytes("ref_rgb_lossy.tif");
-    let d = decode_tiff(&bytes).expect("decode");
-    assert_eq!((d.width, d.height), (48, 40));
+    let d = decode_page(&bytes).expect("decode");
+    assert_eq!((d.image.width, d.image.height), (48, 40));
     let got = packed_rgb(&d);
 
     // Single-strip fixture → exactly one RIFF file inside.
@@ -246,18 +258,21 @@ fn page<'a>(
 /// decode both, assert identical pixel planes (VP8L is lossless), and
 /// check the 50001 file actually carries RIFF/WEBP segment payloads.
 fn webp_vs_none(page_webp: &EncodePage<'_>, page_none: &EncodePage<'_>) -> Vec<u8> {
-    let w_bytes = encode_tiff(page_webp).expect("encode webp");
-    let n_bytes = encode_tiff(page_none).expect("encode none");
+    let w_bytes = encode_page(page_webp).expect("encode webp");
+    let n_bytes = encode_page(page_none).expect("encode none");
     assert!(
         w_bytes.windows(4).any(|w| w == b"WEBP" || w == b"VP8L"),
         "Compression=50001 output carries no WebP container magic"
     );
-    let dw = decode_tiff(&w_bytes).expect("decode webp");
-    let dn = decode_tiff(&n_bytes).expect("decode none");
-    assert_eq!((dw.width, dw.height), (dn.width, dn.height));
-    assert_eq!(dw.pixel_format, dn.pixel_format);
+    let dw = decode_page(&w_bytes).expect("decode webp");
+    let dn = decode_page(&n_bytes).expect("decode none");
     assert_eq!(
-        dw.frame.planes[0].data, dn.frame.planes[0].data,
+        (dw.image.width, dw.image.height),
+        (dn.image.width, dn.image.height)
+    );
+    assert_eq!(dw.image.format, dn.image.format);
+    assert_eq!(
+        dw.image.planes[0].data, dn.image.planes[0].data,
         "webp decode != none decode of the same pixels"
     );
     w_bytes
@@ -449,15 +464,18 @@ fn roundtrip_multi_page() {
             ),
         ]
     };
-    let w_bytes = encode_tiff_multi(&pages_of(TiffCompression::Webp)).expect("encode webp");
-    let n_bytes = encode_tiff_multi(&pages_of(TiffCompression::None)).expect("encode none");
-    let dw = decode_tiff_all(&w_bytes).expect("decode webp chain");
-    let dn = decode_tiff_all(&n_bytes).expect("decode none chain");
+    let w_bytes = encode_pages(&pages_of(TiffCompression::Webp)).expect("encode webp");
+    let n_bytes = encode_pages(&pages_of(TiffCompression::None)).expect("encode none");
+    let dw = decode_all(&w_bytes).expect("decode webp chain");
+    let dn = decode_all(&n_bytes).expect("decode none chain");
     assert_eq!(dw.len(), 2);
     assert_eq!(dn.len(), 2);
     for (a, b) in dw.iter().zip(dn.iter()) {
-        assert_eq!((a.width, a.height), (b.width, b.height));
-        assert_eq!(a.planes[0].data, b.planes[0].data);
+        assert_eq!(
+            (a.image.width, a.image.height),
+            (b.image.width, b.image.height)
+        );
+        assert_eq!(a.image.planes[0].data, b.image.planes[0].data);
     }
 }
 
@@ -475,7 +493,7 @@ fn encode_rejects_non_rgb_input() {
         false,
         PageExtras::default(),
     );
-    assert!(encode_tiff(&p).is_err(), "Gray8 + WebP must be rejected");
+    assert!(encode_page(&p).is_err(), "Gray8 + WebP must be rejected");
 }
 
 #[test]
@@ -492,12 +510,12 @@ fn encode_rejects_predictor_and_planar() {
     );
     p.predictor = true;
     assert!(
-        encode_tiff(&p).is_err(),
+        encode_page(&p).is_err(),
         "Predictor + WebP must be rejected"
     );
     p.predictor = false;
     p.planar = true;
-    assert!(encode_tiff(&p).is_err(), "Planar + WebP must be rejected");
+    assert!(encode_page(&p).is_err(), "Planar + WebP must be rejected");
 }
 
 #[test]
@@ -547,9 +565,7 @@ fn decode_rejects_declared_predictor() {
         let e = ifd + 2 + i * 12;
         bytes[e..e + 12].copy_from_slice(a);
     }
-    let err = decode_tiff(&bytes)
-        .err()
-        .expect("Predictor=2 + 50001 must be rejected");
+    let err = decode_page(&bytes).expect_err("Predictor=2 + 50001 must be rejected");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("Predictor"),
@@ -573,7 +589,7 @@ fn decode_rejects_wrong_frame_geometry() {
         }
     }
     assert!(
-        decode_tiff(&bytes).is_err(),
+        decode_page(&bytes).is_err(),
         "frame/IFD geometry mismatch must be rejected"
     );
 }

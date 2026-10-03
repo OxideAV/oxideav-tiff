@@ -12,7 +12,7 @@
 //!    `PhotometricInterpretation = 8`. §23: "1 implies L* only, for
 //!    monochrome data". Confirms the dedicated Gray8 render path.
 
-use oxideav_tiff::{decode_tiff, DecodedTiff, TiffPixelFormat};
+use oxideav_tiff::{decode_page, Page, TiffPixelFormat};
 
 // ---------------------------------------------------------------------------
 // Hand-built classic TIFF fixture for CIELab
@@ -145,15 +145,9 @@ fn decode_cielab_3sample_pure_neutral_gradient() {
     .concat();
 
     let tiff = build_classic_tiff(4, 1, 3, 8, /* PHOTO_CIELAB */ 8, &lab_pixels);
-    let DecodedTiff {
-        frame,
-        width,
-        height,
-        pixel_format,
-        ..
-    } = decode_tiff(&tiff).expect("decode CIELab 3-sample");
-    assert_eq!((width, height), (4, 1));
-    assert_eq!(pixel_format, TiffPixelFormat::Rgb24);
+    let Page { image: frame, .. } = decode_page(&tiff).expect("decode CIELab 3-sample");
+    assert_eq!((frame.width, frame.height), (4, 1));
+    assert_eq!(frame.format, TiffPixelFormat::Rgb24);
     assert_eq!(frame.planes.len(), 1);
 
     let row = &frame.planes[0].data;
@@ -205,7 +199,7 @@ fn decode_cielab_3sample_positive_a_pulls_red() {
     // Expect R notably > G, B.
     let lab_pixels: Vec<u8> = pack_lab(50.0, 120, 0).to_vec();
     let tiff = build_classic_tiff(1, 1, 3, 8, 8, &lab_pixels);
-    let DecodedTiff { frame, .. } = decode_tiff(&tiff).expect("decode CIELab red");
+    let Page { image: frame, .. } = decode_page(&tiff).expect("decode CIELab red");
     let r = frame.planes[0].data[0] as i32;
     let g = frame.planes[0].data[1] as i32;
     let b = frame.planes[0].data[2] as i32;
@@ -218,7 +212,7 @@ fn decode_cielab_3sample_negative_a_pulls_green() {
     // L* = 50, a* = -120 (strong green lean), b* = 0.
     let lab_pixels: Vec<u8> = pack_lab(50.0, -120, 0).to_vec();
     let tiff = build_classic_tiff(1, 1, 3, 8, 8, &lab_pixels);
-    let DecodedTiff { frame, .. } = decode_tiff(&tiff).expect("decode CIELab green");
+    let Page { image: frame, .. } = decode_page(&tiff).expect("decode CIELab green");
     let r = frame.planes[0].data[0] as i32;
     let g = frame.planes[0].data[1] as i32;
     let b = frame.planes[0].data[2] as i32;
@@ -231,7 +225,7 @@ fn decode_cielab_3sample_positive_b_pulls_yellow() {
     // Yellow = R+G high, B low.
     let lab_pixels: Vec<u8> = pack_lab(70.0, 0, 120).to_vec();
     let tiff = build_classic_tiff(1, 1, 3, 8, 8, &lab_pixels);
-    let DecodedTiff { frame, .. } = decode_tiff(&tiff).expect("decode CIELab yellow");
+    let Page { image: frame, .. } = decode_page(&tiff).expect("decode CIELab yellow");
     let r = frame.planes[0].data[0] as i32;
     let g = frame.planes[0].data[1] as i32;
     let b = frame.planes[0].data[2] as i32;
@@ -243,7 +237,7 @@ fn decode_cielab_3sample_negative_b_pulls_blue() {
     // L* = 30, a* = 0, b* = -120 (strong blue lean).
     let lab_pixels: Vec<u8> = pack_lab(30.0, 0, -120).to_vec();
     let tiff = build_classic_tiff(1, 1, 3, 8, 8, &lab_pixels);
-    let DecodedTiff { frame, .. } = decode_tiff(&tiff).expect("decode CIELab blue");
+    let Page { image: frame, .. } = decode_page(&tiff).expect("decode CIELab blue");
     let r = frame.planes[0].data[0] as i32;
     let g = frame.planes[0].data[1] as i32;
     let b = frame.planes[0].data[2] as i32;
@@ -264,15 +258,9 @@ fn decode_cielab_1sample_l_only_emits_gray8() {
         ((100.0_f64) * 255.0 / 100.0).round() as u8,
     ];
     let tiff = build_classic_tiff(4, 1, 1, 8, /* PHOTO_CIELAB */ 8, &l_bytes);
-    let DecodedTiff {
-        frame,
-        width,
-        height,
-        pixel_format,
-        ..
-    } = decode_tiff(&tiff).expect("decode CIELab L*-only");
-    assert_eq!((width, height), (4, 1));
-    assert_eq!(pixel_format, TiffPixelFormat::Gray8);
+    let Page { image: frame, .. } = decode_page(&tiff).expect("decode CIELab L*-only");
+    assert_eq!((frame.width, frame.height), (4, 1));
+    assert_eq!(frame.format, TiffPixelFormat::Gray8);
     assert_eq!(frame.planes.len(), 1);
     let row = &frame.planes[0].data;
     assert_eq!(row.len(), 4);
@@ -294,8 +282,8 @@ fn decode_cielab_1sample_matches_3sample_for_a_b_zero() {
     // luminance closest under the spec's NTSC matrix).
     let mono = build_classic_tiff(1, 1, 1, 8, 8, &[127]); // L* ≈ 49.8
     let tri = build_classic_tiff(1, 1, 3, 8, 8, &pack_lab(49.8, 0, 0));
-    let DecodedTiff { frame: m, .. } = decode_tiff(&mono).unwrap();
-    let DecodedTiff { frame: t, .. } = decode_tiff(&tri).unwrap();
+    let Page { image: m, .. } = decode_page(&mono).unwrap();
+    let Page { image: t, .. } = decode_page(&tri).unwrap();
     let gray = m.planes[0].data[0] as i32;
     let g = t.planes[0].data[1] as i32;
     assert!(

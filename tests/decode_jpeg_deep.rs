@@ -30,7 +30,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use oxideav_tiff::types::*;
-use oxideav_tiff::{decode_tiff, TiffPixelFormat};
+use oxideav_tiff::{decode_page, TiffPixelFormat};
 
 // ---------------------------------------------------------------------------
 // Black-box binary plumbing (availability-gated).
@@ -453,9 +453,9 @@ fn deep_gray12_sof1_single_strip_vs_djpeg() {
         },
         &[jpeg],
     );
-    let d = decode_tiff(&tiff).expect("deep gray decode");
-    assert_eq!(d.frame.pixel_format, TiffPixelFormat::Gray16Le);
-    let got = plane_u16s(&d.frame, 1);
+    let d = decode_page(&tiff).expect("deep gray decode");
+    assert_eq!(d.image.format, TiffPixelFormat::Gray16Le);
+    let got = plane_u16s(&d.image, 1);
     let want: Vec<u16> = reference.iter().map(|&v| widen(v, bits)).collect();
     let tol = widen(1, bits) as u32; // ±1 raw code value, widened
     assert!(
@@ -490,9 +490,9 @@ fn deep_gray12_lossless_exact() {
         rows_per_strip: h as u32,
         subsampling: None,
     };
-    let d = decode_tiff(&build_tiff(&cfg, std::slice::from_ref(&jpeg))).expect("single strip");
-    assert_eq!(d.frame.pixel_format, TiffPixelFormat::Gray16Le);
-    assert_eq!(plane_u16s(&d.frame, 1), want, "lossless must be exact");
+    let d = decode_page(&build_tiff(&cfg, std::slice::from_ref(&jpeg))).expect("single strip");
+    assert_eq!(d.image.format, TiffPixelFormat::Gray16Le);
+    assert_eq!(plane_u16s(&d.image, 1), want, "lossless must be exact");
 
     // Compression = 7 multi-strip: two independently encoded halves.
     let top = to_pgm16(&src[..w * h / 2], w, h / 2, bits);
@@ -511,17 +511,17 @@ fn deep_gray12_lossless_exact() {
         rows_per_strip: h as u32 / 2,
         ..cfg
     };
-    let d2 = decode_tiff(&build_tiff(&cfg2, &[j_top, j_bottom])).expect("multi strip");
-    assert_eq!(plane_u16s(&d2.frame, 1), want, "multi-strip lossless exact");
+    let d2 = decode_page(&build_tiff(&cfg2, &[j_top, j_bottom])).expect("multi strip");
+    assert_eq!(plane_u16s(&d2.image, 1), want, "multi-strip lossless exact");
 
     // §22 old-style interchange wrap of the full-image bitstream.
     let cfg6 = DeepCfg {
         compression: COMPRESSION_JPEG_OLD,
         ..cfg
     };
-    let d6 = decode_tiff(&build_tiff(&cfg6, &[jpeg])).expect("old-style deep");
-    assert_eq!(d6.frame.pixel_format, TiffPixelFormat::Gray16Le);
-    assert_eq!(plane_u16s(&d6.frame, 1), want, "§22 deep lossless exact");
+    let d6 = decode_page(&build_tiff(&cfg6, &[jpeg])).expect("old-style deep");
+    assert_eq!(d6.image.format, TiffPixelFormat::Gray16Le);
+    assert_eq!(plane_u16s(&d6.image, 1), want, "§22 deep lossless exact");
 }
 
 /// 16-bit SOF3 (lossless) grayscale — the top of the §22 / SOF3
@@ -538,7 +538,7 @@ fn deep_gray16_lossless_exact() {
         eprintln!("skipping: cjpeg with -precision 16 -lossless unavailable");
         return;
     };
-    let d = decode_tiff(&build_tiff(
+    let d = decode_page(&build_tiff(
         &DeepCfg {
             width: w as u32,
             height: h as u32,
@@ -553,8 +553,8 @@ fn deep_gray16_lossless_exact() {
         &[jpeg],
     ))
     .expect("16-bit lossless decode");
-    assert_eq!(d.frame.pixel_format, TiffPixelFormat::Gray16Le);
-    assert_eq!(plane_u16s(&d.frame, 1), src, "16-bit lossless exact");
+    assert_eq!(d.image.format, TiffPixelFormat::Gray16Le);
+    assert_eq!(plane_u16s(&d.image, 1), src, "16-bit lossless exact");
 }
 
 /// 12-bit lossless grayscale under WhiteIsZero: the polarity
@@ -582,8 +582,8 @@ fn deep_gray12_white_is_zero_inverts() {
         rows_per_strip: h as u32,
         subsampling: None,
     };
-    let d = decode_tiff(&build_tiff(&cfg, &[jpeg])).expect("WhiteIsZero deep decode");
-    let got = plane_u16s(&d.frame, 1);
+    let d = decode_page(&build_tiff(&cfg, &[jpeg])).expect("WhiteIsZero deep decode");
+    let got = plane_u16s(&d.image, 1);
     let want: Vec<u16> = src.iter().map(|&v| 0xFFFF - widen(v, bits)).collect();
     assert_eq!(got, want, "WhiteIsZero must complement the widened value");
 }
@@ -628,9 +628,9 @@ fn deep_ycbcr12_sof1_vs_djpeg() {
             },
             &[jpeg],
         );
-        let d = decode_tiff(&tiff).expect("deep YCbCr decode");
-        assert_eq!(d.frame.pixel_format, TiffPixelFormat::Rgb48Le);
-        let got = plane_u16s(&d.frame, 3);
+        let d = decode_page(&tiff).expect("deep YCbCr decode");
+        assert_eq!(d.image.format, TiffPixelFormat::Rgb48Le);
+        let got = plane_u16s(&d.image, 3);
         let want: Vec<u16> = reference.iter().map(|&v| widen(v, bits)).collect();
         let tol = 4 * widen(1, bits) as u32; // ±4 raw code values at 12 bits
         let diff = max_abs_diff(&got, &want);
@@ -669,7 +669,7 @@ fn deep_gray12_lossless_tiled_exact() {
             }
         }
     }
-    let d = decode_tiff(&build_tiff(
+    let d = decode_page(&build_tiff(
         &DeepCfg {
             width: w as u32,
             height: h as u32,
@@ -684,9 +684,9 @@ fn deep_gray12_lossless_tiled_exact() {
         &tiles,
     ))
     .expect("tiled deep decode");
-    assert_eq!(d.frame.pixel_format, TiffPixelFormat::Gray16Le);
+    assert_eq!(d.image.format, TiffPixelFormat::Gray16Le);
     let want: Vec<u16> = src.iter().map(|&v| widen(v, bits)).collect();
-    assert_eq!(plane_u16s(&d.frame, 1), want, "tiled lossless exact");
+    assert_eq!(plane_u16s(&d.image, 1), want, "tiled lossless exact");
 }
 
 /// Depth gates that must stay precise errors: sub-8-bit precisions
@@ -707,7 +707,7 @@ fn deep_gates_precise_errors() {
     // A well-formed-enough wrapper with junk segment bytes: the depth
     // gate fires before the JPEG bytes are touched.
     let tiff = build_tiff(&cfg, &[vec![0u8; 8]]);
-    let Err(e) = decode_tiff(&tiff) else {
+    let Err(e) = decode_page(&tiff) else {
         panic!("sub-8-bit JPEG-in-TIFF must not decode");
     };
     let msg = format!("{e:?}");
@@ -720,7 +720,7 @@ fn deep_gates_precise_errors() {
         ..cfg
     };
     let tiff = build_tiff(&cfg, &[vec![0u8; 8]]);
-    let Err(e) = decode_tiff(&tiff) else {
+    let Err(e) = decode_page(&tiff) else {
         panic!("deep CMYK JPEG-in-TIFF must not decode");
     };
     let msg = format!("{e:?}");

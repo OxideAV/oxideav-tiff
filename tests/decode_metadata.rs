@@ -16,7 +16,7 @@
 //! Reference") and the resolution / page tags there.
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, PageResolution,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, PageResolution,
     ResolutionUnit, TiffCompression, TiffMetadata,
 };
 
@@ -45,8 +45,8 @@ fn ascii_section8_fields_round_trip() {
         copyright: Some("(c) 2026"),
         ..Default::default()
     };
-    let tiff = encode_tiff(&gray8_page(4, 4, &px, extras)).expect("encode");
-    let d = decode_tiff(&tiff).expect("decode");
+    let tiff = encode_page(&gray8_page(4, 4, &px, extras)).expect("encode");
+    let d = decode_page(&tiff).expect("decode");
     let m = &d.metadata;
     assert_eq!(m.image_description.as_deref(), Some("A test raster"));
     assert_eq!(m.software.as_deref(), Some("oxideav-tiff"));
@@ -70,8 +70,8 @@ fn resolution_triple_round_trips_as_raw_rationals() {
         }),
         ..Default::default()
     };
-    let tiff = encode_tiff(&gray8_page(2, 2, &px, extras)).expect("encode");
-    let m = decode_tiff(&tiff).expect("decode").metadata;
+    let tiff = encode_page(&gray8_page(2, 2, &px, extras)).expect("encode");
+    let m = decode_page(&tiff).expect("decode").metadata;
     assert_eq!(m.x_resolution, Some((300, 1)));
     assert_eq!(m.y_resolution, Some((150, 2)));
     assert_eq!(m.resolution_unit, Some(ResolutionUnit::Centimeter));
@@ -86,8 +86,8 @@ fn orientation_tag_preserved_alongside_applied_transform() {
         orientation: Some(6),
         ..Default::default()
     };
-    let tiff = encode_tiff(&gray8_page(4, 3, &px, extras)).expect("encode");
-    let m = decode_tiff(&tiff).expect("decode").metadata;
+    let tiff = encode_page(&gray8_page(4, 3, &px, extras)).expect("encode");
+    let m = decode_page(&tiff).expect("decode").metadata;
     assert_eq!(m.orientation, Some(6));
 }
 
@@ -100,8 +100,8 @@ fn page_number_and_subfile_bits_round_trip() {
         reduced_resolution: true, // NewSubfileType bit 0
         ..Default::default()
     };
-    let tiff = encode_tiff(&gray8_page(2, 2, &px, extras)).expect("encode");
-    let m = decode_tiff(&tiff).expect("decode").metadata;
+    let tiff = encode_page(&gray8_page(2, 2, &px, extras)).expect("encode");
+    let m = decode_page(&tiff).expect("decode").metadata;
     assert_eq!(m.page_number, Some((2, 5)));
     // bit 0 (reduced) | bit 1 (page) = 0b11 = 3.
     assert_eq!(m.new_subfile_type, Some(3));
@@ -110,8 +110,8 @@ fn page_number_and_subfile_bits_round_trip() {
 #[test]
 fn no_metadata_tags_yields_empty_default() {
     let px: Vec<u8> = vec![0x33; 4];
-    let tiff = encode_tiff(&gray8_page(2, 2, &px, PageExtras::default())).expect("encode");
-    let m = decode_tiff(&tiff).expect("decode").metadata;
+    let tiff = encode_page(&gray8_page(2, 2, &px, PageExtras::default())).expect("encode");
+    let m = decode_page(&tiff).expect("decode").metadata;
     // The encoder writes no §8 / resolution / page tags without extras,
     // but it always emits NewSubfileType = 0 (a baseline structural tag,
     // not descriptive metadata); the reader reports it faithfully. Every
@@ -230,7 +230,7 @@ fn hand_built_make_model_hostcomputer_document_page_read_back() {
     ];
     // 9 core + 5 extra = 14 entries — matches `base` above.
     let tiff = build_meta_tiff(&extras, &blobs);
-    let m = decode_tiff(&tiff).expect("decode").metadata;
+    let m = decode_page(&tiff).expect("decode").metadata;
     assert_eq!(m.make.as_deref(), Some("AcmeScan"));
     assert_eq!(m.model.as_deref(), Some("Model-9000"));
     assert_eq!(m.host_computer.as_deref(), Some("workstation-01"));
@@ -243,7 +243,7 @@ fn subfile_type_short_read_back() {
     // SubfileType (255) = 1 (full-resolution) fits inline.
     let extras = [entry_inline(255, 3, 1, 1u32.to_le_bytes())];
     let tiff = build_meta_tiff(&extras, &[]);
-    let m = decode_tiff(&tiff).expect("decode").metadata;
+    let m = decode_page(&tiff).expect("decode").metadata;
     assert_eq!(m.subfile_type, Some(1));
 }
 
@@ -252,7 +252,7 @@ fn inline_short_ascii_fits_in_value_slot() {
     // ImageDescription (270) = "Hi\0\0" fits inline (<=4 bytes incl NUL).
     let extras = [entry_inline(270, 2, 3, *b"Hi\0\0")];
     let tiff = build_meta_tiff(&extras, &[]);
-    let m = decode_tiff(&tiff).expect("decode").metadata;
+    let m = decode_page(&tiff).expect("decode").metadata;
     assert_eq!(m.image_description.as_deref(), Some("Hi"));
 }
 
@@ -262,7 +262,7 @@ fn malformed_metadata_entry_does_not_gate_decode() {
     // decode still succeeds and the pixel is intact.
     let extras = [entry_inline(270, 3, 1, 7u32.to_le_bytes())];
     let tiff = build_meta_tiff(&extras, &[]);
-    let d = decode_tiff(&tiff).expect("decode still succeeds");
+    let d = decode_page(&tiff).expect("decode still succeeds");
     assert_eq!(d.metadata.image_description, None);
-    assert_eq!(d.frame.planes[0].data, vec![0xAB]);
+    assert_eq!(d.image.planes[0].data, vec![0xAB]);
 }

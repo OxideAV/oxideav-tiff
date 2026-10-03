@@ -1,34 +1,36 @@
-//! High-level TIFF 6.0 decode: parse the header + first IFD,
-//! decompress every strip, assemble the image, apply the predictor
-//! if any, expand palette / bilevel / 16-bit pixels into one of our
-//! standard `TiffPixelFormat`s.
+//! High-level TIFF 6.0 decode: parse the header + an IFD, decompress
+//! every strip / tile, assemble the image, apply the predictor if any,
+//! and hand back the page in one of the crate's native
+//! [`TiffPixelFormat`]s (bilevel / 4-bit samples expanded to 8 bits,
+//! palette indices as `Pal8` + the colour table, CMYK as `Cmyk`, the
+//! §21 YCbCr / §23 CIELab / IEEE-float photometrics rendered to RGB /
+//! gray display planes).
+//!
+//! The contract vocabulary (`decode`, `decode_with`, `decode_all`, …)
+//! lives in [`crate::api`]; this module holds the IFD-level engine and
+//! the TIFF-specific depth entry points ([`decode_page_with`],
+//! [`decode_page_at_with`], [`decode_pages_with`]).
 
 use crate::ccitt::{decode_ccitt, reverse_bits_in_place, CcittVariant, FillOrder};
 use crate::compress::{unpack_deflate, unpack_lzw, unpack_packbits, unpack_zstd};
 use crate::error::{Result, TiffError as Error};
-use crate::ifd::{find, parse_header, parse_ifd, ByteOrder, Entry};
-use crate::image::{TiffImage, TiffPixelFormat, TiffPlane};
+use crate::ifd::{find, parse_header, parse_ifd, ByteOrder, Entry, ParsedHeader};
+use crate::image::{ColorInfo, Metadata, Page, Palette, Plane, TiffImage, TiffPixelFormat};
 use crate::metadata::{extract_format_info, extract_metadata, TiffFormatInfo, TiffMetadata};
+use crate::options::DecodeOptions;
 use crate::types::*;
 
-/// Maximum total pixels (`ImageWidth * ImageLength`) the decoder will
-/// accept on a single IFD. Computed up-front from the IFD's
-/// `ImageWidth` / `ImageLength` tags before any strip or tile buffer
-/// is allocated, so a 16-byte attacker-crafted IFD claiming
-/// `4294967295 * 4294967295` pixels can't drive a multi-petabyte
-/// upfront `Vec::with_capacity`. 256 megapixels covers every
-/// legitimate single-image TIFF in the wild (it is ~70% larger than
-/// a "Hubble Ultra-Deep Field" mosaic at full resolution); the cap
-/// can be lifted by a forward-compatible release if a real workflow
-/// ever needs it.
-const MAX_IMAGE_PIXELS: u64 = 256 * 1024 * 1024;
-
-/// Outcome of a successful decode: the image plus the resolved pixel
-/// format and dimensions (handy for tests / containers).
+/// Outcome of a successful decode through the pre-contract API: the
+/// image plus the resolved pixel format and dimensions repeated, the
+/// descriptive metadata and the structural tags.
 ///
-/// Identical in shape to [`TiffImage`] — kept as a distinct alias so
-/// the historical `DecodedTiff { frame, width, height, pixel_format }`
-/// shape stays available to callers.
+/// Superseded by [`Page`] (which carries the image once, with its
+/// [`TiffMetadata`] and [`TiffFormatInfo`]) — see [`crate::decode_page`].
+/// The pre-contract decode functions still return this shape, with the
+/// image flattened to the historical display layouts (`Pal8` expanded
+/// to `Rgb24`, `Rgba` with its alpha dropped, `Cmyk` inverted to
+/// `Rgb24`).
+#[deprecated(note = "use oxideav_tiff::Page via decode_page (IMAGE_CRATE_API)")]
 pub struct DecodedTiff {
     pub frame: TiffImage,
     pub width: u32,
@@ -45,25 +47,57 @@ pub struct DecodedTiff {
     pub format: TiffFormatInfo,
 }
 
-/// Decode the first IFD of a TIFF/BigTIFF file. Multi-page callers
-/// should reach for [`decode_tiff_all`] instead.
-pub fn decode_tiff(input: &[u8]) -> Result<DecodedTiff> {
+#[allow(deprecated)]
+impl From<Page> for DecodedTiff {
+    /// The historical shape, with the image flattened to the display
+    /// layouts the pre-contract decoder emitted.
+    fn from(p: Page) -> Self {
+        let frame = legacy_display_layout(p.image);
+        DecodedTiff {
+            width: frame.width,
+            height: frame.height,
+            pixel_format: frame.format,
+            frame,
+            metadata: p.metadata,
+            format: p.layout,
+        }
+    }
+}
+
+/// Flatten a native-layout image to the display layout the
+/// pre-contract decoder returned: `Pal8` → `Rgb24` (palette expanded),
+/// `Rgba` → `Rgb24` (alpha dropped), `Cmyk` → `Rgb24` (§16 inversion);
+/// every other layout is unchanged. The bytes are exactly what the
+/// historical decoder produced ([`TiffImage::to_rgb8`] implements the
+/// same kernels).
+pub(crate) fn legacy_display_layout(img: TiffImage) -> TiffImage {
+    match img.format {
+        TiffPixelFormat::Pal8 | TiffPixelFormat::Rgba | TiffPixelFormat::Cmyk => {
+            let rgb = img.to_rgb8();
+            let mut out = TiffImage::from_parts(
+                img.width,
+                img.height,
+                TiffPixelFormat::Rgb24,
+                vec![Plane::new(img.width as usize * 3, rgb)],
+            );
+            out.color = img.color;
+            out.metadata = img.metadata;
+            out
+        }
+        _ => img,
+    }
+}
+
+/// Decode the first IFD of a TIFF / BigTIFF file as a [`Page`].
+pub fn decode_page_with(input: &[u8], opts: &DecodeOptions) -> Result<Page> {
     let header = parse_header(input)?;
-    let bo = header.byte_order;
-    let variant = header.variant;
-    let (entries, _next_ifd) = parse_ifd(input, bo, variant, header.first_ifd_offset)?;
-    let frame = decode_ifd(input, bo, &entries)?;
-    let pf = frame.pixel_format;
-    let metadata = extract_metadata(&entries, bo);
-    let format = extract_format_info(&entries, bo);
-    Ok(DecodedTiff {
-        width: frame.width,
-        height: frame.height,
-        pixel_format: pf,
-        frame,
-        metadata,
-        format,
-    })
+    let (entries, _next_ifd) = parse_ifd(
+        input,
+        header.byte_order,
+        header.variant,
+        header.first_ifd_offset,
+    )?;
+    decode_page_entries(input, &header, &entries, opts)
 }
 
 /// Decode the image IFD at an explicit file offset — for IFDs that are
@@ -71,29 +105,26 @@ pub fn decode_tiff(input: &[u8]) -> Result<DecodedTiff> {
 /// referenced from a parent page. The offset comes from the parent
 /// entry (`find(&entries, TAG_SUB_IFDS)` -> `as_u64_vec`); the file
 /// header still provides the byte order and classic/BigTIFF variant.
-pub fn decode_tiff_at(input: &[u8], ifd_offset: u64) -> Result<DecodedTiff> {
+pub fn decode_page_at_with(input: &[u8], ifd_offset: u64, opts: &DecodeOptions) -> Result<Page> {
     let header = parse_header(input)?;
-    let bo = header.byte_order;
-    let variant = header.variant;
-    let (entries, _next_ifd) = parse_ifd(input, bo, variant, ifd_offset)?;
-    let frame = decode_ifd(input, bo, &entries)?;
-    let pf = frame.pixel_format;
-    let metadata = extract_metadata(&entries, bo);
-    let format = extract_format_info(&entries, bo);
-    Ok(DecodedTiff {
-        width: frame.width,
-        height: frame.height,
-        pixel_format: pf,
-        frame,
-        metadata,
-        format,
-    })
+    let (entries, _next_ifd) = parse_ifd(input, header.byte_order, header.variant, ifd_offset)?;
+    decode_page_entries(input, &header, &entries, opts)
 }
 
-/// Decode every IFD in the file (all pages of a multi-page TIFF /
-/// BigTIFF). Returns one [`TiffImage`] per IFD in file order.
-pub fn decode_tiff_all(input: &[u8]) -> Result<Vec<TiffImage>> {
+/// Decode every IFD on the next-IFD chain (all pages of a multi-page
+/// TIFF / BigTIFF), one [`Page`] per IFD in file order.
+pub fn decode_pages_with(input: &[u8], opts: &DecodeOptions) -> Result<Vec<Page>> {
     let header = parse_header(input)?;
+    let mut out = Vec::new();
+    for entries in ifd_chain(input, &header)? {
+        out.push(decode_page_entries(input, &header, &entries, opts)?);
+    }
+    Ok(out)
+}
+
+/// Walk the next-IFD chain from the header, parsing every IFD (no
+/// pixel work). Rejects a cyclic chain and an empty file.
+pub(crate) fn ifd_chain(input: &[u8], header: &ParsedHeader) -> Result<Vec<Vec<Entry>>> {
     let bo = header.byte_order;
     let variant = header.variant;
     let mut out = Vec::new();
@@ -108,7 +139,7 @@ pub fn decode_tiff_all(input: &[u8]) -> Result<Vec<TiffImage>> {
         }
         visited.push(next);
         let (entries, n) = parse_ifd(input, bo, variant, next)?;
-        out.push(decode_ifd(input, bo, &entries)?);
+        out.push(entries);
         next = n;
     }
     if out.is_empty() {
@@ -117,48 +148,120 @@ pub fn decode_tiff_all(input: &[u8]) -> Result<Vec<TiffImage>> {
     Ok(out)
 }
 
-/// Decode every IFD in the file, returning one [`DecodedTiff`] per page
-/// so each page's [`TiffMetadata`] (TIFF 6.0 §8 descriptive fields,
-/// resolution triple, page number, subfile-type flags) travels with its
-/// pixels.
-///
-/// This is the metadata-carrying counterpart of [`decode_tiff_all`]
-/// (which returns bare [`TiffImage`]s). It walks the identical next-IFD
-/// chain with the same cyclic-pointer guard.
-pub fn decode_tiff_all_pages(input: &[u8]) -> Result<Vec<DecodedTiff>> {
-    let header = parse_header(input)?;
+/// Decode one parsed IFD into a [`Page`]: pixels, then the colour
+/// signalling and metadata blobs onto the image, then the descriptive
+/// / structural tag sets alongside.
+pub(crate) fn decode_page_entries(
+    input: &[u8],
+    header: &ParsedHeader,
+    entries: &[Entry],
+    opts: &DecodeOptions,
+) -> Result<Page> {
     let bo = header.byte_order;
-    let variant = header.variant;
-    let mut out = Vec::new();
-    let mut next = header.first_ifd_offset;
-    let mut visited: Vec<u64> = Vec::new();
-    while next != 0 {
-        if visited.contains(&next) {
-            return Err(Error::invalid("TIFF: cyclic next-IFD pointer"));
+    let mut image = decode_ifd(input, bo, entries, opts)?;
+    let metadata = extract_metadata(entries, bo);
+    let layout = extract_format_info(entries, bo);
+    image.color = resolve_color(entries, bo);
+    image.metadata = Metadata {
+        icc: metadata.icc_profile.clone(),
+        exif: crate::exif::extract_exif_payload(input, header, entries),
+        xmp: metadata.xmp.clone(),
+        gamma: None,
+    };
+    Ok(Page::new(image, metadata, layout))
+}
+
+/// H.273 Table 2 chromaticity rows this decoder recognises in the
+/// TIFF 6.0 §20 `WhitePoint` (318) + `PrimaryChromaticities` (319)
+/// pair: `(code point, [rx, ry, gx, gy, bx, by], [wx, wy])`.
+const H273_PRIMARIES: &[(u8, [f64; 6], [f64; 2])] = &[
+    // BT.709 / sRGB
+    (
+        1,
+        [0.640, 0.330, 0.300, 0.600, 0.150, 0.060],
+        [0.3127, 0.3290],
+    ),
+    // BT.470 System M (Illuminant C)
+    (4, [0.67, 0.33, 0.21, 0.71, 0.14, 0.08], [0.310, 0.316]),
+    // BT.470 System B, G / BT.601 625
+    (5, [0.64, 0.33, 0.29, 0.60, 0.15, 0.06], [0.3127, 0.3290]),
+    // BT.601 525 / SMPTE 170M (7 = SMPTE 240M is the same chromaticities)
+    (
+        6,
+        [0.630, 0.340, 0.310, 0.595, 0.155, 0.070],
+        [0.3127, 0.3290],
+    ),
+    // BT.2020 / BT.2100
+    (
+        9,
+        [0.708, 0.292, 0.170, 0.797, 0.131, 0.046],
+        [0.3127, 0.3290],
+    ),
+    // SMPTE RP 431-2 (P3 with DCI white)
+    (
+        11,
+        [0.680, 0.320, 0.265, 0.690, 0.150, 0.060],
+        [0.314, 0.351],
+    ),
+    // SMPTE EG 432-1 (P3 D65)
+    (
+        12,
+        [0.680, 0.320, 0.265, 0.690, 0.150, 0.060],
+        [0.3127, 0.3290],
+    ),
+];
+
+/// Tolerance for matching a RATIONAL chromaticity against a Table 2
+/// row: the §20 example values are quoted to 3-4 decimals.
+const CHROMATICITY_EPS: f64 = 0.0015;
+
+/// Resolve the image's [`ColorInfo`] from the §20 colorimetry fields:
+/// [`ColorInfo::tiff_default`] (full range, identity matrix,
+/// unspecified primaries / transfer), with `primaries` set to the
+/// H.273 code point whose chromaticities both `WhitePoint` and
+/// `PrimaryChromaticities` match. The §20 rule is that colorimetry
+/// exists only when *both* fields are present, so one without the
+/// other leaves `primaries` unspecified. Malformed fields are ignored
+/// (metadata never gates a pixel decode).
+pub(crate) fn resolve_color(entries: &[Entry], bo: ByteOrder) -> ColorInfo {
+    let mut c = ColorInfo::tiff_default();
+    // Both fields are RATIONAL with a fixed count (2 and 6); anything
+    // else is malformed colorimetry and is ignored.
+    let rationals = |tag: u16, count: u64| -> Option<Vec<f64>> {
+        let e = find(entries, tag)?;
+        if e.field_type != TYPE_RATIONAL || e.count != count {
+            return None;
         }
-        visited.push(next);
-        let (entries, n) = parse_ifd(input, bo, variant, next)?;
-        let frame = decode_ifd(input, bo, &entries)?;
-        let metadata = extract_metadata(&entries, bo);
-        let format = extract_format_info(&entries, bo);
-        out.push(DecodedTiff {
-            width: frame.width,
-            height: frame.height,
-            pixel_format: frame.pixel_format,
-            frame,
-            metadata,
-            format,
-        });
-        next = n;
+        e.as_f64_vec(bo).ok()
+    };
+    let (Some(wp), Some(pc)) = (
+        rationals(TAG_WHITE_POINT, 2),
+        rationals(TAG_PRIMARY_CHROMATICITIES, 6),
+    ) else {
+        return c;
+    };
+    if wp.len() < 2 || pc.len() < 6 {
+        return c;
     }
-    if out.is_empty() {
-        return Err(Error::invalid("TIFF: no IFDs in file"));
+    let close = |a: f64, b: f64| (a - b).abs() <= CHROMATICITY_EPS;
+    for (code, prim, white) in H273_PRIMARIES {
+        if prim.iter().zip(pc.iter()).all(|(a, b)| close(*a, *b))
+            && white.iter().zip(wp.iter()).all(|(a, b)| close(*a, *b))
+        {
+            c.primaries = *code;
+            break;
+        }
     }
-    Ok(out)
+    c
 }
 
 /// Decode one IFD (already parsed into `entries`) into a [`TiffImage`].
-fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImage> {
+pub(crate) fn decode_ifd(
+    input: &[u8],
+    bo: ByteOrder,
+    entries: &[Entry],
+    opts: &DecodeOptions,
+) -> Result<TiffImage> {
     // ---- Mandatory tags ----
     let width = find(entries, TAG_IMAGE_WIDTH)
         .ok_or_else(|| Error::invalid("TIFF: missing ImageWidth"))?
@@ -169,19 +272,15 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     if width == 0 || height == 0 {
         return Err(Error::invalid("TIFF: zero dimension"));
     }
-    // Sanity gate: reject claims that exceed `MAX_IMAGE_PIXELS` up
-    // front so the downstream `row_bytes * height` allocations
-    // can't be steered into multi-gibibyte territory by a 16-byte
-    // attacker-crafted IFD. 256 megapixels covers every legitimate
-    // single-image TIFF (a 16384x16384 RGB16 file is 1.5 GiB raw
-    // but only 268 megapixels) while bounding the worst-case
-    // upfront allocation to ~256 MiB even at 16-bit-per-component
-    // RGB.
-    if (width as u64).saturating_mul(height as u64) > MAX_IMAGE_PIXELS {
-        return Err(Error::invalid(format!(
-            "TIFF: image too large ({width}x{height} > {MAX_IMAGE_PIXELS} pixels)"
-        )));
-    }
+    // Limit gate: reject claims that exceed the caller's `DecodeOptions`
+    // (default 256 megapixels) up front so the downstream
+    // `row_bytes * height` allocations can't be steered into
+    // multi-gibibyte territory by a 16-byte attacker-crafted IFD. The
+    // default covers every legitimate single-image TIFF (a 16384x16384
+    // RGB16 file is 1.5 GiB raw but only 268 megapixels) while bounding
+    // the worst-case upfront allocation to ~256 MiB even at
+    // 16-bit-per-component RGB.
+    opts.check_dimensions(width, height)?;
 
     let compression = find(entries, TAG_COMPRESSION)
         .map(|e| e.as_u32(bo))
@@ -269,6 +368,13 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
         // spec-required SamplesPerPixel-long array or a single-entry
         // shorthand, but never a mismatched non-1 count.
         let sf = sf_entry.as_u32_vec(bo)?;
+        if opts.strict && sf.len() != samples_per_pixel as usize {
+            return Err(Error::invalid(format!(
+                "TIFF: SampleFormat count {} != SamplesPerPixel {} (strict)",
+                sf.len(),
+                samples_per_pixel
+            )));
+        }
         if sf.len() != samples_per_pixel as usize && sf.len() != 1 {
             return Err(Error::invalid(format!(
                 "TIFF: SampleFormat count {} != SamplesPerPixel {}",
@@ -406,8 +512,10 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     // "The default is no extra samples" — an absent field changes
     // nothing. Values ≥ 3 are surfaced as `InvalidData` because the
     // spec lists 0..=2 only.
+    let mut extra_samples: Vec<u16> = Vec::new();
     if let Some(es_entry) = find(entries, TAG_EXTRA_SAMPLES) {
         let es = es_entry.as_u32_vec(bo)?;
+        extra_samples = es.iter().map(|&v| v as u16).collect();
         // "By convention, extra components that are present must be
         // stored as the 'last components' in each pixel" — so the
         // leading `SamplesPerPixel − m` components must be exactly
@@ -490,7 +598,7 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             "TIFF: BitsPerSample={bps_first} not supported"
         )));
     }
-    // Total-allocation gate (fuzz r454 finding): `MAX_IMAGE_PIXELS`
+    // Total-allocation gate (fuzz r454 finding): `max_pixels`
     // bounds `width × height`, but the assembled pixel buffer scales
     // with SamplesPerPixel × BitsPerSample too, and SamplesPerPixel is
     // an unbounded SHORT — a crafted IFD (spp in the hundreds at 16
@@ -498,17 +606,14 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
     // photometric dispatch could reject the shape. Cap the worst-case
     // assembled size up front; every legitimate photometric this crate
     // decodes fits comfortably (≤ 4 samples + a few §ExtraSamples).
-    const MAX_DECODE_BYTES: u64 = 1 << 30; // 1 GiB assembled buffer
     let total_bytes = (width as u64)
         .saturating_mul(height as u64)
         .saturating_mul(samples_per_pixel as u64)
         .saturating_mul((bps_first as u64).div_ceil(8));
-    if total_bytes > MAX_DECODE_BYTES {
-        return Err(Error::invalid(format!(
-            "TIFF: image too large ({width}x{height} x {samples_per_pixel} samples x \
-             {bps_first} bits = {total_bytes} bytes > {MAX_DECODE_BYTES})"
-        )));
-    }
+    opts.check_bytes(
+        total_bytes,
+        &format!("{width}x{height} x {samples_per_pixel} samples x {bps_first} bits"),
+    )?;
 
     // Predictor = 3 (the IEEE floating-point predictor) is validated here,
     // before any strip/tile is decompressed, because the per-strip /
@@ -994,16 +1099,26 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
             build_rgb48le(&pixel_buf, width, height, bo),
             TiffPixelFormat::Rgb48Le,
         ),
+        (PHOTO_RGB, 4, 8) if extra_samples == [EXTRA_SAMPLE_UNASSOCIATED_ALPHA] => {
+            // §ExtraSamples value 2 (unassociated alpha): "transparency
+            // information that logically exists independent of an
+            // image" — the colour is stored straight, so the four
+            // chunky samples are exactly the crate's `Rgba` layout
+            // (straight alpha) and are handed back verbatim.
+            (build_rgba(&pixel_buf, width, height), TiffPixelFormat::Rgba)
+        }
         (PHOTO_RGB, n, 8) if n >= 4 => {
             // §ExtraSamples (pages 31-32): "By convention, extra
             // components that are present must be stored as the
             // 'last components' in each pixel" — the leading three
             // components are the R, G, B triple and the trailing
-            // n − 3 extras are dropped. For an associated-alpha (tag
-            // 338 = 1) RGBA page the leading triple is the §18
-            // pre-multiplied color, which §18 page 78 states is the
-            // composite-over-black value a display reader shows
-            // directly — so the same verbatim copy renders it.
+            // n − 3 extras (unspecified data, or more than one extra)
+            // are dropped. For an associated-alpha (tag 338 = 1) RGBA
+            // page the leading triple is the §18 pre-multiplied color,
+            // which §18 page 78 states is the composite-over-black
+            // value a display reader shows directly — so the same
+            // verbatim copy renders it (there is no straight-alpha
+            // layout to hand the pre-multiplied samples back in).
             (
                 build_rgb_from_n_chunky_8bit(&pixel_buf, width, height, n as usize),
                 TiffPixelFormat::Rgb24,
@@ -1020,14 +1135,15 @@ fn decode_ifd(input: &[u8], bo: ByteOrder, entries: &[Entry]) -> Result<TiffImag
                 ((width as u64).div_ceil(2)) as usize
             };
             (
-                build_rgb24_from_palette(&pixel_buf, width, height, &palette, b, row_bytes),
-                TiffPixelFormat::Rgb24,
+                build_pal8(&pixel_buf, width, height, &palette, b, row_bytes),
+                TiffPixelFormat::Pal8,
             )
         }
-        (PHOTO_CMYK, 4, 8) => (
-            build_rgb24_from_cmyk(&pixel_buf, width, height),
-            TiffPixelFormat::Rgb24,
-        ),
+        // CMYK (TIFF 6.0 §16, InkSet = 1): four chunky 8-bit ink
+        // coverages per pixel, 0 = no ink, 255 = full ink — handed
+        // back verbatim as the `Cmyk` layout; `TiffImage::to_rgb8`
+        // applies the §16 additive inversion for display.
+        (PHOTO_CMYK, 4, 8) => (build_cmyk(&pixel_buf, width, height), TiffPixelFormat::Cmyk),
         (PHOTO_YCBCR, 3, 8) => {
             // Subsampling defaults: 2 horizontal / 2 vertical per
             // TIFF 6.0 §22.
@@ -1156,15 +1272,15 @@ fn apply_orientation(image: TiffImage, orientation: u16) -> TiffImage {
         }
     }
 
-    TiffImage {
-        width: dw as u32,
-        height: dh as u32,
-        pixel_format: image.pixel_format,
-        planes: vec![TiffPlane {
+    TiffImage::from_parts(
+        dw as u32,
+        dh as u32,
+        image.format,
+        vec![Plane {
             stride: dstride,
             data,
         }],
-    }
+    )
 }
 
 /// Detect the chroma-subsampled YCbCr (TIFF 6.0 §21,
@@ -2836,12 +2952,7 @@ fn build_gray8(src: &[u8], w: u32, h: u32, invert: bool, signed: bool) -> TiffIm
             *b = 255 - *b;
         }
     }
-    TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Gray8,
-        planes: vec![TiffPlane { stride, data }],
-    }
+    TiffImage::from_parts(w, h, TiffPixelFormat::Gray8, vec![Plane { stride, data }])
 }
 
 fn build_gray8_from_4bpp(src: &[u8], w: u32, h: u32, row_bytes: usize, invert: bool) -> TiffImage {
@@ -2857,12 +2968,7 @@ fn build_gray8_from_4bpp(src: &[u8], w: u32, h: u32, row_bytes: usize, invert: b
             data.push(if invert { 255 - v } else { v });
         }
     }
-    TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Gray8,
-        planes: vec![TiffPlane { stride, data }],
-    }
+    TiffImage::from_parts(w, h, TiffPixelFormat::Gray8, vec![Plane { stride, data }])
 }
 
 fn build_gray8_from_1bpp(src: &[u8], w: u32, h: u32, row_bytes: usize, invert: bool) -> TiffImage {
@@ -2878,12 +2984,7 @@ fn build_gray8_from_1bpp(src: &[u8], w: u32, h: u32, row_bytes: usize, invert: b
             data.push(if invert { 255 - v } else { v });
         }
     }
-    TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Gray8,
-        planes: vec![TiffPlane { stride, data }],
-    }
+    TiffImage::from_parts(w, h, TiffPixelFormat::Gray8, vec![Plane { stride, data }])
 }
 
 fn build_gray16le(
@@ -2908,12 +3009,12 @@ fn build_gray16le(
         let v = if invert { 0xFFFF - v } else { v };
         data.extend_from_slice(&v.to_le_bytes());
     }
-    TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Gray16Le,
-        planes: vec![TiffPlane { stride, data }],
-    }
+    TiffImage::from_parts(
+        w,
+        h,
+        TiffPixelFormat::Gray16Le,
+        vec![Plane { stride, data }],
+    )
 }
 
 /// Decode one IEEE 754 binary16 (half-precision) value from a 16-bit
@@ -3055,12 +3156,12 @@ fn build_gray8_from_float(
         }
         data.push(v);
     }
-    Ok(TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Gray8,
-        planes: vec![TiffPlane { stride, data }],
-    })
+    Ok(TiffImage::from_parts(
+        w,
+        h,
+        TiffPixelFormat::Gray8,
+        vec![Plane { stride, data }],
+    ))
 }
 
 /// Render `SampleFormat = 3` IEEE-float RGB to an Rgb24 display plane.
@@ -3132,23 +3233,18 @@ fn build_rgb24_from_float(
         };
         data.push(v);
     }
-    Ok(TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Rgb24,
-        planes: vec![TiffPlane { stride, data }],
-    })
+    Ok(TiffImage::from_parts(
+        w,
+        h,
+        TiffPixelFormat::Rgb24,
+        vec![Plane { stride, data }],
+    ))
 }
 
 fn build_rgb24(src: &[u8], w: u32, h: u32) -> TiffImage {
     let stride = w as usize * 3;
     let data = src[..stride * h as usize].to_vec();
-    TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Rgb24,
-        planes: vec![TiffPlane { stride, data }],
-    }
+    TiffImage::from_parts(w, h, TiffPixelFormat::Rgb24, vec![Plane { stride, data }])
 }
 
 fn build_rgb_from_n_chunky_8bit(src: &[u8], w: u32, h: u32, n: usize) -> TiffImage {
@@ -3162,12 +3258,7 @@ fn build_rgb_from_n_chunky_8bit(src: &[u8], w: u32, h: u32, n: usize) -> TiffIma
             data.push(row[x * n + 2]);
         }
     }
-    TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Rgb24,
-        planes: vec![TiffPlane { stride, data }],
-    }
+    TiffImage::from_parts(w, h, TiffPixelFormat::Rgb24, vec![Plane { stride, data }])
 }
 
 fn build_rgb48le(src: &[u8], w: u32, h: u32, bo: ByteOrder) -> TiffImage {
@@ -3181,12 +3272,7 @@ fn build_rgb48le(src: &[u8], w: u32, h: u32, bo: ByteOrder) -> TiffImage {
             data.extend_from_slice(&v.to_le_bytes());
         }
     }
-    TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Rgb48Le,
-        planes: vec![TiffPlane { stride, data }],
-    }
+    TiffImage::from_parts(w, h, TiffPixelFormat::Rgb48Le, vec![Plane { stride, data }])
 }
 
 fn parse_colormap(words: &[u32], bps: u16) -> Result<Vec<[u8; 3]>> {
@@ -3210,7 +3296,10 @@ fn parse_colormap(words: &[u32], bps: u16) -> Result<Vec<[u8; 3]>> {
     Ok(out)
 }
 
-fn build_rgb24_from_palette(
+/// Indexed (§5 "Palette-color Images") pixels as `Pal8`: one index
+/// byte per pixel (4-bit sources unpacked, high nibble first) plus the
+/// `ColorMap` as an opaque RGBA [`Palette`].
+fn build_pal8(
     src: &[u8],
     w: u32,
     h: u32,
@@ -3218,64 +3307,48 @@ fn build_rgb24_from_palette(
     bps: u16,
     row_bytes: usize,
 ) -> TiffImage {
-    let stride = w as usize * 3;
+    let stride = w as usize;
     let mut data = Vec::with_capacity(stride * h as usize);
     for y in 0..h as usize {
         let row = &src[y * row_bytes..y * row_bytes + row_bytes];
         for x in 0..w as usize {
             let idx = match bps {
-                8 => row[x] as usize,
+                8 => row[x],
                 4 => {
                     let byte = row[x / 2];
-                    (if x & 1 == 0 { byte >> 4 } else { byte & 0x0F }) as usize
+                    if x & 1 == 0 {
+                        byte >> 4
+                    } else {
+                        byte & 0x0F
+                    }
                 }
                 _ => 0,
             };
-            let p = palette.get(idx).copied().unwrap_or([0, 0, 0]);
-            data.push(p[0]);
-            data.push(p[1]);
-            data.push(p[2]);
+            data.push(idx);
         }
     }
-    TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Rgb24,
-        planes: vec![TiffPlane { stride, data }],
-    }
+    let mut img = TiffImage::from_parts(w, h, TiffPixelFormat::Pal8, vec![Plane { stride, data }]);
+    img.palette = Some(Palette::from_rgb_triples(palette));
+    img
+}
+
+/// 8-bit RGBA (`PhotometricInterpretation = 2`, `SamplesPerPixel = 4`,
+/// `ExtraSamples = [2]`): the chunky quadruples verbatim.
+fn build_rgba(src: &[u8], w: u32, h: u32) -> TiffImage {
+    let stride = w as usize * 4;
+    let data = src[..stride * h as usize].to_vec();
+    TiffImage::from_parts(w, h, TiffPixelFormat::Rgba, vec![Plane { stride, data }])
 }
 
 /// CMYK (TIFF 6.0 §16): 4 chunky bytes per pixel ordered C, M, Y, K
-/// where each component is the *complement* of its dye coverage
-/// (255 = no dye). Convert into the customary additive RGB the
-/// crate emits: R = (1-C)(1-K), G = (1-M)(1-K), B = (1-Y)(1-K), all
-/// scaled to 8-bit. This matches `tiffinfo`'s reference rendering
-/// and is what callers expect for screen display.
-fn build_rgb24_from_cmyk(src: &[u8], w: u32, h: u32) -> TiffImage {
-    let stride = w as usize * 3;
-    let pixels = (w * h) as usize;
-    let mut data = Vec::with_capacity(stride * h as usize);
-    for i in 0..pixels {
-        let off = i * 4;
-        let c = src[off] as u32;
-        let m = src[off + 1] as u32;
-        let y = src[off + 2] as u32;
-        let k = src[off + 3] as u32;
-        // Inversion is in the spec: stored values are the *amount*
-        // of dye, so larger = darker. Compose multiplicatively.
-        let r = ((255 - c) * (255 - k) / 255) as u8;
-        let g = ((255 - m) * (255 - k) / 255) as u8;
-        let b = ((255 - y) * (255 - k) / 255) as u8;
-        data.push(r);
-        data.push(g);
-        data.push(b);
-    }
-    TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Rgb24,
-        planes: vec![TiffPlane { stride, data }],
-    }
+/// where each component is the ink coverage (0 = no ink, 255 = full
+/// ink; `InkSet = 1`). Handed back verbatim as the `Cmyk` layout; the
+/// additive display conversion `R = (255−C)(255−K)/255` (and likewise
+/// for G / B) is [`TiffImage::to_rgb8`].
+fn build_cmyk(src: &[u8], w: u32, h: u32) -> TiffImage {
+    let stride = w as usize * 4;
+    let data = src[..stride * h as usize].to_vec();
+    TiffImage::from_parts(w, h, TiffPixelFormat::Cmyk, vec![Plane { stride, data }])
 }
 
 /// YCbCr → RGB conversion per TIFF 6.0 §22 / ITU-R BT.601 (the
@@ -3333,15 +3406,15 @@ fn build_rgb24_from_ycbcr(src: &[u8], w: u32, h: u32, sh: u16, sv: u16) -> Resul
             }
         }
     }
-    Ok(TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Rgb24,
-        planes: vec![TiffPlane {
+    Ok(TiffImage::from_parts(
+        w,
+        h,
+        TiffPixelFormat::Rgb24,
+        vec![Plane {
             stride: w as usize * 3,
             data,
         }],
-    })
+    ))
 }
 
 /// ITU-R BT.601 inverse-matrix YCbCr → RGB with the canonical
@@ -3400,12 +3473,7 @@ fn build_rgb24_from_cielab(src: &[u8], w: u32, h: u32) -> TiffImage {
         data.push(g);
         data.push(b);
     }
-    TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Rgb24,
-        planes: vec![TiffPlane { stride, data }],
-    }
+    TiffImage::from_parts(w, h, TiffPixelFormat::Rgb24, vec![Plane { stride, data }])
 }
 
 /// Decode a 1-sample CIELab L*-only buffer into a Gray8 [`TiffImage`].
@@ -3430,12 +3498,7 @@ fn build_gray8_from_cielab_l(src: &[u8], w: u32, h: u32) -> TiffImage {
         let y_lin = lab_l_to_y_linear(l);
         data.push(linear_to_srgb_byte(y_lin));
     }
-    TiffImage {
-        width: w,
-        height: h,
-        pixel_format: TiffPixelFormat::Gray8,
-        planes: vec![TiffPlane { stride, data }],
-    }
+    TiffImage::from_parts(w, h, TiffPixelFormat::Gray8, vec![Plane { stride, data }])
 }
 
 /// CIELab triple to display Rgb24 byte, per TIFF 6.0 §23 + the
@@ -3629,10 +3692,10 @@ fn decode_ifd_jpeg(
     // Set up the destination buffer in the *final* output format the
     // crate emits for this photometric. Currently:
     //   - PHOTO_BLACK_IS_ZERO / WHITE_IS_ZERO  →  Gray8
-    //   - PHOTO_RGB / PHOTO_YCBCR / PHOTO_CMYK →  Rgb24
-    //   (CMYK is collapsed to Rgb24 by the same additive-RGB
-    //    conversion the uncompressed CMYK path uses — see
-    //    `build_rgb24_from_cmyk` / `composite_cmyk_to_rgb`.)
+    //   - PHOTO_RGB / PHOTO_YCBCR           →  Rgb24
+    //   - PHOTO_CMYK                         →  Cmyk (ink coverages
+    //     verbatim, like the uncompressed CMYK path; the display
+    //     inversion is `TiffImage::to_rgb8`)
     // Deep (9..=16-bit) precisions render onto the 16-bit output
     // planes (Gray16Le / Rgb48Le), each raw code value widened onto
     // the full 16-bit display extent by bit replication — the same
@@ -3649,10 +3712,15 @@ fn decode_ifd_jpeg(
             width as usize * 2,
             width as usize * 2 * height as usize,
         ),
-        (PHOTO_RGB | PHOTO_YCBCR | PHOTO_CMYK, false) => (
+        (PHOTO_RGB | PHOTO_YCBCR, false) => (
             TiffPixelFormat::Rgb24,
             width as usize * 3,
             width as usize * 3 * height as usize,
+        ),
+        (PHOTO_CMYK, false) => (
+            TiffPixelFormat::Cmyk,
+            width as usize * 4,
+            width as usize * 4 * height as usize,
         ),
         (PHOTO_RGB | PHOTO_YCBCR, true) => (
             TiffPixelFormat::Rgb48Le,
@@ -3699,15 +3767,15 @@ fn decode_ifd_jpeg(
         )?;
     }
 
-    Ok(TiffImage {
+    Ok(TiffImage::from_parts(
         width,
         height,
         pixel_format,
-        planes: vec![TiffPlane {
+        vec![Plane {
             stride: dst_row_stride,
             data: dst,
         }],
-    })
+    ))
 }
 
 /// Decode a `PlanarConfiguration = 2` JPEG-in-TIFF IFD (`Compression
@@ -4069,12 +4137,12 @@ fn compose_planar_jpeg(
                         dst[off + 4..off + 6].copy_from_slice(&widen_to_16(b, bps).to_le_bytes());
                     }
                 }
-                Ok(TiffImage {
+                Ok(TiffImage::from_parts(
                     width,
                     height,
-                    pixel_format: TiffPixelFormat::Rgb48Le,
-                    planes: vec![TiffPlane { stride, data: dst }],
-                })
+                    TiffPixelFormat::Rgb48Le,
+                    vec![Plane { stride, data: dst }],
+                ))
             } else {
                 let stride = w * 3;
                 let mut dst = vec![0u8; stride * h];
@@ -4093,12 +4161,12 @@ fn compose_planar_jpeg(
                         dst[off + 2] = b as u8;
                     }
                 }
-                Ok(TiffImage {
+                Ok(TiffImage::from_parts(
                     width,
                     height,
-                    pixel_format: TiffPixelFormat::Rgb24,
-                    planes: vec![TiffPlane { stride, data: dst }],
-                })
+                    TiffPixelFormat::Rgb24,
+                    vec![Plane { stride, data: dst }],
+                ))
             }
         }
         PHOTO_RGB => {
@@ -4114,12 +4182,12 @@ fn compose_planar_jpeg(
                         }
                     }
                 }
-                Ok(TiffImage {
+                Ok(TiffImage::from_parts(
                     width,
                     height,
-                    pixel_format: TiffPixelFormat::Rgb48Le,
-                    planes: vec![TiffPlane { stride, data: dst }],
-                })
+                    TiffPixelFormat::Rgb48Le,
+                    vec![Plane { stride, data: dst }],
+                ))
             } else {
                 let stride = w * 3;
                 let mut dst = vec![0u8; stride * h];
@@ -4131,38 +4199,36 @@ fn compose_planar_jpeg(
                         }
                     }
                 }
-                Ok(TiffImage {
+                Ok(TiffImage::from_parts(
                     width,
                     height,
-                    pixel_format: TiffPixelFormat::Rgb24,
-                    planes: vec![TiffPlane { stride, data: dst }],
-                })
+                    TiffPixelFormat::Rgb24,
+                    vec![Plane { stride, data: dst }],
+                ))
             }
         }
         PHOTO_CMYK => {
-            // 8-bit only (deep CMYK rejected upstream). §16 InkSet=1
-            // additive conversion, identical to the chunky CMYK path.
-            let stride = w * 3;
+            // 8-bit only (deep CMYK rejected upstream). The four
+            // component planes interleave into the chunky `Cmyk`
+            // layout (ink coverages verbatim, as the chunky CMYK path).
+            let stride = w * 4;
             let mut dst = vec![0u8; stride * h];
             for y in 0..h {
                 for x in 0..w {
                     let i = y * w + x;
-                    let c = comp_planes[0][i] as u32;
-                    let m = comp_planes[1][i] as u32;
-                    let yy = comp_planes[2][i] as u32;
-                    let k = comp_planes[3][i] as u32;
-                    let off = y * stride + x * 3;
-                    dst[off] = ((255 - c) * (255 - k) / 255) as u8;
-                    dst[off + 1] = ((255 - m) * (255 - k) / 255) as u8;
-                    dst[off + 2] = ((255 - yy) * (255 - k) / 255) as u8;
+                    let off = y * stride + x * 4;
+                    dst[off] = comp_planes[0][i] as u8;
+                    dst[off + 1] = comp_planes[1][i] as u8;
+                    dst[off + 2] = comp_planes[2][i] as u8;
+                    dst[off + 3] = comp_planes[3][i] as u8;
                 }
             }
-            Ok(TiffImage {
+            Ok(TiffImage::from_parts(
                 width,
                 height,
-                pixel_format: TiffPixelFormat::Rgb24,
-                planes: vec![TiffPlane { stride, data: dst }],
-            })
+                TiffPixelFormat::Cmyk,
+                vec![Plane { stride, data: dst }],
+            ))
         }
         _ => unreachable!("photometric vetted by caller"),
     }
@@ -4278,10 +4344,15 @@ fn decode_jpeg_old_interchange(
             width as usize * 2,
             width as usize * 2 * height as usize,
         ),
-        (PHOTO_RGB | PHOTO_YCBCR | PHOTO_CMYK, false) => (
+        (PHOTO_RGB | PHOTO_YCBCR, false) => (
             TiffPixelFormat::Rgb24,
             width as usize * 3,
             width as usize * 3 * height as usize,
+        ),
+        (PHOTO_CMYK, false) => (
+            TiffPixelFormat::Cmyk,
+            width as usize * 4,
+            width as usize * 4 * height as usize,
         ),
         (PHOTO_RGB | PHOTO_YCBCR, true) => (
             TiffPixelFormat::Rgb48Le,
@@ -4308,15 +4379,15 @@ fn decode_jpeg_old_interchange(
         photometric,
     )?;
 
-    Ok(TiffImage {
+    Ok(TiffImage::from_parts(
         width,
         height,
         pixel_format,
-        planes: vec![TiffPlane {
+        vec![Plane {
             stride: dst_row_stride,
             data: dst,
         }],
-    })
+    ))
 }
 
 /// Decode a §22 tables-form IFD (`Compression = 6` without an
@@ -4612,10 +4683,15 @@ fn decode_ifd_jpeg_old_tables_form(
             width as usize,
             width as usize * height as usize,
         ),
-        PHOTO_RGB | PHOTO_YCBCR | PHOTO_CMYK => (
+        PHOTO_RGB | PHOTO_YCBCR => (
             TiffPixelFormat::Rgb24,
             width as usize * 3,
             width as usize * 3 * height as usize,
+        ),
+        PHOTO_CMYK => (
+            TiffPixelFormat::Cmyk,
+            width as usize * 4,
+            width as usize * 4 * height as usize,
         ),
         _ => unreachable!("photometric vetted above"),
     };
@@ -4664,15 +4740,15 @@ fn decode_ifd_jpeg_old_tables_form(
             "TIFF/JPEG(§22): strips did not cover the full image",
         ));
     }
-    Ok(TiffImage {
+    Ok(TiffImage::from_parts(
         width,
         height,
         pixel_format,
-        planes: vec![TiffPlane {
+        vec![Plane {
             stride: dst_row_stride,
             data: dst,
         }],
-    })
+    ))
 }
 
 /// Without the `registry` feature the JPEG codec is unavailable for
@@ -4873,10 +4949,15 @@ fn decode_ifd_jpeg_old_tables_form_tiled(
             width as usize,
             width as usize * height as usize,
         ),
-        PHOTO_RGB | PHOTO_YCBCR | PHOTO_CMYK => (
+        PHOTO_RGB | PHOTO_YCBCR => (
             TiffPixelFormat::Rgb24,
             width as usize * 3,
             width as usize * 3 * height as usize,
+        ),
+        PHOTO_CMYK => (
+            TiffPixelFormat::Cmyk,
+            width as usize * 4,
+            width as usize * 4 * height as usize,
         ),
         _ => unreachable!("photometric vetted above"),
     };
@@ -4912,15 +4993,15 @@ fn decode_ifd_jpeg_old_tables_form_tiled(
             )?;
         }
     }
-    Ok(TiffImage {
+    Ok(TiffImage::from_parts(
         width,
         height,
         pixel_format,
-        planes: vec![TiffPlane {
+        vec![Plane {
             stride: dst_row_stride,
             data: dst,
         }],
-    })
+    ))
 }
 
 #[cfg(not(feature = "registry"))]
@@ -5144,7 +5225,7 @@ fn composite_segment(
     photometric: u16,
 ) -> Result<()> {
     use crate::jpeg::{
-        composite_cmyk_to_rgb, composite_gray, composite_gray16, composite_rgb48_packed,
+        composite_cmyk_packed, composite_gray, composite_gray16, composite_rgb48_packed,
         composite_rgb48_planar, composite_rgb_packed, composite_rgb_planar,
         composite_ycbcr48_packed, composite_ycbcr_packed, composite_yuv16_to_rgb48,
         composite_yuv_to_rgb, JpegPixelFormat,
@@ -5284,7 +5365,7 @@ fn composite_segment(
                     "TIFF/JPEG: deep (>8-bit) CMYK JPEG segments are not supported".into(),
                 ));
             }
-            composite_cmyk_to_rgb(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
+            composite_cmyk_packed(seg, visible_w, visible_h, dst, dst_row_stride, dst_x, dst_y)
         }
     }
 }

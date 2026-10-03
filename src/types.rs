@@ -98,6 +98,13 @@ pub const TAG_HOST_COMPUTER: u16 = 316;
 /// Copyright (TIFF 6.0 §8, page 31): ASCII copyright notice.
 pub const TAG_COPYRIGHT: u16 = 33432;
 pub const TAG_PREDICTOR: u16 = 317;
+/// WhitePoint (TIFF 6.0 §20 "RGB Image Colorimetry", RATIONAL × 2):
+/// the CIE 1931 xy chromaticity of the image white point. No default.
+pub const TAG_WHITE_POINT: u16 = 318;
+/// PrimaryChromaticities (TIFF 6.0 §20, RATIONAL × 6): red[x], red[y],
+/// green[x], green[y], blue[x], blue[y]. No default.
+pub const TAG_PRIMARY_CHROMATICITIES: u16 = 319;
+
 pub const TAG_COLOR_MAP: u16 = 320;
 pub const TAG_EXTRA_SAMPLES: u16 = 338;
 pub const TAG_SAMPLE_FORMAT: u16 = 339;

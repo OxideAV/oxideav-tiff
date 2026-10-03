@@ -21,7 +21,7 @@
 //!     plain chunky encode of the same source.
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
 };
 
 /// Hand-build a classic-II chunky CMYK TIFF (`PlanarConfiguration = 1`):
@@ -177,12 +177,12 @@ fn planar_cmyk_matches_chunky_decode() {
         let chunky = build_chunky_cmyk_tiff(w, h, &pixels);
         let planar = build_planar_cmyk_tiff(w, h, &pixels);
 
-        let dc = decode_tiff(&chunky).expect("chunky CMYK decode");
-        let dp = decode_tiff(&planar).expect("planar CMYK decode");
+        let dc = decode_page(&chunky).expect("chunky CMYK decode");
+        let dp = decode_page(&planar).expect("planar CMYK decode");
 
-        assert_eq!((dp.width, dp.height), (w, h));
+        assert_eq!((dp.image.width, dp.image.height), (w, h));
         assert_eq!(
-            dp.frame.planes[0].data, dc.frame.planes[0].data,
+            dp.image.planes[0].data, dc.image.planes[0].data,
             "planar CMYK diverged from chunky for {w}x{h}"
         );
     }
@@ -198,10 +198,10 @@ fn planar_cmyk_solid_ink_preserves_plane_order() {
     for _ in 0..(w * h) {
         pixels.extend_from_slice(&[200, 10, 10, 20]);
     }
-    let dc = decode_tiff(&build_chunky_cmyk_tiff(w, h, &pixels)).unwrap();
-    let dp = decode_tiff(&build_planar_cmyk_tiff(w, h, &pixels)).unwrap();
+    let dc = decode_page(&build_chunky_cmyk_tiff(w, h, &pixels)).unwrap();
+    let dp = decode_page(&build_planar_cmyk_tiff(w, h, &pixels)).unwrap();
     assert_eq!(
-        dp.frame.planes[0].data, dc.frame.planes[0].data,
+        dp.image.planes[0].data, dc.image.planes[0].data,
         "CMYK plane order mismatch under PlanarConfiguration=2"
     );
 }
@@ -227,9 +227,9 @@ fn encoder_cmyk32_planar_predictor_roundtrips_against_chunky() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        decode_tiff(&encode_tiff(&page).unwrap())
+        decode_page(&encode_page(&page).unwrap())
             .unwrap()
-            .frame
+            .image
             .planes[0]
             .data
             .clone()
@@ -254,9 +254,9 @@ fn encoder_cmyk32_planar_predictor_roundtrips_against_chunky() {
                     bigtiff: false,
                     extras: PageExtras::default(),
                 };
-                let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
+                let d = decode_page(&encode_page(&page).unwrap()).unwrap();
                 assert_eq!(
-                    d.frame.planes[0].data, oracle,
+                    d.image.planes[0].data, oracle,
                     "planar CMYK diverged for comp {comp:?} predictor={predictor} tiling={tiling:?}"
                 );
             }

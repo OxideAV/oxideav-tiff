@@ -16,9 +16,10 @@ categories = ["multimedia::encoding", "multimedia::images"]
 # `oxideav-core` is gated behind the default-on `registry` feature so
 # image-library consumers can depend on `oxideav-tiff` with
 # `default-features = false` and avoid the framework dependency tree
-# entirely. Without `registry` the crate exposes a free-standing
-# `decode_tiff` API plus local `TiffImage` / `TiffError` types and
-# never references `oxideav-core`.
+# entirely. Without `registry` the crate exposes the image-crate
+# contract (`probe` / `info` / `decode*` / `encode*`, `TiffImage`,
+# `TiffError`) plus the `Page` / `EncodePage` depth API and never
+# references `oxideav-core`.
 oxideav-core = { version = "0.1", optional = true }
 # `oxideav-mjpeg` is the foundational JPEG codec for the workspace and
 # is the only way to decode Compression=7 (TIFF Tech Note 2 JPEG-in-TIFF)
@@ -54,11 +55,12 @@ oxideav-webp = { version = "0.2", default-features = false }
 [features]
 default = ["registry"]
 
-# Wires up the `Decoder` trait implementation, the TIFF container
-# demuxer + probe, and the `register_codecs` / `register_containers`
+# Wires up the `Decoder` / `Encoder` trait implementations, the TIFF
+# container demuxer + muxer + probe, the `TiffImage` ⇄ `VideoFrame`
+# bridge and the `register` / `register_codecs` / `register_containers`
 # entry points against `oxideav-core` so the crate can plug into the
 # `oxideav` framework registry. Default-on; turn off for image-library
-# use-cases that just want the standalone `decode_tiff` API.
+# use-cases that just want the standalone contract API.
 #
 # Also pulls in `oxideav-mjpeg` so that Compression=7 (JPEG-in-TIFF
 # per TIFF Tech Note 2) strips/tiles can be decoded through the

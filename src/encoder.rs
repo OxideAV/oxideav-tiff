@@ -14,7 +14,7 @@
 //! * Strip layout — a single strip for chunky pages, or one strip per
 //!   component plane for `PlanarConfiguration = 2` pages (see
 //!   [`EncodePage::planar`])
-//! * Single-IFD or multi-IFD chain via [`encode_tiff_multi`]
+//! * Single-IFD or multi-IFD chain via [`encode_pages`]
 //! * Variant: classic TIFF (8-byte header, magic 42, 32-bit offsets,
 //!   12-byte IFD entries) or BigTIFF (16-byte header, magic 43,
 //!   8-byte offset-bytesize + reserved, 64-bit offsets, 20-byte IFD
@@ -243,7 +243,7 @@ pub struct PageExtras<'a> {
     /// is plain §2 IFD structure; children may nest their own
     /// `sub_ifds` (depth-capped). A child's `bigtiff` flag is ignored
     /// — the variant is fixed by the root page. Use
-    /// [`crate::decoder::decode_tiff_at`] to decode a child image
+    /// [`crate::decode_page_at`] to decode a child image
     /// from its tag-330 offset.
     pub sub_ifds: &'a [EncodePage<'a>],
 }
@@ -339,7 +339,7 @@ pub struct EncodePage<'a> {
     /// pixel formats, compressors, predictor / planar / tiling flags
     /// compose with `bigtiff = true` unchanged.
     ///
-    /// For [`encode_tiff_multi`], every page must agree on the variant
+    /// For [`encode_pages`], every page must agree on the variant
     /// (all classic or all BigTIFF); mixing is rejected with a precise
     /// error.
     pub bigtiff: bool,
@@ -1013,16 +1013,18 @@ enum ChildLink {
     Gps,
 }
 
-/// Encode a single-page TIFF file. Produces the complete byte
-/// sequence. Convenience wrapper around [`encode_tiff_multi`].
-pub fn encode_tiff(page: &EncodePage<'_>) -> Result<Vec<u8>> {
-    encode_tiff_multi(std::slice::from_ref(page))
+/// Encode a single [`EncodePage`] as a one-page TIFF file — the full
+/// per-page surface (every pixel kind, sub-IFDs, descriptive strings)
+/// behind the contract's [`crate::encode`]. Convenience wrapper around
+/// [`encode_pages`].
+pub fn encode_page(page: &EncodePage<'_>) -> Result<Vec<u8>> {
+    encode_pages(std::slice::from_ref(page))
 }
 
 /// Encode a multi-page TIFF file (one IFD per page, chained via
 /// the next-IFD pointer in file order). Produces the complete byte
 /// sequence.
-pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
+pub fn encode_pages(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
     if pages.is_empty() {
         return Err(Error::invalid("TIFF encode: must supply at least one page"));
     }
@@ -1033,7 +1035,7 @@ pub fn encode_tiff_multi(pages: &[EncodePage<'_>]) -> Result<Vec<u8>> {
     let bigtiff = pages[0].bigtiff;
     if pages.iter().any(|p| p.bigtiff != bigtiff) {
         return Err(Error::invalid(
-            "TIFF encode: encode_tiff_multi pages must all agree on `bigtiff` (cannot mix \
+            "TIFF encode: encode_pages pages must all agree on `bigtiff` (cannot mix \
              classic-TIFF and BigTIFF IFDs in one file)",
         ));
     }
@@ -3375,7 +3377,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
 /// `Cb` / `Cr` are offset by 128. Values are rounded to nearest and
 /// clamped. This is the inverse of the matrix the decoder's YCbCr →
 /// RGB compositor applies, so an RGB image routed through this
-/// helper, [`TiffCompression::Jpeg`] and `decode_tiff` returns to RGB
+/// helper, [`TiffCompression::Jpeg`] and `decode` returns to RGB
 /// with only the codec's own loss.
 pub fn rgb24_to_ycbcr24(rgb: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgb.len());
@@ -4549,7 +4551,7 @@ fn forward_float_predictor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decode_tiff;
+    use crate::decode_page;
     use crate::image::TiffPixelFormat;
 
     fn ramp_gray8(w: u32, h: u32) -> Vec<u8> {
@@ -4588,10 +4590,10 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!((d.width, d.height), (32, 32));
-        assert_eq!(d.frame.planes[0].data, pixels);
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!((d.image.width, d.image.height), (32, 32));
+        assert_eq!(d.image.planes[0].data, pixels);
     }
 
     #[test]
@@ -4614,10 +4616,10 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!((d.width, d.height), (16, 16));
-        assert_eq!(d.frame.planes[0].data, pixels);
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!((d.image.width, d.image.height), (16, 16));
+        assert_eq!(d.image.planes[0].data, pixels);
     }
 
     #[test]
@@ -4634,10 +4636,10 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!((d.width, d.height), (20, 20));
-        assert_eq!(d.frame.planes[0].data, pixels);
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!((d.image.width, d.image.height), (20, 20));
+        assert_eq!(d.image.planes[0].data, pixels);
     }
 
     #[test]
@@ -4654,10 +4656,10 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!((d.width, d.height), (48, 24));
-        assert_eq!(d.frame.planes[0].data, pixels);
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!((d.image.width, d.image.height), (48, 24));
+        assert_eq!(d.image.planes[0].data, pixels);
     }
 
     #[test]
@@ -4684,15 +4686,18 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        // Decoder expands palette → Rgb24.
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        // Decoder hands the indices back as Pal8 + the ColorMap;
+        // `to_rgb8` expands the palette.
+        assert_eq!(d.image.format, TiffPixelFormat::Pal8);
+        assert_eq!(d.image.planes[0].data, indices);
         let mut want = Vec::with_capacity(8 * 8 * 3);
         for &idx in &indices {
             let p = palette[idx as usize];
             want.extend_from_slice(&p);
         }
-        assert_eq!(d.frame.planes[0].data, want);
+        assert_eq!(d.image.to_rgb8(), want);
     }
 
     fn bilevel_checkerboard(w: u32, h: u32) -> Vec<u8> {
@@ -4758,11 +4763,11 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!((d.width, d.height), (24, 16));
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!((d.image.width, d.image.height), (24, 16));
         let want = bilevel_to_gray8(&packed, 24, 16);
-        assert_eq!(d.frame.planes[0].data, want);
+        assert_eq!(d.image.planes[0].data, want);
     }
 
     #[test]
@@ -4779,10 +4784,10 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
         let want = bilevel_to_gray8(&packed, 16, 8);
-        assert_eq!(d.frame.planes[0].data, want);
+        assert_eq!(d.image.planes[0].data, want);
     }
 
     #[test]
@@ -4802,10 +4807,10 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
         let want = bilevel_to_gray8(&packed, 128, 4);
-        assert_eq!(d.frame.planes[0].data, want);
+        assert_eq!(d.image.planes[0].data, want);
     }
 
     #[test]
@@ -4824,10 +4829,10 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
         let want = bilevel_to_gray8(&packed, 96, 6);
-        assert_eq!(d.frame.planes[0].data, want);
+        assert_eq!(d.image.planes[0].data, want);
     }
 
     #[test]
@@ -4848,10 +4853,10 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
         let want = bilevel_to_gray8(&packed, 64, 8);
-        assert_eq!(d.frame.planes[0].data, want);
+        assert_eq!(d.image.planes[0].data, want);
     }
 
     #[test]
@@ -4870,7 +4875,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let r = encode_tiff(&page);
+        let r = encode_page(&page);
         assert!(r.is_err());
     }
 
@@ -4902,8 +4907,12 @@ mod tests {
                 extras: PageExtras::default(),
             },
         ];
-        let bytes = encode_tiff_multi(&pages).unwrap();
-        let imgs = crate::decoder::decode_tiff_all(&bytes).unwrap();
+        let bytes = encode_pages(&pages).unwrap();
+        let imgs = crate::decode_all(&bytes)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.image)
+            .collect::<Vec<_>>();
         assert_eq!(imgs.len(), 2);
         assert_eq!(imgs[0].width, 8);
         assert_eq!(imgs[0].planes[0].data, p1);
@@ -4947,10 +4956,10 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!((d.width, d.height), (width, height));
-        d.frame.planes[0].data.clone()
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!((d.image.width, d.image.height), (width, height));
+        d.image.planes[0].data.clone()
     }
 
     #[test]
@@ -5081,13 +5090,14 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
         let mut want = Vec::with_capacity(12 * 8 * 3);
         for &idx in &indices {
             want.extend_from_slice(&palette[idx as usize]);
         }
-        assert_eq!(d.frame.planes[0].data, want);
+        assert_eq!(d.image.format, TiffPixelFormat::Pal8);
+        assert_eq!(d.image.to_rgb8(), want);
     }
 
     #[test]
@@ -5107,7 +5117,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let b = encode_tiff(&page).unwrap();
+        let b = encode_page(&page).unwrap();
         let ifd_off = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
         let count = u16::from_le_bytes([b[ifd_off], b[ifd_off + 1]]) as usize;
         let mut found = None;
@@ -5135,7 +5145,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let b2 = encode_tiff(&page2).unwrap();
+        let b2 = encode_page(&page2).unwrap();
         let ifd2 = u32::from_le_bytes([b2[4], b2[5], b2[6], b2[7]]) as usize;
         let count2 = u16::from_le_bytes([b2[ifd2], b2[ifd2 + 1]]) as usize;
         for k in 0..count2 {
@@ -5159,7 +5169,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        assert!(encode_tiff(&page).is_err());
+        assert!(encode_page(&page).is_err());
     }
 
     #[test]
@@ -5176,7 +5186,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        assert!(encode_tiff(&page).is_err());
+        assert!(encode_page(&page).is_err());
     }
 
     #[test]
@@ -5212,12 +5222,12 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!((d.width, d.height), (w, h));
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!((d.image.width, d.image.height), (w, h));
         // Decoder re-interleaves the planes into chunky order, so the
         // output must match the original chunky RGB input bit-exactly.
-        assert_eq!(d.frame.planes[0].data, pixels);
+        assert_eq!(d.image.planes[0].data, pixels);
     }
 
     #[test]
@@ -5270,7 +5280,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
+        let bytes = encode_page(&page).unwrap();
 
         // Walk the IFD by hand (II classic TIFF).
         assert_eq!(&bytes[0..2], b"II");
@@ -5315,7 +5325,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        assert!(encode_tiff(&page).is_err());
+        assert!(encode_page(&page).is_err());
 
         let palette = vec![[0u8, 0, 0], [255, 255, 255]];
         let indices = vec![0u8; 64];
@@ -5333,7 +5343,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        assert!(encode_tiff(&page).is_err());
+        assert!(encode_page(&page).is_err());
     }
 
     /// Chunky output stays single-strip (PlanarConfiguration = 1) when
@@ -5353,7 +5363,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
+        let bytes = encode_page(&page).unwrap();
         let ifd_off = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
         let count = u16::from_le_bytes([bytes[ifd_off], bytes[ifd_off + 1]]) as usize;
         for k in 0..count {
@@ -5396,10 +5406,10 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!((d.width, d.height), (width, height));
-        d.frame.planes[0].data.clone()
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!((d.image.width, d.image.height), (width, height));
+        d.image.planes[0].data.clone()
     }
 
     #[test]
@@ -5550,13 +5560,14 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
         let mut want = Vec::with_capacity(40 * 20 * 3);
         for &idx in &indices {
             want.extend_from_slice(&palette[idx as usize]);
         }
-        assert_eq!(d.frame.planes[0].data, want);
+        assert_eq!(d.image.format, TiffPixelFormat::Pal8);
+        assert_eq!(d.image.to_rgb8(), want);
     }
 
     #[test]
@@ -5577,7 +5588,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let b = encode_tiff(&page).unwrap();
+        let b = encode_page(&page).unwrap();
         let ifd_off = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
         let count = u16::from_le_bytes([b[ifd_off], b[ifd_off + 1]]) as usize;
         let mut seen = std::collections::HashMap::new();
@@ -5620,7 +5631,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        assert!(encode_tiff(&page).is_err());
+        assert!(encode_page(&page).is_err());
     }
 
     #[test]
@@ -5645,9 +5656,9 @@ mod tests {
             tiling: Some((16, 16)),
             ..strip.clone()
         };
-        let ds = decode_tiff(&encode_tiff(&strip).unwrap()).unwrap();
-        let dt = decode_tiff(&encode_tiff(&tiled).unwrap()).unwrap();
-        assert_eq!(dt.frame.planes[0].data, ds.frame.planes[0].data);
+        let ds = decode_page(&encode_page(&strip).unwrap()).unwrap();
+        let dt = decode_page(&encode_page(&tiled).unwrap()).unwrap();
+        assert_eq!(dt.image.planes[0].data, ds.image.planes[0].data);
     }
 
     #[test]
@@ -5664,7 +5675,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        assert!(encode_tiff(&page).is_err());
+        assert!(encode_page(&page).is_err());
     }
 
     #[test]
@@ -5684,10 +5695,10 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).expect("planar tiled encode");
-        let d = decode_tiff(&bytes).expect("planar tiled decode");
-        assert_eq!((d.width, d.height), (32, 32));
-        assert_eq!(d.frame.planes[0].data, pixels);
+        let bytes = encode_page(&page).expect("planar tiled encode");
+        let d = decode_page(&bytes).expect("planar tiled decode");
+        assert_eq!((d.image.width, d.image.height), (32, 32));
+        assert_eq!(d.image.planes[0].data, pixels);
     }
 
     #[test]
@@ -5720,8 +5731,12 @@ mod tests {
                 extras: PageExtras::default(),
             },
         ];
-        let bytes = encode_tiff_multi(&pages).unwrap();
-        let imgs = crate::decoder::decode_tiff_all(&bytes).unwrap();
+        let bytes = encode_pages(&pages).unwrap();
+        let imgs = crate::decode_all(&bytes)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.image)
+            .collect::<Vec<_>>();
         assert_eq!(imgs.len(), 2);
         assert_eq!(imgs[0].planes[0].data, p1);
         assert_eq!(imgs[1].planes[0].data, p2);
@@ -5776,7 +5791,7 @@ mod tests {
     /// Helper: take the public-API decoded (Lab → Rgb24) output of a
     /// CIELab fixture as the round-trip "ground truth" and check that
     /// the same source bytes round-trip through both the hand-built
-    /// classic fixture path and our `encode_tiff(CieLab8)`. If both
+    /// classic fixture path and our `encode_page(CieLab8)`. If both
     /// produce identical Rgb24 outputs, the encoder is writing the
     /// strip / IFD / photometric the decoder is expecting.
     fn decode_3sample_cielab(pixels: &[u8], w: u32, h: u32) -> Vec<u8> {
@@ -5824,7 +5839,7 @@ mod tests {
             buf.extend_from_slice(&8u16.to_le_bytes());
         }
         buf.extend_from_slice(pixels);
-        decode_tiff(&buf).unwrap().frame.planes[0].data.clone()
+        decode_page(&buf).unwrap().image.planes[0].data.clone()
     }
 
     fn decode_1sample_cielab(pixels: &[u8], w: u32, h: u32) -> Vec<u8> {
@@ -5864,7 +5879,7 @@ mod tests {
         push(&mut buf, 279, 4, 1, (strip_bytes as u32).to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
         buf.extend_from_slice(pixels);
-        decode_tiff(&buf).unwrap().frame.planes[0].data.clone()
+        decode_page(&buf).unwrap().image.planes[0].data.clone()
     }
 
     #[test]
@@ -5886,12 +5901,12 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!((d.width, d.height), (8, 8));
-        assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!((d.image.width, d.image.height), (8, 8));
+        assert_eq!(d.image.format, TiffPixelFormat::Rgb24);
         let want = decode_3sample_cielab(&pixels, 8, 8);
-        assert_eq!(d.frame.planes[0].data, want);
+        assert_eq!(d.image.planes[0].data, want);
     }
 
     #[test]
@@ -5912,9 +5927,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -5935,8 +5950,8 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
-            assert_eq!(d.frame.planes[0].data, baseline, "compressor {:?}", c);
+            let d = decode_page(&encode_page(&page).unwrap()).unwrap();
+            assert_eq!(d.image.planes[0].data, baseline, "compressor {:?}", c);
         }
     }
 
@@ -5958,9 +5973,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -5977,9 +5992,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -6005,9 +6020,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -6024,9 +6039,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -6051,9 +6066,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -6070,9 +6085,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -6097,13 +6112,13 @@ mod tests {
             bigtiff: true,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
+        let bytes = encode_page(&page).unwrap();
         // BigTIFF magic 43.
         assert_eq!(&bytes[..2], b"II");
         assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 43);
-        let d = decode_tiff(&bytes).unwrap();
+        let d = decode_page(&bytes).unwrap();
         let want = decode_3sample_cielab(&pixels, 8, 8);
-        assert_eq!(d.frame.planes[0].data, want);
+        assert_eq!(d.image.planes[0].data, want);
     }
 
     #[test]
@@ -6122,7 +6137,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let err = encode_tiff(&page).unwrap_err();
+        let err = encode_page(&page).unwrap_err();
         assert!(format!("{err}").contains("CCITT"));
     }
 
@@ -6142,7 +6157,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let err = encode_tiff(&page).unwrap_err();
+        let err = encode_page(&page).unwrap_err();
         assert!(format!("{err}").contains("CieLab8"));
     }
 
@@ -6163,12 +6178,12 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!((d.width, d.height), (8, 4));
-        assert_eq!(d.pixel_format, TiffPixelFormat::Gray8);
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!((d.image.width, d.image.height), (8, 4));
+        assert_eq!(d.image.format, TiffPixelFormat::Gray8);
         let want = decode_1sample_cielab(&pixels, 8, 4);
-        assert_eq!(d.frame.planes[0].data, want);
+        assert_eq!(d.image.planes[0].data, want);
     }
 
     #[test]
@@ -6187,7 +6202,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let err = encode_tiff(&page).unwrap_err();
+        let err = encode_page(&page).unwrap_err();
         assert!(format!("{err}").contains("PlanarConfiguration"));
     }
 
@@ -6208,7 +6223,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
+        let bytes = encode_page(&page).unwrap();
         let ifd_off = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
         let count = u16::from_le_bytes([bytes[ifd_off], bytes[ifd_off + 1]]) as usize;
         let mut found = None;
@@ -6255,7 +6270,7 @@ mod tests {
     }
 
     /// Hand-build a classic chunky CMYK TIFF (no encoder), decode it
-    /// through `decode_tiff`, and return the resulting Rgb24 plane.
+    /// through `decode_page`, and return the resulting Rgb24 plane.
     /// This anchors what an §16-conforming CMYK page is supposed to
     /// look like off-disk so the encoder output can be checked
     /// against the *same* decoded image. Mirrors the
@@ -6321,7 +6336,10 @@ mod tests {
             buf.extend_from_slice(&8u16.to_le_bytes());
         }
         buf.extend_from_slice(pixels);
-        decode_tiff(&buf).unwrap().frame.planes[0].data.clone()
+        let d = decode_page(&buf).unwrap();
+        assert_eq!(d.image.format, TiffPixelFormat::Cmyk);
+        assert_eq!(d.image.planes[0].data, pixels);
+        d.image.to_rgb8()
     }
 
     #[test]
@@ -6343,12 +6361,15 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!((d.width, d.height), (8, 8));
-        assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!((d.image.width, d.image.height), (8, 8));
+        // Native Cmyk (ink coverages verbatim); the §16 inversion is
+        // `to_rgb8`.
+        assert_eq!(d.image.format, TiffPixelFormat::Cmyk);
+        assert_eq!(d.image.planes[0].data, pixels);
         let want = decode_cmyk_4sample(&pixels, 8, 8);
-        assert_eq!(d.frame.planes[0].data, want);
+        assert_eq!(d.image.to_rgb8(), want);
     }
 
     #[test]
@@ -6369,9 +6390,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -6392,8 +6413,8 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
-            assert_eq!(d.frame.planes[0].data, baseline, "compressor {:?}", c);
+            let d = decode_page(&encode_page(&page).unwrap()).unwrap();
+            assert_eq!(d.image.planes[0].data, baseline, "compressor {:?}", c);
         }
     }
 
@@ -6416,9 +6437,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -6435,9 +6456,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -6463,9 +6484,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -6482,9 +6503,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -6510,9 +6531,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -6529,9 +6550,9 @@ mod tests {
                 bigtiff: false,
                 extras: PageExtras::default(),
             };
-            decode_tiff(&encode_tiff(&page).unwrap())
+            decode_page(&encode_page(&page).unwrap())
                 .unwrap()
-                .frame
+                .image
                 .planes[0]
                 .data
                 .clone()
@@ -6556,12 +6577,13 @@ mod tests {
             bigtiff: true,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
+        let bytes = encode_page(&page).unwrap();
         assert_eq!(&bytes[..2], b"II");
         assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 43);
-        let d = decode_tiff(&bytes).unwrap();
+        let d = decode_page(&bytes).unwrap();
         let want = decode_cmyk_4sample(&pixels, 8, 8);
-        assert_eq!(d.frame.planes[0].data, want);
+        assert_eq!(d.image.format, TiffPixelFormat::Cmyk);
+        assert_eq!(d.image.to_rgb8(), want);
     }
 
     #[test]
@@ -6580,7 +6602,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let err = encode_tiff(&page).unwrap_err();
+        let err = encode_page(&page).unwrap_err();
         assert!(format!("{err}").contains("CCITT"));
     }
 
@@ -6600,7 +6622,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let err = encode_tiff(&page).unwrap_err();
+        let err = encode_page(&page).unwrap_err();
         assert!(format!("{err}").contains("Cmyk32"));
     }
 
@@ -6622,7 +6644,7 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
+        let bytes = encode_page(&page).unwrap();
         let ifd_off = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
         let count = u16::from_le_bytes([bytes[ifd_off], bytes[ifd_off + 1]]) as usize;
         let mut photo = None;
@@ -6672,10 +6694,10 @@ mod tests {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
-        let rgb = &d.frame.planes[0].data;
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!(d.image.format, TiffPixelFormat::Cmyk);
+        let rgb = d.image.to_rgb8();
         // Pure cyan -> R = (1-1)(1-0) = 0, G = B = 255.
         assert_eq!(&rgb[0..3], &[0, 255, 255]);
         // Pure magenta -> R = 255, G = 0, B = 255.

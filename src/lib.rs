@@ -37,8 +37,8 @@
 //! * Predictor: 1 (none) and 2 (horizontal differencing,
 //!   per-component for SamplesPerPixel > 1)
 //! * Strip OR tile layout
-//! * Multi-page (full next-IFD chain walk via [`decode_tiff_all`], or
-//!   [`decode_tiff_all_pages`] to keep each page's metadata)
+//! * Multi-page (full next-IFD chain walk via [`decode_all`], or
+//!   [`decode_pages`] to keep each page's metadata)
 //! * Metadata: every decode result carries a [`TiffMetadata`]
 //!   (`DecodedTiff::metadata`) with the TIFF 6.0 §8 ASCII descriptive
 //!   fields (DocumentName / ImageDescription / Make / Model / PageName /
@@ -90,7 +90,7 @@
 //!   [`EncodePage::tiling`]
 //! * Predictor: 2 (horizontal differencing) and 3 (floating-point)
 //!   via [`EncodePage::predictor`]
-//! * Multi-page chain via [`encode_tiff_multi`]; SubIFDs (330) child
+//! * Multi-page chain via [`encode_pages`]; SubIFDs (330) child
 //!   image trees, Exif (34665) / GPS (34853) verbatim child IFDs,
 //!   PageNumber / NewSubfileType bits, resolution + the full TIFF 6.0
 //!   §8 ASCII metadata set (DocumentName / ImageDescription / Make /
@@ -98,7 +98,7 @@
 //!   Copyright) plus the XMP packet (tag 700) and embedded ICC
 //!   profile (tag 34675, header/size-validated, stored verbatim) via
 //!   [`encoder::PageExtras`] (children decode through
-//!   [`decode_tiff_at`]) — everything the decoder's [`TiffMetadata`]
+//!   [`decode_page_at`]) — everything the decoder's [`TiffMetadata`]
 //!   exposes round-trips
 //!
 //! The deprecated TIFF 6.0 §22 old-style JPEG (Compression=6) decodes
@@ -122,28 +122,47 @@
 //!
 //! ## Standalone vs registry-integrated
 //!
-//! The crate's default `registry` Cargo feature pulls in `oxideav-core`
-//! and exposes the `Decoder` trait surface, the TIFF container
-//! demuxer/probe, and the [`registry::register`] entry point. Disable
-//! the feature (`default-features = false`) for an oxideav-core-free
-//! build that still exposes the standalone [`decode_tiff`] API plus
-//! [`TiffImage`] / [`TiffPixelFormat`] / [`TiffPlane`] / [`TiffError`]
-//! types — none of which depend on `oxideav-core`.
+//! The root of the crate is the image-crate contract shared by every
+//! `oxideav-<format>` crate (`IMAGE_CRATE_API`): [`probe`], [`info`],
+//! [`decode`] / [`decode_with`] / [`decode_rgb8`] / [`decode_rgba8`] /
+//! [`decode_all`] / [`decode_from`], [`encode`] / [`encode_rgb8`] /
+//! [`encode_rgba8`] / [`encode_to`], the [`TiffImage`] native-layout
+//! type with [`Plane`] / [`ColorInfo`] / [`Metadata`] / [`Palette`],
+//! [`RgbImage`] / [`RgbaImage`], [`Frame`], [`ImageInfo`],
+//! [`DecodeOptions`] / [`EncodeOptions`], and [`TiffError`] (alias
+//! [`Error`]). All of it builds with `default-features = false` and no
+//! `oxideav-core`. TIFF-specific depth keeps its own names: [`Page`]
+//! ([`decode_page`] / [`decode_page_at`] / [`decode_pages`]) carries the
+//! descriptive [`TiffMetadata`] and structural [`TiffFormatInfo`] with
+//! the image, and [`EncodePage`] / [`encode_page`] / [`encode_pages`]
+//! expose every pixel kind, sub-IFD and page option the writer has.
+//!
+//! The default `registry` Cargo feature pulls in `oxideav-core` (and
+//! `oxideav-mjpeg`, which the JPEG-in-TIFF *decode* path routes
+//! through) and exposes the framework adapters: [`register`] (fleet
+//! signature, `&mut RuntimeContext`), [`register_codecs`] /
+//! [`register_containers`], [`make_decoder`] / [`make_encoder`], the
+//! TIFF container demuxer + muxer + probe, and the
+//! `TiffImage` ⇄ `VideoFrame` bridge. The framework `Decoder` /
+//! `Encoder` call the standalone functions — one implementation.
 
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub mod ccitt;
 // internal — exposed for tests/fuzz; not part of the stable API
+mod api;
 #[doc(hidden)]
 pub mod compress;
 pub mod decoder;
 pub mod encoder;
 pub mod error;
+mod exif;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub mod ifd;
 pub mod image;
 pub mod metadata;
+mod options;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub mod types;
@@ -184,24 +203,51 @@ pub mod registry;
 /// Codec id for TIFF image frames.
 pub const CODEC_ID_STR: &str = "tiff";
 
-// Standalone, framework-free API. Available regardless of the
-// `registry` feature.
-pub use decoder::{
-    decode_tiff, decode_tiff_all, decode_tiff_all_pages, decode_tiff_at, DecodedTiff,
+// ---- The image-crate contract (IMAGE_CRATE_API) ---------------------------
+// Root vocabulary, identical across every oxideav image crate; works
+// with `default-features = false`.
+pub use api::{
+    decode, decode_all, decode_all_with, decode_from, decode_rgb8, decode_rgba8, decode_with,
+    encode, encode_rgb8, encode_rgba8, encode_to, info, probe,
 };
+pub use error::{Error, Result, TiffError};
+pub use image::{
+    ColorInfo, ColorRange, Frame, ImageInfo, Metadata, Page, Palette, PixelFormat, Plane, RgbImage,
+    RgbaImage, TiffImage, TiffPixelFormat,
+};
+pub use options::{DecodeOptions, EncodeOptions};
+
+// ---- TIFF-specific depth (the contract is a floor, not a ceiling) ---------
+pub use api::{decode_page, decode_page_at, decode_pages};
+pub use decoder::{decode_page_at_with, decode_page_with, decode_pages_with};
 pub use encoder::{
-    encode_tiff, encode_tiff_multi, f16_bits_to_f32, f32_to_f16_bits, rgb24_to_ycbcr24,
-    AuxIfdEntry, EncodePage, EncodePixelFormat, ExtraSampleKind, PageExtras, PageResolution,
-    RgbColor, TiffCompression,
+    encode_page, encode_pages, f16_bits_to_f32, f32_to_f16_bits, rgb24_to_ycbcr24, AuxIfdEntry,
+    EncodePage, EncodePixelFormat, ExtraSampleKind, PageExtras, PageResolution, RgbColor,
+    TiffCompression,
 };
-pub use error::{Result, TiffError};
-pub use image::{TiffImage, TiffPixelFormat, TiffPlane};
 pub use jpeg_enc::JpegProcess;
 pub use jpeg_wrap::{JpegOptions, JpegTablesLayout};
 pub use metadata::{ResolutionUnit, TiffFormatInfo, TiffMetadata};
+
+// ---- Deprecated pre-contract entry points (one release) -------------------
+#[allow(deprecated)]
+pub use api::{
+    decode_tiff, decode_tiff_all, decode_tiff_all_pages, decode_tiff_at, encode_tiff,
+    encode_tiff_multi,
+};
+#[allow(deprecated)]
+pub use decoder::DecodedTiff;
+#[allow(deprecated)]
+pub use image::TiffPlane;
 
 // Framework-integrated API (`oxideav-core`-dependent). Gated behind
 // `registry` so image-library callers can build the crate without
 // dragging in `oxideav-core`.
 #[cfg(feature = "registry")]
-pub use registry::{make_decoder, register, register_codecs, register_containers};
+#[allow(deprecated)]
+pub use registry::register_into;
+#[cfg(feature = "registry")]
+pub use registry::{
+    __oxideav_entry, from_color_signal, make_decoder, make_encoder, register, register_codecs,
+    register_containers, to_color_signal, TiffDecoder, TiffEncoder,
+};

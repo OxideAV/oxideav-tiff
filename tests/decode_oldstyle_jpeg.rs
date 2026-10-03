@@ -25,9 +25,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use oxideav_tiff::types::*;
-use oxideav_tiff::{decode_tiff, TiffError};
 #[cfg(feature = "registry")]
-use oxideav_tiff::{decode_tiff_all, DecodedTiff};
+use oxideav_tiff::{decode_all, Page};
+use oxideav_tiff::{decode_page, TiffError};
 
 // ---------------------------------------------------------------------------
 // ImageMagick JPEG fixture generation (black-box; only the
@@ -135,19 +135,19 @@ fn gray_pattern_64() -> Vec<u8> {
 }
 
 #[cfg(feature = "registry")]
-fn frame_bytes(d: &DecodedTiff, bytes_per_pixel: usize) -> Vec<u8> {
-    assert_eq!(d.frame.planes.len(), 1);
-    let stride = d.frame.planes[0].stride;
-    let row_bytes = d.width as usize * bytes_per_pixel;
-    let mut out = Vec::with_capacity(row_bytes * d.height as usize);
-    for y in 0..d.height as usize {
-        out.extend_from_slice(&d.frame.planes[0].data[y * stride..y * stride + row_bytes]);
+fn frame_bytes(d: &Page, bytes_per_pixel: usize) -> Vec<u8> {
+    assert_eq!(d.image.planes.len(), 1);
+    let stride = d.image.planes[0].stride;
+    let row_bytes = d.image.width as usize * bytes_per_pixel;
+    let mut out = Vec::with_capacity(row_bytes * d.image.height as usize);
+    for y in 0..d.image.height as usize {
+        out.extend_from_slice(&d.image.planes[0].data[y * stride..y * stride + row_bytes]);
     }
     out
 }
 
 /// Row-packed plane bytes of a [`oxideav_tiff::TiffImage`] (the
-/// `decode_tiff_all` page type).
+/// `decode_all` page type).
 #[cfg(feature = "registry")]
 fn image_bytes(img: &oxideav_tiff::TiffImage, bytes_per_pixel: usize) -> Vec<u8> {
     assert_eq!(img.planes.len(), 1);
@@ -391,7 +391,7 @@ fn build_jpeg_tiff(cfg: &Cfg, jpeg: &[u8]) -> Vec<u8> {
 }
 
 /// Two-page chain: both pages §22 old-style JPEG grayscale (each page
-/// its own interchange bitstream), exercising `decode_tiff_all` over
+/// its own interchange bitstream), exercising `decode_all` over
 /// the next-IFD chain.
 #[cfg(feature = "registry")]
 fn build_two_page_oldstyle(jpeg1: &[u8], jpeg2: &[u8], w: u32, h: u32) -> Vec<u8> {
@@ -482,8 +482,8 @@ fn oldstyle_gray_interchange_decodes() {
         return;
     };
     let old = build_jpeg_tiff(&Cfg::gray(COMPRESSION_JPEG_OLD), &jpeg);
-    let d = decode_tiff(&old).expect("old-style gray decode failed");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&old).expect("old-style gray decode failed");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_bytes(&d, 1);
     let mse = mean_squared_error(&got, &pixels);
     assert!(
@@ -493,7 +493,7 @@ fn oldstyle_gray_interchange_decodes() {
 
     // Equivalence: identical bitstream through the TN2 path.
     let new = build_jpeg_tiff(&Cfg::gray(COMPRESSION_JPEG_NEW), &jpeg);
-    let d7 = decode_tiff(&new).expect("Compression=7 twin decode failed");
+    let d7 = decode_page(&new).expect("Compression=7 twin decode failed");
     assert_eq!(
         frame_bytes(&d7, 1),
         got,
@@ -526,8 +526,8 @@ fn oldstyle_gray_big_endian_matches_little() {
         },
         &jpeg,
     );
-    let dle = decode_tiff(&le).expect("LE decode failed");
-    let dbe = decode_tiff(&be).expect("BE decode failed");
+    let dle = decode_page(&le).expect("LE decode failed");
+    let dbe = decode_page(&be).expect("BE decode failed");
     assert_eq!(frame_bytes(&dle, 1), frame_bytes(&dbe, 1));
 }
 
@@ -550,8 +550,8 @@ fn oldstyle_ycbcr_420_interchange_decodes() {
         return;
     };
     let old = build_jpeg_tiff(&Cfg::ycbcr(COMPRESSION_JPEG_OLD, (2, 2)), &jpeg);
-    let d = decode_tiff(&old).expect("old-style YCbCr 4:2:0 decode failed");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&old).expect("old-style YCbCr 4:2:0 decode failed");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_bytes(&d, 3);
     let mse = mean_squared_error(&got, &pixels);
     assert!(
@@ -560,7 +560,7 @@ fn oldstyle_ycbcr_420_interchange_decodes() {
     );
 
     let new = build_jpeg_tiff(&Cfg::ycbcr(COMPRESSION_JPEG_NEW, (2, 2)), &jpeg);
-    let d7 = decode_tiff(&new).expect("Compression=7 twin decode failed");
+    let d7 = decode_page(&new).expect("Compression=7 twin decode failed");
     assert_eq!(frame_bytes(&d7, 3), got);
 }
 
@@ -582,7 +582,7 @@ fn oldstyle_ycbcr_444_interchange_decodes() {
         return;
     };
     let old = build_jpeg_tiff(&Cfg::ycbcr(COMPRESSION_JPEG_OLD, (1, 1)), &jpeg);
-    let d = decode_tiff(&old).expect("old-style YCbCr 4:4:4 decode failed");
+    let d = decode_page(&old).expect("old-style YCbCr 4:4:4 decode failed");
     let got = frame_bytes(&d, 3);
     let mse = mean_squared_error(&got, &pixels);
     assert!(
@@ -611,8 +611,8 @@ fn oldstyle_cmyk_interchange_decodes() {
         return;
     };
     let old = build_jpeg_tiff(&Cfg::cmyk(COMPRESSION_JPEG_OLD), &jpeg);
-    let d = decode_tiff(&old).expect("old-style CMYK decode failed");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&old).expect("old-style CMYK decode failed");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_bytes(&d, 3);
     // ImageMagick writes a *standalone* CMYK JPEG as YCCK (Adobe
     // APP14 transform = 2), so absolute color fidelity against the
@@ -627,7 +627,7 @@ fn oldstyle_cmyk_interchange_decodes() {
     assert!(unsat > got.len() / 10, "suspiciously many 255s");
 
     let new = build_jpeg_tiff(&Cfg::cmyk(COMPRESSION_JPEG_NEW), &jpeg);
-    let d7 = decode_tiff(&new).expect("Compression=7 twin decode failed");
+    let d7 = decode_page(&new).expect("Compression=7 twin decode failed");
     assert_eq!(frame_bytes(&d7, 3), got);
 }
 
@@ -655,8 +655,8 @@ fn oldstyle_without_strip_pointers_decodes() {
         },
         &jpeg,
     );
-    let a = decode_tiff(&with_strips).expect("with-strips decode failed");
-    let b = decode_tiff(&without_strips).expect("stripless decode failed");
+    let a = decode_page(&with_strips).expect("with-strips decode failed");
+    let b = decode_page(&without_strips).expect("stripless decode failed");
     assert_eq!(frame_bytes(&a, 1), frame_bytes(&b, 1));
 }
 
@@ -684,8 +684,8 @@ fn oldstyle_without_length_tag_decodes() {
         },
         &jpeg,
     );
-    let a = decode_tiff(&base).expect("with-length decode failed");
-    let b = decode_tiff(&no_len).expect("length-less decode failed");
+    let a = decode_page(&base).expect("with-length decode failed");
+    let b = decode_page(&no_len).expect("length-less decode failed");
     assert_eq!(frame_bytes(&a, 1), frame_bytes(&b, 1));
 }
 
@@ -712,7 +712,7 @@ fn oldstyle_padded_length_trims_to_eoi() {
         },
         &jpeg,
     );
-    let d = decode_tiff(&padded).expect("padded-length decode failed");
+    let d = decode_page(&padded).expect("padded-length decode failed");
     let mse = mean_squared_error(&frame_bytes(&d, 1), &pixels);
     assert!(
         mse < 200.0,
@@ -743,12 +743,12 @@ fn oldstyle_without_proc_tag_decodes() {
         },
         &jpeg,
     );
-    let d = decode_tiff(&no_proc).expect("proc-less interchange decode failed");
+    let d = decode_page(&no_proc).expect("proc-less interchange decode failed");
     let mse = mean_squared_error(&frame_bytes(&d, 1), &pixels);
     assert!(mse < 200.0, "proc-less reconstruction too far: MSE={mse}");
 }
 
-/// Two-page §22 chain via `decode_tiff_all`: each page carries its
+/// Two-page §22 chain via `decode_all`: each page carries its
 /// own interchange bitstream, and each decodes to its own pixels.
 #[cfg(feature = "registry")]
 #[test]
@@ -768,10 +768,10 @@ fn oldstyle_two_page_chain_decodes() {
         return;
     };
     let tiff = build_two_page_oldstyle(&j1, &j2, 64, 64);
-    let pages = decode_tiff_all(&tiff).expect("two-page old-style decode failed");
+    let pages = decode_all(&tiff).expect("two-page old-style decode failed");
     assert_eq!(pages.len(), 2);
-    let mse1 = mean_squared_error(&image_bytes(&pages[0], 1), &px1);
-    let mse2 = mean_squared_error(&image_bytes(&pages[1], 1), &px2);
+    let mse1 = mean_squared_error(&image_bytes(&pages[0].image, 1), &px1);
+    let mse2 = mean_squared_error(&image_bytes(&pages[1].image, 1), &px2);
     assert!(mse1 < 200.0, "page 1 too far: MSE={mse1}");
     assert!(mse2 < 200.0, "page 2 too far: MSE={mse2}");
 }
@@ -789,7 +789,7 @@ fn fake_jif() -> Vec<u8> {
 }
 
 fn expect_err(tiff: &[u8], needle: &str) -> TiffError {
-    match decode_tiff(tiff) {
+    match decode_page(tiff) {
         Ok(_) => panic!("decode unexpectedly succeeded (wanted error containing {needle:?})"),
         Err(e) => {
             let msg = format!("{e:?}");
@@ -827,7 +827,7 @@ fn tables_form_baseline_passes_layout_gate() {
     // either way the old blanket layout rejection must be gone. The
     // published and in-workspace `oxideav-mjpeg` builds legitimately
     // differ in strictness here, so only the gate is asserted.
-    if let Err(e) = decode_tiff(&tiff) {
+    if let Err(e) = decode_page(&tiff) {
         let msg = format!("{e:?}");
         assert!(
             !msg.contains("not supported in this build"),
@@ -836,7 +836,7 @@ fn tables_form_baseline_passes_layout_gate() {
     }
     #[cfg(not(feature = "registry"))]
     {
-        let Err(e) = decode_tiff(&tiff) else {
+        let Err(e) = decode_page(&tiff) else {
             panic!("standalone build cannot decode JPEG");
         };
         assert!(format!("{e:?}").contains("registry"), "{e:?}");
@@ -875,7 +875,7 @@ fn tables_form_lossless_passes_layout_gate() {
     // either way the old blanket layout rejection must be gone. The
     // published and in-workspace `oxideav-mjpeg` builds legitimately
     // differ in strictness here, so only the gate is asserted.
-    if let Err(e) = decode_tiff(&tiff) {
+    if let Err(e) = decode_page(&tiff) {
         let msg = format!("{e:?}");
         assert!(
             !msg.contains("not supported in this build"),
@@ -884,7 +884,7 @@ fn tables_form_lossless_passes_layout_gate() {
     }
     #[cfg(not(feature = "registry"))]
     {
-        let Err(e) = decode_tiff(&tiff) else {
+        let Err(e) = decode_page(&tiff) else {
             panic!("standalone build cannot decode JPEG");
         };
         assert!(format!("{e:?}").contains("registry"), "{e:?}");
@@ -955,7 +955,7 @@ fn planar_separate_flag_passes_gate() {
         ..Cfg::gray(COMPRESSION_JPEG_OLD)
     };
     let tiff = build_jpeg_tiff(&cfg, &fake_jif());
-    let e = match decode_tiff(&tiff) {
+    let e = match decode_page(&tiff) {
         Ok(_) => panic!("bogus bitstream must not decode"),
         Err(e) => e,
     };
@@ -982,7 +982,7 @@ fn deep_precision_passes_gate_sub8_rejected() {
         ..Cfg::gray(COMPRESSION_JPEG_OLD)
     };
     let tiff = build_jpeg_tiff(&cfg, &fake_jif());
-    let e = match decode_tiff(&tiff) {
+    let e = match decode_page(&tiff) {
         Ok(_) => panic!("bogus 16-bit bitstream must not decode"),
         Err(e) => e,
     };

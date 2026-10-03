@@ -13,7 +13,7 @@
 
 use oxideav_tiff::ifd::{ByteOrder, Entry};
 use oxideav_tiff::metadata::extract_metadata;
-use oxideav_tiff::{decode_tiff, ResolutionUnit};
+use oxideav_tiff::{decode_page, ResolutionUnit};
 
 /// Build one raw IFD [`Entry`] for direct extractor unit tests (values
 /// stored little-endian). Used for the tags whose *pixel decoder*
@@ -77,9 +77,9 @@ fn build(extra: &[[u8; 12]], blobs: &[u8]) -> Vec<u8> {
 }
 
 /// The pixel byte must always survive; assert it and return metadata.
-fn decode_ok(bytes: &[u8]) -> oxideav_tiff::DecodedTiff {
-    let d = decode_tiff(bytes).expect("hostile metadata must not gate pixel decode");
-    assert_eq!(d.frame.planes[0].data, vec![0xAB]);
+fn decode_ok(bytes: &[u8]) -> oxideav_tiff::Page {
+    let d = decode_page(bytes).expect("hostile metadata must not gate pixel decode");
+    assert_eq!(d.image.planes[0].data, vec![0xAB]);
     d
 }
 
@@ -226,6 +226,6 @@ fn bits_per_sample_absent_defaults_to_one_in_format_info() {
     }
     v.extend_from_slice(&0u32.to_le_bytes());
     v.push(0x80);
-    let d = decode_tiff(&v).expect("1-bit default-bits decode");
-    assert_eq!(d.format.bits_per_sample, vec![1]);
+    let d = decode_page(&v).expect("1-bit default-bits decode");
+    assert_eq!(d.layout.bits_per_sample, vec![1]);
 }

@@ -14,7 +14,7 @@
 
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
 };
 
 fn page<'a>(
@@ -61,13 +61,13 @@ const COMPRESSORS: [TiffCompression; 5] = [
 /// Encode both single- and multi-strip variants and assert identical
 /// decode output; return the multi-strip file for IFD inspection.
 fn strip_equiv(single: &EncodePage<'_>, multi: &EncodePage<'_>) -> Vec<u8> {
-    let f1 = encode_tiff(single).expect("single-strip encode");
-    let fmulti = encode_tiff(multi).expect("multi-strip encode");
-    let d1 = decode_tiff(&f1).expect("single-strip decode");
-    let dn = decode_tiff(&fmulti).expect("multi-strip decode");
-    assert_eq!(d1.frame.pixel_format, dn.frame.pixel_format);
+    let f1 = encode_page(single).expect("single-strip encode");
+    let fmulti = encode_page(multi).expect("multi-strip encode");
+    let d1 = decode_page(&f1).expect("single-strip decode");
+    let dn = decode_page(&fmulti).expect("multi-strip decode");
+    assert_eq!(d1.image.format, dn.image.format);
     assert_eq!(
-        d1.frame.planes[0].data, dn.frame.planes[0].data,
+        d1.image.planes[0].data, dn.image.planes[0].data,
         "multi-strip decode must match single-strip decode"
     );
     fmulti
@@ -251,7 +251,7 @@ fn ycbcr_subsampled_chunky_multi_strip() {
         // Non-multiple of sv rejected (§21 page 90) — only when sv > 1.
         if sv > 1 {
             let bad = page(kind, w, h, TiffCompression::Deflate, false, false, Some(3));
-            assert!(encode_tiff(&bad).is_err(), "rps=3 with sv={sv} must reject");
+            assert!(encode_page(&bad).is_err(), "rps=3 with sv={sv} must reject");
         }
     }
 }
@@ -309,7 +309,7 @@ fn rows_per_strip_validation() {
     let px = gray(8, 8);
     let kind = EncodePixelFormat::Gray8 { pixels: &px };
     // Zero rejected.
-    assert!(encode_tiff(&page(
+    assert!(encode_page(&page(
         kind.clone(),
         8,
         8,
@@ -330,9 +330,9 @@ fn rows_per_strip_validation() {
         Some(4),
     );
     tiled.tiling = Some((16, 16));
-    assert!(encode_tiff(&tiled).is_err());
+    assert!(encode_page(&tiled).is_err());
     // rows_per_strip >= height behaves exactly like None (single strip).
-    let a = encode_tiff(&page(
+    let a = encode_page(&page(
         kind.clone(),
         8,
         8,
@@ -342,7 +342,7 @@ fn rows_per_strip_validation() {
         Some(100),
     ))
     .unwrap();
-    let b = encode_tiff(&page(kind, 8, 8, TiffCompression::None, false, false, None)).unwrap();
+    let b = encode_page(&page(kind, 8, 8, TiffCompression::None, false, false, None)).unwrap();
     assert_eq!(a, b, "clamped rows_per_strip is byte-identical to None");
 }
 

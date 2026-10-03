@@ -13,8 +13,8 @@
 
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_tiff, decode_tiff_all, encode_tiff, encode_tiff_multi, EncodePage, EncodePixelFormat,
-    PageExtras, TiffCompression, TiffPixelFormat,
+    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
+    TiffCompression, TiffPixelFormat,
 };
 
 /// Deterministic signed 8-bit raster spanning the full i8 range.
@@ -81,13 +81,13 @@ fn page_i16<'a>(w: u32, h: u32, pixels: &'a [i16], compression: TiffCompression)
 }
 
 fn decode_plane(tiff: &[u8], expect_pf: TiffPixelFormat, bytes_per_pixel: usize) -> Vec<u8> {
-    let d = decode_tiff(tiff).expect("decode failed");
-    assert_eq!(d.pixel_format, expect_pf);
-    let stride = d.frame.planes[0].stride;
-    let row_bytes = d.width as usize * bytes_per_pixel;
-    let mut out = Vec::with_capacity(row_bytes * d.height as usize);
-    for y in 0..d.height as usize {
-        out.extend_from_slice(&d.frame.planes[0].data[y * stride..y * stride + row_bytes]);
+    let d = decode_page(tiff).expect("decode failed");
+    assert_eq!(d.image.format, expect_pf);
+    let stride = d.image.planes[0].stride;
+    let row_bytes = d.image.width as usize * bytes_per_pixel;
+    let mut out = Vec::with_capacity(row_bytes * d.image.height as usize);
+    for y in 0..d.image.height as usize {
+        out.extend_from_slice(&d.image.planes[0].data[y * stride..y * stride + row_bytes]);
     }
     out
 }
@@ -113,7 +113,7 @@ fn gray_i8_strip_roundtrip() {
                 predictor,
                 ..page_i8(w, h, &px, compression)
             };
-            let tiff = encode_tiff(&p).expect("encode failed");
+            let tiff = encode_page(&p).expect("encode failed");
             assert_eq!(
                 decode_plane(&tiff, TiffPixelFormat::Gray8, 1),
                 want,
@@ -136,7 +136,7 @@ fn gray_i16_strip_roundtrip() {
                 predictor,
                 ..page_i16(w, h, &px, compression)
             };
-            let tiff = encode_tiff(&p).expect("encode failed");
+            let tiff = encode_page(&p).expect("encode failed");
             assert_eq!(
                 decode_plane(&tiff, TiffPixelFormat::Gray16Le, 2),
                 want,
@@ -158,7 +158,7 @@ fn gray_signed_tiled_roundtrip() {
             predictor,
             ..page_i8(w, h, &px8, TiffCompression::Lzw)
         };
-        let tiff = encode_tiff(&p).expect("i8 tiled encode failed");
+        let tiff = encode_page(&p).expect("i8 tiled encode failed");
         assert_eq!(
             decode_plane(&tiff, TiffPixelFormat::Gray8, 1),
             expected_i8(&px8),
@@ -169,7 +169,7 @@ fn gray_signed_tiled_roundtrip() {
             predictor,
             ..page_i16(w, h, &px16, TiffCompression::Deflate)
         };
-        let tiff = encode_tiff(&p).expect("i16 tiled encode failed");
+        let tiff = encode_page(&p).expect("i16 tiled encode failed");
         assert_eq!(
             decode_plane(&tiff, TiffPixelFormat::Gray16Le, 2),
             expected_i16(&px16),
@@ -189,7 +189,7 @@ fn gray_signed_bigtiff_roundtrip() {
         predictor: true,
         ..page_i16(w, h, &px, TiffCompression::Zstd)
     };
-    let tiff = encode_tiff(&p).expect("encode failed");
+    let tiff = encode_page(&p).expect("encode failed");
     assert_eq!(
         decode_plane(&tiff, TiffPixelFormat::Gray16Le, 2),
         expected_i16(&px)
@@ -216,11 +216,11 @@ fn gray_signed_multipage_chain() {
             extras: PageExtras::default(),
         },
     ];
-    let tiff = encode_tiff_multi(&pages).expect("multi-page encode failed");
-    let decoded = decode_tiff_all(&tiff).expect("multi-page decode failed");
+    let tiff = encode_pages(&pages).expect("multi-page encode failed");
+    let decoded = decode_all(&tiff).expect("multi-page decode failed");
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].planes[0].data, expected_i8(&px));
-    assert_eq!(decoded[1].planes[0].data, unsigned);
+    assert_eq!(decoded[0].image.planes[0].data, expected_i8(&px));
+    assert_eq!(decoded[1].image.planes[0].data, unsigned);
 }
 
 /// The written IFD carries `SampleFormat = 2` (inline single SHORT)
@@ -230,7 +230,7 @@ fn gray_signed_ifd_tags_and_raw_bytes() {
     use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
     let (w, h) = (8u32, 4u32);
     let px = pixels_i8(w, h);
-    let tiff = encode_tiff(&page_i8(w, h, &px, TiffCompression::None)).expect("encode failed");
+    let tiff = encode_page(&page_i8(w, h, &px, TiffCompression::None)).expect("encode failed");
     let hd = parse_header(&tiff).unwrap();
     let (entries, _) = parse_ifd(&tiff, hd.byte_order, hd.variant, hd.first_ifd_offset).unwrap();
     let sf = find(&entries, TAG_SAMPLE_FORMAT)
@@ -255,14 +255,14 @@ fn gray_signed_ifd_tags_and_raw_bytes() {
 #[test]
 fn gray_signed_rejections() {
     let px = pixels_i8(8, 4);
-    let e = encode_tiff(&page_i8(16, 16, &px, TiffCompression::None)).unwrap_err();
+    let e = encode_page(&page_i8(16, 16, &px, TiffCompression::None)).unwrap_err();
     assert!(format!("{e:?}").contains("GrayI8"), "{e:?}");
-    let e = encode_tiff(&page_i8(8, 4, &px, TiffCompression::CcittRle)).unwrap_err();
+    let e = encode_page(&page_i8(8, 4, &px, TiffCompression::CcittRle)).unwrap_err();
     assert!(format!("{e:?}").contains("Bilevel"), "{e:?}");
     let p = EncodePage {
         planar: true,
         ..page_i8(8, 4, &px, TiffCompression::None)
     };
-    let e = encode_tiff(&p).unwrap_err();
+    let e = encode_page(&p).unwrap_err();
     assert!(format!("{e:?}").contains("PlanarConfiguration"), "{e:?}");
 }

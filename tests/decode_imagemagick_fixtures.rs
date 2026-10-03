@@ -15,7 +15,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use oxideav_tiff::{decode_tiff, DecodedTiff};
+use oxideav_tiff::{decode_page, Page, TiffPixelFormat};
 
 fn convert_available() -> bool {
     Command::new("convert")
@@ -110,34 +110,40 @@ fn rgb_pattern_64() -> Vec<u8> {
     p
 }
 
-fn frame_to_rgb24_bytes(d: &DecodedTiff) -> Vec<u8> {
+fn frame_to_rgb24_bytes(d: &Page) -> Vec<u8> {
+    // Palette / RGBA / CMYK pages come back in their native layout
+    // since the image-crate contract; the display render is `to_rgb8`
+    // (byte-identical to what the pre-contract decoder emitted).
+    if d.image.format != TiffPixelFormat::Rgb24 {
+        return d.image.to_rgb8();
+    }
     // The frame is single-plane; row stride may be tighter than
     // width*3 only if we somehow added padding (we don't, so they
     // should be equal).
-    assert_eq!(d.frame.planes.len(), 1);
-    let stride = d.frame.planes[0].stride;
-    let row_bytes = d.width as usize * 3;
+    assert_eq!(d.image.planes.len(), 1);
+    let stride = d.image.planes[0].stride;
+    let row_bytes = d.image.width as usize * 3;
     if stride == row_bytes {
-        d.frame.planes[0].data.clone()
+        d.image.planes[0].data.clone()
     } else {
-        let mut out = Vec::with_capacity(row_bytes * d.height as usize);
-        for y in 0..d.height as usize {
-            out.extend_from_slice(&d.frame.planes[0].data[y * stride..y * stride + row_bytes]);
+        let mut out = Vec::with_capacity(row_bytes * d.image.height as usize);
+        for y in 0..d.image.height as usize {
+            out.extend_from_slice(&d.image.planes[0].data[y * stride..y * stride + row_bytes]);
         }
         out
     }
 }
 
-fn frame_to_gray8_bytes(d: &DecodedTiff) -> Vec<u8> {
-    assert_eq!(d.frame.planes.len(), 1);
-    let stride = d.frame.planes[0].stride;
-    let row_bytes = d.width as usize;
+fn frame_to_gray8_bytes(d: &Page) -> Vec<u8> {
+    assert_eq!(d.image.planes.len(), 1);
+    let stride = d.image.planes[0].stride;
+    let row_bytes = d.image.width as usize;
     if stride == row_bytes {
-        d.frame.planes[0].data.clone()
+        d.image.planes[0].data.clone()
     } else {
-        let mut out = Vec::with_capacity(row_bytes * d.height as usize);
-        for y in 0..d.height as usize {
-            out.extend_from_slice(&d.frame.planes[0].data[y * stride..y * stride + row_bytes]);
+        let mut out = Vec::with_capacity(row_bytes * d.image.height as usize);
+        for y in 0..d.image.height as usize {
+            out.extend_from_slice(&d.image.planes[0].data[y * stride..y * stride + row_bytes]);
         }
         out
     }
@@ -159,8 +165,8 @@ fn decode_64x64_rgb_uncompressed_imagemagick() {
             return;
         }
     };
-    let d = decode_tiff(&tiff).expect("decode_tiff failed");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&tiff).expect("decode_page failed");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_to_rgb24_bytes(&d);
     assert_eq!(got, pixels, "RGB uncompressed pixels mismatch");
 }
@@ -180,8 +186,8 @@ fn decode_64x64_rgb_packbits_imagemagick() {
             return;
         }
     };
-    let d = decode_tiff(&tiff).expect("decode_tiff failed");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&tiff).expect("decode_page failed");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_to_rgb24_bytes(&d);
     assert_eq!(got, pixels, "RGB PackBits pixels mismatch");
 }
@@ -201,8 +207,8 @@ fn decode_64x64_rgb_lzw_imagemagick() {
             return;
         }
     };
-    let d = decode_tiff(&tiff).expect("decode_tiff failed");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&tiff).expect("decode_page failed");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_to_rgb24_bytes(&d);
     assert_eq!(got, pixels, "RGB LZW pixels mismatch");
 }
@@ -228,8 +234,8 @@ fn decode_64x64_gray8_packbits_imagemagick() {
             return;
         }
     };
-    let d = decode_tiff(&tiff).expect("decode_tiff failed");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&tiff).expect("decode_page failed");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_to_gray8_bytes(&d);
     assert_eq!(got, pixels, "Gray8 PackBits pixels mismatch");
 }
@@ -249,8 +255,8 @@ fn decode_64x64_rgb_deflate_imagemagick() {
             return;
         }
     };
-    let d = decode_tiff(&tiff).expect("decode_tiff failed");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&tiff).expect("decode_page failed");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_to_rgb24_bytes(&d);
     assert_eq!(got, pixels, "RGB Deflate pixels mismatch");
 }
@@ -291,7 +297,7 @@ fn probe_recognises_minimal_be_tiff() {
 /// bit-exactness.
 ///
 /// JPEG-in-TIFF decode lives behind the `registry` feature (the JPEG
-/// codec is `oxideav-mjpeg`); without it `decode_tiff` returns
+/// codec is `oxideav-mjpeg`); without it `decode_page` returns
 /// `Error::Unsupported` for Compression=7, so this test only applies
 /// to the default (registry-on) build.
 #[cfg(feature = "registry")]
@@ -312,8 +318,8 @@ fn decode_64x64_rgb_jpeg_imagemagick() {
             return;
         }
     };
-    let d = decode_tiff(&tiff).expect("decode_tiff (JPEG-in-TIFF, RGB) failed");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&tiff).expect("decode_page (JPEG-in-TIFF, RGB) failed");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_to_rgb24_bytes(&d);
     let mse = mean_squared_error(&got, &pixels);
     assert!(
@@ -346,8 +352,8 @@ fn decode_64x64_gray_jpeg_imagemagick() {
             return;
         }
     };
-    let d = decode_tiff(&tiff).expect("decode_tiff (JPEG-in-TIFF, gray) failed");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&tiff).expect("decode_page (JPEG-in-TIFF, gray) failed");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_to_gray8_bytes(&d);
     let mse = mean_squared_error(&got, &pixels);
     assert!(
@@ -430,8 +436,8 @@ fn decode_64x64_ycbcr_jpeg_tiffcp() {
     let tiff = std::fs::read(&out_path).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 
-    let d = decode_tiff(&tiff).expect("decode_tiff (YCbCr JPEG-in-TIFF) failed");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&tiff).expect("decode_page (YCbCr JPEG-in-TIFF) failed");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_to_rgb24_bytes(&d);
     // Default tiffcp quality + 2:2 chroma subsampling: looser
     // tolerance than the RGB-JPEG path because chroma is downsampled.
@@ -477,8 +483,8 @@ fn decode_64x64_cmyk_jpeg_imagemagick() {
             return;
         }
     };
-    let d = decode_tiff(&tiff).expect("decode_tiff (CMYK JPEG-in-TIFF) failed");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&tiff).expect("decode_page (CMYK JPEG-in-TIFF) failed");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     // Output is Rgb24 (CMYK -> additive RGB).
     let got = frame_to_rgb24_bytes(&d);
     assert_eq!(got.len(), 64 * 64 * 3);
@@ -520,7 +526,7 @@ fn reject_old_style_jpeg_compression_6() {
     // the other mandatory tags. We don't even need real pixel data —
     // the IFD walker should bail out before reaching strip decode.
     let tiff = build_compression_only_tiff(COMPRESSION_JPEG_OLD);
-    match decode_tiff(&tiff) {
+    match decode_page(&tiff) {
         Ok(_) => panic!("Compression=6 should be rejected, decode succeeded"),
         Err(e) => {
             let msg = format!("{e:?}");
@@ -580,8 +586,8 @@ fn decode_64x64_rgb_jpeg_tiled_imagemagick() {
             return;
         }
     };
-    let d = decode_tiff(&tiff).expect("decode_tiff (tiled JPEG-in-TIFF, RGB) failed");
-    assert_eq!((d.width, d.height), (64, 64));
+    let d = decode_page(&tiff).expect("decode_page (tiled JPEG-in-TIFF, RGB) failed");
+    assert_eq!((d.image.width, d.image.height), (64, 64));
     let got = frame_to_rgb24_bytes(&d);
     let mse = mean_squared_error(&got, &pixels);
     assert!(
@@ -628,8 +634,8 @@ fn decode_partial_edge_jpeg_tiled_imagemagick() {
             return;
         }
     };
-    let d = decode_tiff(&tiff).expect("decode_tiff (partial-edge tiled JPEG-in-TIFF) failed");
-    assert_eq!((d.width, d.height), (w, h));
+    let d = decode_page(&tiff).expect("decode_page (partial-edge tiled JPEG-in-TIFF) failed");
+    assert_eq!((d.image.width, d.image.height), (w, h));
     let got = frame_to_gray8_bytes(&d);
     let mse = mean_squared_error(&got, &pixels);
     assert!(

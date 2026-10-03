@@ -6,7 +6,7 @@
 
 use oxideav_tiff::ifd::{parse_header, parse_ifd};
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
 };
 
 fn page<'a>(w: u32, h: u32, pixels: &'a [u8], extras: PageExtras<'a>) -> EncodePage<'a> {
@@ -39,8 +39,8 @@ fn all_ten_ascii_fields_round_trip() {
         copyright: Some("(c) 2026 Karpeles Lab"),
         ..Default::default()
     };
-    let tiff = encode_tiff(&page(4, 4, &px, extras)).expect("encode");
-    let m = decode_tiff(&tiff).expect("decode").metadata;
+    let tiff = encode_page(&page(4, 4, &px, extras)).expect("encode");
+    let m = decode_page(&tiff).expect("decode").metadata;
     assert_eq!(m.document_name.as_deref(), Some("Contract"));
     assert_eq!(m.image_description.as_deref(), Some("Signature page"));
     assert_eq!(m.make.as_deref(), Some("AcmeScan"));
@@ -69,7 +69,7 @@ fn ifd_tags_stay_in_ascending_order_with_all_metadata() {
         page_number: Some((0, 1)),
         ..Default::default()
     };
-    let tiff = encode_tiff(&page(4, 4, &px, extras)).expect("encode");
+    let tiff = encode_page(&page(4, 4, &px, extras)).expect("encode");
     let hdr = parse_header(&tiff).expect("header");
     let (entries, _next) =
         parse_ifd(&tiff, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).expect("parse ifd");

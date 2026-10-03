@@ -18,7 +18,7 @@
 //!      via a byte-level IFD walker independent of our decoder.
 
 use oxideav_tiff::{
-    decode_tiff, encode_tiff, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
     TiffPixelFormat,
 };
 
@@ -128,7 +128,7 @@ fn encoder_cielab8_neutral_gradient_matches_handbuilt() {
     .concat();
 
     let handbuilt = build_classic_tiff(4, 1, 3, 8, /* PHOTO_CIELAB */ 8, &lab_pixels);
-    let want = decode_tiff(&handbuilt).unwrap().frame.planes[0]
+    let want = decode_page(&handbuilt).unwrap().image.planes[0]
         .data
         .clone();
 
@@ -145,11 +145,11 @@ fn encoder_cielab8_neutral_gradient_matches_handbuilt() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (4, 1));
-    assert_eq!(d.pixel_format, TiffPixelFormat::Rgb24);
-    assert_eq!(d.frame.planes[0].data, want);
+    let bytes = encode_page(&page).unwrap();
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (4, 1));
+    assert_eq!(d.image.format, TiffPixelFormat::Rgb24);
+    assert_eq!(d.image.planes[0].data, want);
 }
 
 #[test]
@@ -166,7 +166,7 @@ fn encoder_cielab8_chromatic_primaries_match_handbuilt() {
     for (l, a, b, label) in cases {
         let lab = pack_lab(*l, *a, *b).to_vec();
         let handbuilt = build_classic_tiff(1, 1, 3, 8, 8, &lab);
-        let want = decode_tiff(&handbuilt).unwrap().frame.planes[0]
+        let want = decode_page(&handbuilt).unwrap().image.planes[0]
             .data
             .clone();
 
@@ -181,9 +181,9 @@ fn encoder_cielab8_chromatic_primaries_match_handbuilt() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let bytes = encode_tiff(&page).unwrap();
-        let d = decode_tiff(&bytes).unwrap();
-        assert_eq!(d.frame.planes[0].data, want, "case {label}");
+        let bytes = encode_page(&page).unwrap();
+        let d = decode_page(&bytes).unwrap();
+        assert_eq!(d.image.planes[0].data, want, "case {label}");
     }
 }
 
@@ -215,9 +215,9 @@ fn encoder_cielab8_compressors_lossless() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        decode_tiff(&encode_tiff(&page).unwrap())
+        decode_page(&encode_page(&page).unwrap())
             .unwrap()
-            .frame
+            .image
             .planes[0]
             .data
             .clone()
@@ -241,8 +241,8 @@ fn encoder_cielab8_compressors_lossless() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
-        assert_eq!(d.frame.planes[0].data, baseline, "compressor {:?}", c);
+        let d = decode_page(&encode_page(&page).unwrap()).unwrap();
+        assert_eq!(d.image.planes[0].data, baseline, "compressor {:?}", c);
     }
 }
 
@@ -276,9 +276,9 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        decode_tiff(&encode_tiff(&page).unwrap())
+        decode_page(&encode_page(&page).unwrap())
             .unwrap()
-            .frame
+            .image
             .planes[0]
             .data
             .clone()
@@ -299,8 +299,8 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
-        assert_eq!(d.frame.planes[0].data, baseline, "predictor only");
+        let d = decode_page(&encode_page(&page).unwrap()).unwrap();
+        assert_eq!(d.image.planes[0].data, baseline, "predictor only");
     }
 
     // Planar alone.
@@ -318,8 +318,8 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
-        assert_eq!(d.frame.planes[0].data, baseline, "planar only");
+        let d = decode_page(&encode_page(&page).unwrap()).unwrap();
+        assert_eq!(d.image.planes[0].data, baseline, "planar only");
     }
 
     // Tiled chunky.
@@ -337,8 +337,8 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
-        assert_eq!(d.frame.planes[0].data, baseline, "tiled chunky");
+        let d = decode_page(&encode_page(&page).unwrap()).unwrap();
+        assert_eq!(d.image.planes[0].data, baseline, "tiled chunky");
     }
 
     // Tiled + planar (per-plane tile grid, §15 PlanarConfiguration=2).
@@ -356,8 +356,8 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
-        assert_eq!(d.frame.planes[0].data, baseline, "tiled planar");
+        let d = decode_page(&encode_page(&page).unwrap()).unwrap();
+        assert_eq!(d.image.planes[0].data, baseline, "tiled planar");
     }
 
     // Predictor + planar + tiled all combined.
@@ -375,8 +375,8 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
-        assert_eq!(d.frame.planes[0].data, baseline, "predictor+planar+tiled");
+        let d = decode_page(&encode_page(&page).unwrap()).unwrap();
+        assert_eq!(d.image.planes[0].data, baseline, "predictor+planar+tiled");
     }
 }
 
@@ -393,7 +393,7 @@ fn encoder_cielab_l8_neutral_ramp_matches_handbuilt() {
         ((100.0_f64) * 255.0 / 100.0).round() as u8,
     ];
     let handbuilt = build_classic_tiff(4, 1, 1, 8, 8, &l_bytes);
-    let want = decode_tiff(&handbuilt).unwrap().frame.planes[0]
+    let want = decode_page(&handbuilt).unwrap().image.planes[0]
         .data
         .clone();
 
@@ -408,11 +408,11 @@ fn encoder_cielab_l8_neutral_ramp_matches_handbuilt() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let bytes = encode_tiff(&page).unwrap();
-    let d = decode_tiff(&bytes).unwrap();
-    assert_eq!((d.width, d.height), (4, 1));
-    assert_eq!(d.pixel_format, TiffPixelFormat::Gray8);
-    assert_eq!(d.frame.planes[0].data, want);
+    let bytes = encode_page(&page).unwrap();
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!((d.image.width, d.image.height), (4, 1));
+    assert_eq!(d.image.format, TiffPixelFormat::Gray8);
+    assert_eq!(d.image.planes[0].data, want);
 }
 
 #[test]
@@ -433,9 +433,9 @@ fn encoder_cielab_l8_predictor_and_compressors() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        decode_tiff(&encode_tiff(&page).unwrap())
+        decode_page(&encode_page(&page).unwrap())
             .unwrap()
-            .frame
+            .image
             .planes[0]
             .data
             .clone()
@@ -459,9 +459,9 @@ fn encoder_cielab_l8_predictor_and_compressors() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        let d = decode_tiff(&encode_tiff(&page).unwrap()).unwrap();
+        let d = decode_page(&encode_page(&page).unwrap()).unwrap();
         assert_eq!(
-            d.frame.planes[0].data, baseline,
+            d.image.planes[0].data, baseline,
             "compressor {:?} pred {}",
             c, pred
         );
@@ -486,9 +486,9 @@ fn encoder_cielab_l8_tiled_composes() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        decode_tiff(&encode_tiff(&page).unwrap())
+        decode_page(&encode_page(&page).unwrap())
             .unwrap()
-            .frame
+            .image
             .planes[0]
             .data
             .clone()
@@ -505,9 +505,9 @@ fn encoder_cielab_l8_tiled_composes() {
             bigtiff: false,
             extras: PageExtras::default(),
         };
-        decode_tiff(&encode_tiff(&page).unwrap())
+        decode_page(&encode_page(&page).unwrap())
             .unwrap()
-            .frame
+            .image
             .planes[0]
             .data
             .clone()
@@ -547,7 +547,7 @@ fn encoder_cielab_writes_photometric_and_samples() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let b3 = encode_tiff(&p3).unwrap();
+    let b3 = encode_page(&p3).unwrap();
     assert_eq!(read_ifd_entry_value_short(&b3, 262), Some(8));
     assert_eq!(read_ifd_entry_value_short(&b3, 277), Some(3));
 
@@ -564,7 +564,7 @@ fn encoder_cielab_writes_photometric_and_samples() {
         bigtiff: false,
         extras: PageExtras::default(),
     };
-    let b1 = encode_tiff(&p1).unwrap();
+    let b1 = encode_page(&p1).unwrap();
     assert_eq!(read_ifd_entry_value_short(&b1, 262), Some(8));
     assert_eq!(read_ifd_entry_value_short(&b1, 277), Some(1));
 }
@@ -572,8 +572,8 @@ fn encoder_cielab_writes_photometric_and_samples() {
 #[test]
 fn encoder_cielab_multi_page_chain() {
     // Multi-IFD chain mixing CIELab pages with a Gray8 page must walk
-    // cleanly via decode_tiff_all.
-    use oxideav_tiff::encode_tiff_multi;
+    // cleanly via decode_all.
+    use oxideav_tiff::encode_pages;
     let lab = pack_lab(50.0, 30, -20).to_vec();
     let gray = vec![10u8, 20, 30, 40];
     let l_only = vec![80u8, 90, 100, 110];
@@ -612,11 +612,11 @@ fn encoder_cielab_multi_page_chain() {
             extras: PageExtras::default(),
         },
     ];
-    let bytes = encode_tiff_multi(&pages).unwrap();
-    let imgs = oxideav_tiff::decode_tiff_all(&bytes).unwrap();
+    let bytes = encode_pages(&pages).unwrap();
+    let imgs = oxideav_tiff::decode_all(&bytes).unwrap();
     assert_eq!(imgs.len(), 3);
-    assert_eq!(imgs[0].pixel_format, TiffPixelFormat::Rgb24);
-    assert_eq!(imgs[1].pixel_format, TiffPixelFormat::Gray8);
-    assert_eq!(imgs[1].planes[0].data, gray);
-    assert_eq!(imgs[2].pixel_format, TiffPixelFormat::Gray8);
+    assert_eq!(imgs[0].image.format, TiffPixelFormat::Rgb24);
+    assert_eq!(imgs[1].image.format, TiffPixelFormat::Gray8);
+    assert_eq!(imgs[1].image.planes[0].data, gray);
+    assert_eq!(imgs[2].image.format, TiffPixelFormat::Gray8);
 }
