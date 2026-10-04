@@ -38,6 +38,7 @@ if oxideav_tiff::probe(&bytes) {
     let out = oxideav_tiff::encode_rgba8(w, h, &rgba, &opts)?;
     std::fs::write("out.tif", out)?;
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 | Item | Notes |
@@ -1092,6 +1093,8 @@ use oxideav_tiff::{
     encode_page, rgb24_to_ycbcr24, EncodePage, EncodePixelFormat, JpegOptions,
     JpegProcess, JpegTablesLayout, PageExtras, TiffCompression,
 };
+# let (width, height) = (64u32, 64u32);
+# let rgb = vec![0u8; 64 * 64 * 3];
 
 let ycc = rgb24_to_ycbcr24(&rgb);          // §21 default coefficients
 let mut page = EncodePage {
@@ -1103,6 +1106,7 @@ let mut page = EncodePage {
 };
 page.extras.rows_per_strip = Some(16);     // a multiple of the 4:2:0 MCU height
 let tiff = encode_page(&page)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 * **Processes** (`JpegOptions::process`): `JpegProcess::Dct` writes
