@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.7...v0.0.8) - 2026-10-04
+
+### Other
+
+- from_video_frame returns TiffError (contract ruling); adapter maps to core
+- fleet sweep part 2 — native float layouts, SMin/SMax on TiffFormatInfo, jpeg::SegmentPlane, crates.io exclude
+- fleet sweep part 1 — fallible from_rgb8/from_rgba8, encode_all for pages
+- README examples use the current registry API
+
 ### Added
 
 - `encode_all(&[Frame], &EncodeOptions)` — the contract's multi-page
