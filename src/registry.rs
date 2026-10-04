@@ -169,21 +169,26 @@ impl TiffImage {
     /// becomes [`TiffImage::palette`] for `Pal8` (falling back to the
     /// `extradata` RGB triples); its colour-signal side-channel becomes
     /// [`TiffImage::color`].
-    pub fn from_video_frame(frame: &VideoFrame, params: &CodecParameters) -> Result<Self> {
+    pub fn from_video_frame(frame: &VideoFrame, params: &CodecParameters) -> crate::Result<Self> {
         let width = params
             .width
-            .ok_or_else(|| Error::invalid("TIFF: missing width"))?;
+            .ok_or_else(|| TiffError::invalid("TIFF: missing width"))?;
         let height = params
             .height
-            .ok_or_else(|| Error::invalid("TIFF: missing height"))?;
+            .ok_or_else(|| TiffError::invalid("TIFF: missing height"))?;
         let pix = params
             .pixel_format
-            .ok_or_else(|| Error::invalid("TIFF: missing pixel_format"))?;
-        let pix = TiffPixelFormat::try_from(pix)?;
+            .ok_or_else(|| TiffError::invalid("TIFF: missing pixel_format"))?;
+        let pix = TiffPixelFormat::try_from(pix).map_err(|_| {
+            TiffError::unsupported(format!(
+                "TIFF: pixel format {pix:?} has no TIFF layout (Gray8 / Gray16Le / Rgb24 / \
+                 Rgb48Le / Rgba / Pal8 / Cmyk / GrayF32Le / RgbF32Le)"
+            ))
+        })?;
         let plane = frame
             .image_planes()
             .first()
-            .ok_or_else(|| Error::invalid("TIFF: frame has no planes"))?;
+            .ok_or_else(|| TiffError::invalid("TIFF: frame has no planes"))?;
         let mut img = TiffImage::new(
             width,
             height,
@@ -202,7 +207,7 @@ impl TiffImage {
                 )
             });
             if img.palette.is_none() {
-                return Err(Error::invalid(
+                return Err(TiffError::invalid(
                     "TIFF: Pal8 frame without a palette side-channel or extradata",
                 ));
             }
@@ -215,8 +220,8 @@ impl TiffImage {
 }
 
 impl TryFrom<(&VideoFrame, &CodecParameters)> for TiffImage {
-    type Error = Error;
-    fn try_from((frame, params): (&VideoFrame, &CodecParameters)) -> Result<Self> {
+    type Error = TiffError;
+    fn try_from((frame, params): (&VideoFrame, &CodecParameters)) -> crate::Result<Self> {
         TiffImage::from_video_frame(frame, params)
     }
 }

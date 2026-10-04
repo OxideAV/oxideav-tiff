@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `TiffImage::from_video_frame` and `TryFrom<(&VideoFrame, &CodecParameters)>`
+  return the crate's `TiffError` instead of `oxideav_core::Error` (contract
+  ruling); the registry encoder maps it. `TryFrom<PixelFormat> for
+  TiffPixelFormat` still yields `oxideav_core::Error`.
 - **`TiffImage::from_rgb8` / `from_rgba8` return `Result`** and reject a
   zero dimension or a buffer shorter than the geometry with `InvalidData`
   (the infallible signature is gone; `encode_rgb8` / `encode_rgba8`
