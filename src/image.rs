@@ -469,24 +469,23 @@ impl TiffImage {
     }
 
     /// Tightly packed `Rgb24` from `3 × width × height` bytes (stride
-    /// `3 × width`). The length is not checked here: [`Self::to_rgb8`]
-    /// reads a short buffer as zeros past its end and [`crate::encode`]
-    /// rejects one with `Error::InvalidData`; use [`Self::new`] to
-    /// validate up front.
-    pub fn from_rgb8(width: u32, height: u32, data: Vec<u8>) -> Self {
+    /// `3 × width`), validated as by [`Self::new`]: a zero dimension or
+    /// a buffer shorter than the geometry is `Error::InvalidData`.
+    pub fn from_rgb8(width: u32, height: u32, data: Vec<u8>) -> Result<Self> {
         Self::from_tight(width, height, PixelFormat::Rgb24, data)
     }
 
     /// Tightly packed `Rgba` (straight alpha) from `4 × width × height`
-    /// bytes (stride `4 × width`); same length rule as
-    /// [`Self::from_rgb8`].
-    pub fn from_rgba8(width: u32, height: u32, data: Vec<u8>) -> Self {
+    /// bytes (stride `4 × width`), validated as by [`Self::new`].
+    pub fn from_rgba8(width: u32, height: u32, data: Vec<u8>) -> Result<Self> {
         Self::from_tight(width, height, PixelFormat::Rgba, data)
     }
 
-    fn from_tight(width: u32, height: u32, format: PixelFormat, data: Vec<u8>) -> Self {
-        let stride = width as usize * format.bytes_per_pixel();
-        Self::from_parts(width, height, format, vec![Plane::new(stride, data)])
+    fn from_tight(width: u32, height: u32, format: PixelFormat, data: Vec<u8>) -> Result<Self> {
+        let stride = (width as usize)
+            .checked_mul(format.bytes_per_pixel())
+            .ok_or_else(|| TiffError::invalid("TiffImage: row size overflows"))?;
+        Self::new(width, height, format, vec![Plane::new(stride, data)])
     }
 
     /// Set the colour signalling.

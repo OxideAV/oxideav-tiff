@@ -267,93 +267,176 @@ pub fn decode_pages(bytes: &[u8]) -> Result<Vec<Page>> {
 /// with `Pal8`). `Error::InvalidData` is returned for an image whose
 /// plane does not match its geometry.
 pub fn encode(image: &TiffImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
-    let pixels = packed_pixels(image)?;
-    let palette: Vec<RgbColor> = match (image.format, &image.palette) {
-        (PixelFormat::Pal8, Some(p)) => {
-            if p.has_alpha() {
-                return Err(Error::unsupported(
-                    "TIFF encode: palette entries carry alpha, which a TIFF ColorMap cannot \
-                     hold (flatten with to_rgba8 / encode_rgba8 to keep the transparency)",
-                ));
-            }
-            if p.is_empty() || p.len() > 256 {
-                return Err(Error::invalid(format!(
-                    "TIFF encode: Pal8 palette must have 1..=256 entries, got {}",
-                    p.len()
-                )));
-            }
-            p.to_rgb_triples()
-        }
-        (PixelFormat::Pal8, None) => {
-            return Err(Error::invalid("TIFF encode: Pal8 image without a palette"));
-        }
-        _ => Vec::new(),
-    };
-    let kind = match image.format {
-        PixelFormat::Gray8 => EncodePixelFormat::Gray8 { pixels: &pixels },
-        PixelFormat::Gray16Le => EncodePixelFormat::Gray16Le { pixels: &pixels },
-        PixelFormat::Rgb24 => EncodePixelFormat::Rgb24 { pixels: &pixels },
-        PixelFormat::Rgb48Le => EncodePixelFormat::Rgb48 { pixels: &pixels },
-        PixelFormat::Rgba => EncodePixelFormat::Rgba32 {
-            pixels: &pixels,
-            kind: ExtraSampleKind::UnassociatedAlpha,
-        },
-        PixelFormat::Pal8 => EncodePixelFormat::Palette8 {
-            indices: &pixels,
-            palette: &palette,
-        },
-        PixelFormat::Cmyk => EncodePixelFormat::Cmyk32 { pixels: &pixels },
-    };
-
-    // Metadata blobs → page extras. The Exif payload is parsed into
-    // owned entry lists first; the borrowing `AuxIfdEntry` views must
-    // outlive the page description.
-    let (exif_owned, gps_owned): (Vec<OwnedEntry>, Vec<OwnedEntry>) =
-        match (opts.embed_exif, &image.metadata.exif) {
-            (true, Some(blob)) => parse_exif_payload(blob)?,
-            _ => (Vec::new(), Vec::new()),
-        };
-    let exif_entries: Vec<AuxIfdEntry<'_>> = exif_owned.iter().map(aux_view).collect();
-    let gps_entries: Vec<AuxIfdEntry<'_>> = gps_owned.iter().map(aux_view).collect();
-
-    let extras = PageExtras {
-        resolution: opts.resolution,
-        software: opts.software.as_deref(),
-        xmp: if opts.embed_xmp {
-            image.metadata.xmp.as_deref()
-        } else {
-            None
-        },
-        icc_profile: if opts.embed_icc {
-            image.metadata.icc.as_deref()
-        } else {
-            None
-        },
-        exif_ifd: if exif_entries.is_empty() {
-            None
-        } else {
-            Some(&exif_entries)
-        },
-        gps_ifd: if gps_entries.is_empty() {
-            None
-        } else {
-            Some(&gps_entries)
-        },
-        rows_per_strip: opts.rows_per_strip,
-        ..PageExtras::default()
-    };
-    let page = EncodePage {
-        width: image.width,
-        height: image.height,
-        kind,
-        compression: opts.compression,
-        predictor: opts.predictor,
-        planar: opts.planar,
-        tiling: opts.tiling,
-        bigtiff: opts.bigtiff,
-        extras,
-    };
+    let prep = PreparedPage::prepare(image, opts)?;
+    let aux = prep.aux_entries();
+    let page = prep.page(&aux, opts, None);
     encode_pages(std::slice::from_ref(&page))
+}
+
+/// Encode several images as one multi-page TIFF (the mirror of
+/// [`decode_all`]): one IFD per frame on the next-IFD chain, in order,
+/// each written exactly as [`encode`] writes a single image (its own
+/// native layout, compression and metadata per `opts`). Every page
+/// carries `PageNumber = (i, n)` and `NewSubfileType` bit 1 (one page
+/// of a multi-page image); a frame's own `page_number` /
+/// `new_subfile_type`, when set, are written instead. `delay` is
+/// ignored (TIFF pages are not timed). At least one frame is required
+/// (`Error::InvalidData` otherwise). The depth form with per-page
+/// control over everything is [`encode_pages`] / [`EncodePage`].
+pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
+    if frames.is_empty() {
+        return Err(Error::invalid("encode_all: at least one frame is required"));
+    }
+    let total = u16::try_from(frames.len()).map_err(|_| {
+        Error::unsupported(format!(
+            "encode_all: {} pages exceed the 16-bit PageNumber total",
+            frames.len()
+        ))
+    })?;
+    let prepared = frames
+        .iter()
+        .map(|f| PreparedPage::prepare(&f.image, opts))
+        .collect::<Result<Vec<_>>>()?;
+    let aux: Vec<_> = prepared.iter().map(PreparedPage::aux_entries).collect();
+    let pages: Vec<EncodePage<'_>> = prepared
+        .iter()
+        .zip(&aux)
+        .zip(frames)
+        .enumerate()
+        .map(|(i, ((p, a), f))| {
+            let page_number = f.page_number.unwrap_or((i as u16, total));
+            let subfile = f.new_subfile_type.unwrap_or(0b10);
+            p.page(a, opts, Some((page_number, subfile)))
+        })
+        .collect();
+    encode_pages(&pages)
+}
+
+/// The owned per-page material [`encode`] / [`encode_all`] hand to the
+/// borrowing [`EncodePage`] description.
+struct PreparedPage<'i> {
+    image: &'i TiffImage,
+    pixels: std::borrow::Cow<'i, [u8]>,
+    palette: Vec<RgbColor>,
+    exif_owned: Vec<OwnedEntry>,
+    gps_owned: Vec<OwnedEntry>,
+}
+
+impl<'i> PreparedPage<'i> {
+    fn prepare(image: &'i TiffImage, opts: &EncodeOptions) -> Result<Self> {
+        let pixels = packed_pixels(image)?;
+        let palette: Vec<RgbColor> = match (image.format, &image.palette) {
+            (PixelFormat::Pal8, Some(p)) => {
+                if p.has_alpha() {
+                    return Err(Error::unsupported(
+                        "TIFF encode: palette entries carry alpha, which a TIFF ColorMap cannot \
+                         hold (flatten with to_rgba8 / encode_rgba8 to keep the transparency)",
+                    ));
+                }
+                if p.is_empty() || p.len() > 256 {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode: Pal8 palette must have 1..=256 entries, got {}",
+                        p.len()
+                    )));
+                }
+                p.to_rgb_triples()
+            }
+            (PixelFormat::Pal8, None) => {
+                return Err(Error::invalid("TIFF encode: Pal8 image without a palette"));
+            }
+            _ => Vec::new(),
+        };
+        // Metadata blobs → page extras. The Exif payload is parsed into
+        // owned entry lists first; the borrowing `AuxIfdEntry` views
+        // must outlive the page description.
+        let (exif_owned, gps_owned): (Vec<OwnedEntry>, Vec<OwnedEntry>) =
+            match (opts.embed_exif, &image.metadata.exif) {
+                (true, Some(blob)) => parse_exif_payload(blob)?,
+                _ => (Vec::new(), Vec::new()),
+            };
+        Ok(Self {
+            image,
+            pixels,
+            palette,
+            exif_owned,
+            gps_owned,
+        })
+    }
+
+    fn aux_entries(&self) -> (Vec<AuxIfdEntry<'_>>, Vec<AuxIfdEntry<'_>>) {
+        (
+            self.exif_owned.iter().map(aux_view).collect(),
+            self.gps_owned.iter().map(aux_view).collect(),
+        )
+    }
+
+    /// The borrowing page description; `paging` = `(PageNumber,
+    /// NewSubfileType)` for a multi-page chain.
+    fn page<'p>(
+        &'p self,
+        aux: &'p (Vec<AuxIfdEntry<'p>>, Vec<AuxIfdEntry<'p>>),
+        opts: &'p EncodeOptions,
+        paging: Option<((u16, u16), u32)>,
+    ) -> EncodePage<'p> {
+        let image = self.image;
+        let pixels: &[u8] = &self.pixels;
+        let kind = match image.format {
+            PixelFormat::Gray8 => EncodePixelFormat::Gray8 { pixels },
+            PixelFormat::Gray16Le => EncodePixelFormat::Gray16Le { pixels },
+            PixelFormat::Rgb24 => EncodePixelFormat::Rgb24 { pixels },
+            PixelFormat::Rgb48Le => EncodePixelFormat::Rgb48 { pixels },
+            PixelFormat::Rgba => EncodePixelFormat::Rgba32 {
+                pixels,
+                kind: ExtraSampleKind::UnassociatedAlpha,
+            },
+            PixelFormat::Pal8 => EncodePixelFormat::Palette8 {
+                indices: pixels,
+                palette: &self.palette,
+            },
+            PixelFormat::Cmyk => EncodePixelFormat::Cmyk32 { pixels },
+        };
+        let (exif_entries, gps_entries) = aux;
+        let extras = PageExtras {
+            resolution: opts.resolution,
+            software: opts.software.as_deref(),
+            xmp: if opts.embed_xmp {
+                image.metadata.xmp.as_deref()
+            } else {
+                None
+            },
+            icc_profile: if opts.embed_icc {
+                image.metadata.icc.as_deref()
+            } else {
+                None
+            },
+            exif_ifd: if exif_entries.is_empty() {
+                None
+            } else {
+                Some(exif_entries)
+            },
+            gps_ifd: if gps_entries.is_empty() {
+                None
+            } else {
+                Some(gps_entries)
+            },
+            rows_per_strip: opts.rows_per_strip,
+            page_number: paging.map(|(n, _)| n),
+            reduced_resolution: paging.is_some_and(|(_, t)| t & 0b1 != 0),
+            multi_page: paging.is_some_and(|(_, t)| t & 0b10 != 0),
+            ..PageExtras::default()
+        };
+        EncodePage {
+            width: image.width,
+            height: image.height,
+            kind,
+            compression: opts.compression,
+            predictor: opts.predictor,
+            planar: opts.planar,
+            tiling: opts.tiling,
+            bigtiff: opts.bigtiff,
+            extras,
+        }
+    }
 }
 
 fn aux_view(e: &OwnedEntry) -> AuxIfdEntry<'_> {
@@ -413,14 +496,14 @@ fn packed_pixels(image: &TiffImage) -> Result<std::borrow::Cow<'_, [u8]>> {
 /// Encode tightly packed 8-bit RGB (`3 × width × height` bytes) as an
 /// `Rgb24` page (`PhotometricInterpretation = 2`).
 pub fn encode_rgb8(width: u32, height: u32, rgb: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
-    encode(&TiffImage::from_rgb8(width, height, rgb.to_vec()), opts)
+    encode(&TiffImage::from_rgb8(width, height, rgb.to_vec())?, opts)
 }
 
 /// Encode tightly packed 8-bit RGBA (`4 × width × height` bytes) as an
 /// RGB page with one unassociated-alpha extra sample
 /// (`ExtraSamples = [2]`); TIFF carries alpha, so nothing is dropped.
 pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
-    encode(&TiffImage::from_rgba8(width, height, rgba.to_vec()), opts)
+    encode(&TiffImage::from_rgba8(width, height, rgba.to_vec())?, opts)
 }
 
 /// [`encode`] straight into a writer.

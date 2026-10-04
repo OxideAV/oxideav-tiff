@@ -241,7 +241,7 @@ fn to_rgb8_kernels_are_exact() {
     .unwrap();
     assert_eq!(r48.to_rgb8(), vec![0xAA, 0xBB, 0xCC]);
     // Rgba: alpha dropped / kept.
-    let rgba = TiffImage::from_rgba8(1, 1, vec![1, 2, 3, 4]);
+    let rgba = TiffImage::from_rgba8(1, 1, vec![1, 2, 3, 4]).unwrap();
     assert_eq!(rgba.to_rgb8(), vec![1, 2, 3]);
     assert_eq!(rgba.to_rgba8(), vec![1, 2, 3, 4]);
     // Pal8: lookup; out-of-range index is black (opaque).
@@ -303,12 +303,24 @@ fn new_validates_geometry() {
         Err(Error::InvalidData(_))
     ));
     assert!(TiffImage::new(2, 2, PixelFormat::Rgb24, vec![Plane::new(8, vec![0; 16])]).is_ok());
-    // A short caller-assembled buffer still renders (zeros past the end)
-    // and is refused by the encoder rather than panicking.
-    let short = TiffImage::from_rgb8(2, 1, vec![1, 2, 3]);
-    assert_eq!(short.to_rgb8(), vec![1, 2, 3, 0, 0, 0]);
+    // The raw constructors are fallible: a short buffer or a zero
+    // dimension is InvalidData, so an invalid image cannot exist.
     assert!(matches!(
-        encode(&short, &EncodeOptions::default()),
+        TiffImage::from_rgb8(2, 1, vec![1, 2, 3]),
+        Err(Error::InvalidData(_))
+    ));
+    assert!(matches!(
+        TiffImage::from_rgba8(1, 1, vec![1, 2, 3]),
+        Err(Error::InvalidData(_))
+    ));
+    assert!(matches!(
+        TiffImage::from_rgb8(0, 1, vec![]),
+        Err(Error::InvalidData(_))
+    ));
+    // Over-long buffers are accepted (stride × height is the floor).
+    assert!(TiffImage::from_rgb8(1, 1, vec![1, 2, 3, 4]).is_ok());
+    assert!(matches!(
+        encode_rgb8(2, 1, &[1, 2, 3], &EncodeOptions::default()),
         Err(Error::InvalidData(_))
     ));
 }

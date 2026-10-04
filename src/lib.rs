@@ -208,7 +208,7 @@ pub const CODEC_ID_STR: &str = "tiff";
 // with `default-features = false`.
 pub use api::{
     decode, decode_all, decode_all_with, decode_from, decode_rgb8, decode_rgba8, decode_with,
-    encode, encode_rgb8, encode_rgba8, encode_to, info, probe,
+    encode, encode_all, encode_rgb8, encode_rgba8, encode_to, info, probe,
 };
 pub use error::{Error, Result, TiffError};
 pub use image::{
