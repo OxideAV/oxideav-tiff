@@ -11,20 +11,30 @@
 //! "without scanning the image data"; absent them, this decoder scans the
 //! finite sample extent.
 //!
-//! A float sample carries no intrinsic display range, so — like the §23
-//! CIELab path's "some conversion to a display range will be required"
-//! latitude — the decoder maps the resolved extent linearly onto the
-//! 8-bit Rgb24 display plane. The extent is *shared across all three
-//! colour channels* so the relative R / G / B magnitudes (the pixel's
-//! chromaticity) survive the conversion; a per-channel extent would
-//! re-balance the colour.
+//! Float RGB decodes natively (IMAGE_CRATE_API): the image is
+//! `RgbF32Le`, three little-endian `f32`s per pixel exactly as stored
+//! (half / double widened or narrowed). The declared SMin / SMax
+//! extent is reported on `TiffFormatInfo`; the contract's `to_rgb8`
+//! tone-scales each channel independently by clamping to `[0, 1]` and
+//! scaling to 255 (non-finite → 0), which keeps the pixel's channel
+//! balance for samples inside the nominal range.
 //!
 //! These tests build minimal hand-crafted classic-II TIFF byte strings
 //! and drive them through the public `decode_page` entry point, so the
-//! expected display bytes are computed directly from the linear-mapping
-//! definition — a binary-independent oracle.
+//! expected samples are the ones written — a binary-independent oracle.
 
-use oxideav_tiff::decode_page;
+use oxideav_tiff::{decode_page, TiffPixelFormat};
+
+/// The decoded `RgbF32Le` plane as `f32`s.
+fn rgb_f32(d: &oxideav_tiff::Page) -> Vec<f32> {
+    assert_eq!(d.image.format, TiffPixelFormat::RgbF32Le);
+    assert_eq!(d.image.planes[0].stride, d.image.width as usize * 12);
+    d.image.planes[0]
+        .data
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
 
 /// IFD entry, SHORT (field-type = 3) with a single inline value.
 fn entry_short(tag: u16, value: u16) -> [u8; 12] {
@@ -178,93 +188,81 @@ fn expect_err_containing(bytes: &[u8], needle: &str) {
 }
 
 #[test]
-fn float32_rgb_scanned_extent_shared() {
-    // Two pixels: (0.0, 0.5, 1.0) and (0.25, 0.75, 1.0). The shared
-    // scanned extent across all six samples is [0.0, 1.0]. Each sample
-    // maps t = (s - 0) / 1 to round(t*255):
-    //   0.0  -> 0     0.25 -> 64
-    //   0.5  -> 128   0.75 -> 191
-    //   1.0  -> 255
+fn float32_rgb_native_samples() {
+    // Two pixels: (0.0, 0.5, 1.0) and (0.25, 0.75, 1.0) decode as
+    // themselves; to_rgb8 clamps and scales: 0, 128, 255, 64, 191, 255.
     let strip = f32_strip(&[0.0, 0.5, 1.0, 0.25, 0.75, 1.0]);
     let bytes = build_float_rgb_row(2, 32, &strip, &[]);
     let d = decode_page(&bytes).expect("float32 RGB must decode");
     assert_eq!((d.image.width, d.image.height), (2, 1));
-    assert_eq!(d.image.planes[0].data, vec![0u8, 128, 255, 64, 191, 255]);
+    assert_eq!(rgb_f32(&d), vec![0.0, 0.5, 1.0, 0.25, 0.75, 1.0]);
+    assert_eq!(d.image.to_rgb8(), vec![0u8, 128, 255, 64, 191, 255]);
+    assert_eq!(
+        d.image.to_rgba8(),
+        vec![0u8, 128, 255, 255, 64, 191, 255, 255]
+    );
 }
 
 #[test]
-fn float32_rgb_shared_extent_preserves_balance() {
-    // A single pixel (0.0, 0.5, 1.0). The shared extent is [0.0, 1.0]
-    // (scanned across the three channels), so the channels keep their
-    // relative magnitudes: 0, 128, 255 — not a per-channel renormalise
-    // that would flatten the pixel to (0, 0, 0) / full white.
-    let strip = f32_strip(&[0.0, 0.5, 1.0]);
-    let bytes = build_float_rgb_row(1, 32, &strip, &[]);
-    let d = decode_page(&bytes).expect("float32 RGB must decode");
-    assert_eq!(d.image.planes[0].data, vec![0u8, 128, 255]);
-}
-
-#[test]
-fn float32_rgb_smin_smax_bound_overrides_scan() {
-    // Samples in a single pixel (0.0, 0.5, 1.0) but SMin = -1, SMax = 3
-    // declared, so the shared mapping uses span 4:
-    //   0.0 -> (0-(-1))/4 = 0.25 -> 64
-    //   0.5 -> 1.5/4 = 0.375 -> 96
-    //   1.0 -> 2/4 = 0.5 -> 128
+fn float32_rgb_smin_smax_reported_not_applied() {
+    // SMin = -1, SMax = 3 ride on the format info; samples untouched.
     let strip = f32_strip(&[0.0, 0.5, 1.0]);
     let extra = [entry_float(340, -1.0), entry_float(341, 3.0)];
     let bytes = build_float_rgb_row(1, 32, &strip, &extra);
     let d = decode_page(&bytes).expect("float32 RGB with SMin/SMax must decode");
-    assert_eq!(d.image.planes[0].data, vec![64u8, 96, 128]);
+    assert_eq!(rgb_f32(&d), vec![0.0, 0.5, 1.0]);
+    assert_eq!(d.layout.smin_sample_value, Some(-1.0));
+    assert_eq!(d.layout.smax_sample_value, Some(3.0));
+    assert_eq!(d.image.to_rgb8(), vec![0u8, 128, 255]);
 }
 
 #[test]
-fn float32_rgb_negative_to_positive_extent() {
-    // Shared extent [-1.0, +1.0]; midpoint 0.0 -> 128, -1 -> 0, +1 -> 255.
+fn float32_rgb_negative_kept_and_clamped() {
     let strip = f32_strip(&[-1.0, 0.0, 1.0]);
     let bytes = build_float_rgb_row(1, 32, &strip, &[]);
     let d = decode_page(&bytes).expect("float32 RGB must decode");
-    assert_eq!(d.image.planes[0].data, vec![0u8, 128, 255]);
+    assert_eq!(rgb_f32(&d), vec![-1.0, 0.0, 1.0]);
+    assert_eq!(d.image.to_rgb8(), vec![0u8, 0, 255]);
 }
 
 #[test]
-fn float32_rgb_nonfinite_renders_floor() {
-    // Pixel 0 = (0.0, NaN, 1.0), pixel 1 = (+Inf, 0.5, 1.0). Non-finite
-    // samples are excluded from the scanned extent ([0.0, 1.0]) and
-    // render at the display floor (0).
+fn float32_rgb_nonfinite_kept_and_renders_floor() {
+    // Pixel 0 = (0.0, NaN, 1.0), pixel 1 = (+Inf, 0.5, 1.0): the native
+    // plane keeps them, the 8-bit view renders non-finite as 0.
     let strip = f32_strip(&[0.0, f32::NAN, 1.0, f32::INFINITY, 0.5, 1.0]);
     let bytes = build_float_rgb_row(2, 32, &strip, &[]);
     let d = decode_page(&bytes).expect("float32 RGB with non-finite must decode");
-    assert_eq!(d.image.planes[0].data, vec![0u8, 0, 255, 0, 128, 255]);
+    let v = rgb_f32(&d);
+    assert!(v[1].is_nan());
+    assert_eq!(v[3], f32::INFINITY);
+    assert_eq!(d.image.to_rgb8(), vec![0u8, 0, 255, 0, 128, 255]);
 }
 
 #[test]
-fn float32_rgb_flat_image_renders_floor() {
-    // All samples equal -> degenerate span -> flat 0 plane.
+fn float32_rgb_flat_image_is_flat() {
     let strip = f32_strip(&[2.5, 2.5, 2.5]);
     let bytes = build_float_rgb_row(1, 32, &strip, &[]);
     let d = decode_page(&bytes).expect("flat float32 RGB must decode");
-    assert_eq!(d.image.planes[0].data, vec![0u8, 0, 0]);
+    assert_eq!(rgb_f32(&d), vec![2.5, 2.5, 2.5]);
+    assert_eq!(d.image.to_rgb8(), vec![255u8, 255, 255]);
 }
 
 #[test]
-fn float16_rgb_half_precision_scanned_extent() {
-    // binary16 single pixel (0.0, 0.5, 1.0); scanned extent [0,1]:
-    // 0, 128, 255.
+fn float16_rgb_half_precision_widened() {
     let strip = half_strip(&[0.0, 0.5, 1.0]);
     let bytes = build_float_rgb_row(1, 16, &strip, &[]);
     let d = decode_page(&bytes).expect("float16 RGB must decode");
-    assert_eq!(d.image.planes[0].data, vec![0u8, 128, 255]);
+    assert_eq!(rgb_f32(&d), vec![0.0, 0.5, 1.0]);
+    assert_eq!(d.image.to_rgb8(), vec![0u8, 128, 255]);
 }
 
 #[test]
-fn float64_rgb_double_precision_scanned_extent() {
-    // binary64 single pixel (0.0, 0.25, 1.0); scanned extent [0,1]:
-    // 0, 64, 255.
+fn float64_rgb_double_precision_narrowed() {
     let strip = f64_strip(&[0.0, 0.25, 1.0]);
     let bytes = build_float_rgb_row(1, 64, &strip, &[]);
     let d = decode_page(&bytes).expect("float64 RGB must decode");
-    assert_eq!(d.image.planes[0].data, vec![0u8, 64, 255]);
+    assert_eq!(rgb_f32(&d), vec![0.0, 0.25, 1.0]);
+    assert_eq!(d.image.to_rgb8(), vec![0u8, 64, 255]);
 }
 
 #[test]

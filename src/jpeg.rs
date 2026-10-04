@@ -50,7 +50,7 @@ pub struct JpegSegment {
     /// shorter); for tiles this is `TileLength`.
     pub height: u32,
     /// Per-plane bytes. Layout depends on `pixel_format`.
-    pub planes: Vec<Plane>,
+    pub planes: Vec<SegmentPlane>,
     /// Output pixel format produced by the JPEG codec. Determined by
     /// the JPEG's component count + sampling factors — NOT by the
     /// TIFF photometric. The TIFF compositor cross-checks the two
@@ -157,9 +157,10 @@ pub enum JpegPixelFormat {
     YCbCr24Packed,
 }
 
-/// One plane of segment pixels.
+/// One plane of segment pixels (internal to the JPEG-in-TIFF path; the
+/// contract's `Plane` is [`crate::Plane`]).
 #[derive(Debug, Clone)]
-pub struct Plane {
+pub struct SegmentPlane {
     /// Bytes per row in `data`.
     pub stride: usize,
     /// Plane width in samples.
@@ -413,7 +414,7 @@ pub fn decode_segment(
         .enumerate()
         .map(|(i, p)| {
             let (pw, ph) = plane_dims(pf, seg_w, seg_h, i);
-            Plane {
+            SegmentPlane {
                 stride: p.stride,
                 width: pw,
                 height: ph,
@@ -779,7 +780,7 @@ fn scale_to_16(v: u16, bits: u16) -> u16 {
 /// Read the sample at `(x, y)` of a two-byte-per-sample plane
 /// (little-endian, per [`JpegSegment::bits`] > 8).
 #[inline]
-fn plane_u16(p: &Plane, x: usize, y: usize) -> u16 {
+fn plane_u16(p: &SegmentPlane, x: usize, y: usize) -> u16 {
     let off = y * p.stride + x * 2;
     u16::from_le_bytes([p.data[off], p.data[off + 1]])
 }
@@ -1099,7 +1100,7 @@ mod tests {
         let seg = JpegSegment {
             width: plane_w,
             height: plane_h,
-            planes: vec![Plane {
+            planes: vec![SegmentPlane {
                 stride,
                 width: plane_w,
                 height: plane_h,
@@ -1183,7 +1184,7 @@ mod tests {
         let seg = JpegSegment {
             width: w,
             height: h,
-            planes: vec![Plane {
+            planes: vec![SegmentPlane {
                 stride,
                 width: w,
                 height: h,
@@ -1212,7 +1213,7 @@ mod tests {
         let seg = JpegSegment {
             width: 1,
             height: 1,
-            planes: vec![Plane {
+            planes: vec![SegmentPlane {
                 stride: 1,
                 width: 1,
                 height: 1,
@@ -1231,7 +1232,7 @@ mod tests {
         let seg = JpegSegment {
             width: 1,
             height: 1,
-            planes: vec![Plane {
+            planes: vec![SegmentPlane {
                 stride: 1,
                 width: 1,
                 height: 1,

@@ -1,24 +1,23 @@
 //! TIFF floating-point (`SampleFormat = 3`) encode + `Predictor = 3`
 //! round-trip.
 //!
-//! The decoder already renders `SampleFormat = 3` IEEE-float grayscale
-//! and RGB to a display plane (and reverses the §14 floating-point
-//! predictor); before this round there was no float *encoder*, so the
-//! float subsystem could only be validated against externally-written
-//! fixtures. The new `EncodePixelFormat::{GrayF32, GrayF64, RgbF32,
-//! RgbF64}` formats close that gap.
+//! The decoder returns `SampleFormat = 3` IEEE-float grayscale and RGB
+//! natively (`GrayF32Le` / `RgbF32Le`, one little-endian `f32` per
+//! sample — IMAGE_CRATE_API) and reverses the §14 floating-point
+//! predictor; the `EncodePixelFormat::{GrayF32, GrayF64, RgbF32,
+//! RgbF64}` formats are the float *encoder*.
 //!
 //! Two complementary, binary-independent oracles run here:
 //!
-//!   * **Display-plane oracle.** Encode float pixels, decode through the
-//!     public `decode_page`, and compare against the decoder's display
-//!     map computed *directly in the test* from the input floats (a
-//!     linear map of the finite sample extent onto 0..=255). A predictor
+//!   * **Native-plane oracle.** Encode float pixels, decode through the
+//!     public `decode_page`, and compare against the `f32` LE bytes of
+//!     the input samples computed *directly in the test* (a double is
+//!     narrowed to `f32`, exactly as the decoder does). A predictor
 //!     that did not reverse exactly, or a SampleFormat tag that misrouted
 //!     the decode, would diverge. The Predictor = 3 encode and the
 //!     Predictor = 1 (no-predictor) encode of identical samples must
-//!     decode to byte-identical display planes — the predictor is a
-//!     lossless, codec-independent pre-transform.
+//!     decode to byte-identical planes — the predictor is a lossless,
+//!     codec-independent pre-transform.
 //!   * **Raw-byte oracle.** Walk the encoded IFD with a tiny independent
 //!     reader, confirm `SampleFormat = 3` (tag 339) and the right
 //!     `Predictor` value (tag 317), pull the single strip's bytes,
@@ -27,8 +26,7 @@
 //!     encoder's transform is checked without trusting our own decoder.
 //!
 //! No external image library / binary / decoder source is consulted; the
-//! display-map and predictor math are transcribed from TIFF 6.0
-//! §SampleFormat and the §14 floating-point predictor.
+//! predictor math is transcribed from the §14 floating-point predictor.
 
 use oxideav_tiff::{
     decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
@@ -36,42 +34,15 @@ use oxideav_tiff::{
 };
 
 // ---------------------------------------------------------------------------
-// Display-map oracle (mirrors the decoder's float → display algorithm).
+// Native-plane oracle (the decoder's float output, computed here).
 // ---------------------------------------------------------------------------
 
-/// Linear-map a slice of `f64` samples onto 0..=255 using the finite
-/// extent (min/max of the finite samples) shared across the whole slice,
-/// matching `decoder::build_*_from_float` when SMin/SMax are absent.
-/// Non-finite samples render at the floor (0); a degenerate extent
-/// renders a flat 0 plane.
+/// The `f32` little-endian plane the decoder returns for these samples:
+/// every sample as `f32` (a double narrowed), non-finite values kept.
 fn display_map(samples: &[f64]) -> Vec<u8> {
-    let mut lo = f64::INFINITY;
-    let mut hi = f64::NEG_INFINITY;
-    for &s in samples {
-        if s.is_finite() {
-            if s < lo {
-                lo = s;
-            }
-            if s > hi {
-                hi = s;
-            }
-        }
-    }
-    let span = if lo.is_finite() && hi.is_finite() {
-        hi - lo
-    } else {
-        0.0
-    };
     samples
         .iter()
-        .map(|&s| {
-            if !s.is_finite() || span <= 0.0 {
-                0u8
-            } else {
-                let t = ((s - lo) / span).clamp(0.0, 1.0);
-                (t * 255.0 + 0.5) as u8
-            }
-        })
+        .flat_map(|&s| (s as f32).to_le_bytes())
         .collect()
 }
 
@@ -179,10 +150,10 @@ fn grayf32_predictor_roundtrip_matches_unpredicted() {
             };
             let bytes = encode_page(&page).expect("encode GrayF32");
             let dec = decode_page(&bytes).expect("decode GrayF32");
-            assert_eq!(dec.image.format, TiffPixelFormat::Gray8);
+            assert_eq!(dec.image.format, TiffPixelFormat::GrayF32Le);
             assert_eq!(
                 dec.image.planes[0].data, want,
-                "GrayF32 comp={comp:?} predictor={predictor} display plane mismatch"
+                "GrayF32 comp={comp:?} predictor={predictor} native plane mismatch"
             );
         }
     }
@@ -316,10 +287,10 @@ fn rgbf32_predictor_roundtrip_matches_unpredicted() {
             };
             let bytes = encode_page(&page).unwrap();
             let dec = decode_page(&bytes).unwrap();
-            assert_eq!(dec.image.format, TiffPixelFormat::Rgb24);
+            assert_eq!(dec.image.format, TiffPixelFormat::RgbF32Le);
             assert_eq!(
                 dec.image.planes[0].data, want,
-                "RgbF32 comp={comp:?} predictor={predictor} display plane mismatch"
+                "RgbF32 comp={comp:?} predictor={predictor} native plane mismatch"
             );
         }
     }

@@ -60,6 +60,18 @@ pub enum TiffPixelFormat {
     /// and 255 means full ink coverage (the `oxideav_core::PixelFormat::Cmyk`
     /// "regular" convention).
     Cmyk,
+    /// 32-bit IEEE-float single-channel grayscale, little-endian, one
+    /// plane (4 bytes per pixel) — `SampleFormat = 3` sources at 16-,
+    /// 32- or 64-bit width, widened / narrowed to `f32` as stored (a
+    /// 64-bit double loses precision past `f32`). The samples are
+    /// native: no display scaling has been applied; `WhiteIsZero`
+    /// float sources are re-expressed as black-is-zero over the
+    /// nominal `[0, 1]` range (`x → 1 − x`).
+    GrayF32Le,
+    /// 32-bit IEEE-float packed RGB, little-endian, one plane (12
+    /// bytes per pixel) — `SampleFormat = 3` RGB sources at any IEEE
+    /// width, samples as stored (see [`Self::GrayF32Le`]).
+    RgbF32Le,
 }
 
 /// The contract name for [`TiffPixelFormat`].
@@ -72,9 +84,15 @@ impl TiffPixelFormat {
             Self::Gray8 | Self::Pal8 => 1,
             Self::Gray16Le => 2,
             Self::Rgb24 => 3,
-            Self::Rgba | Self::Cmyk => 4,
+            Self::Rgba | Self::Cmyk | Self::GrayF32Le => 4,
             Self::Rgb48Le => 6,
+            Self::RgbF32Le => 12,
         }
+    }
+
+    /// `true` for the IEEE-float layouts (`GrayF32Le` / `RgbF32Le`).
+    pub fn is_float(self) -> bool {
+        matches!(self, Self::GrayF32Le | Self::RgbF32Le)
     }
 
     /// `true` when the layout carries an alpha channel of its own
@@ -83,11 +101,12 @@ impl TiffPixelFormat {
         matches!(self, Self::Rgba)
     }
 
-    /// Bits per sample of the layout (8 or 16).
+    /// Bits per sample of the layout (8, 16 or 32).
     pub fn bits_per_sample(self) -> u8 {
         match self {
             Self::Gray8 | Self::Pal8 | Self::Rgb24 | Self::Rgba | Self::Cmyk => 8,
             Self::Gray16Le | Self::Rgb48Le => 16,
+            Self::GrayF32Le | Self::RgbF32Le => 32,
         }
     }
 }
@@ -576,6 +595,7 @@ impl TiffImage {
     /// | `Rgba`     | alpha dropped (straight alpha, so the colour is unchanged) |
     /// | `Pal8`     | palette lookup; an index past the palette is black        |
     /// | `Cmyk`     | TIFF 6.0 §16 ink inversion: `R = (255−C)(255−K)/255`, `G = (255−M)(255−K)/255`, `B = (255−Y)(255−K)/255` (integer division) |
+    /// | `GrayF32Le` / `RgbF32Le` | tone-scaled: each sample clamped to `[0, 1]`, `× 255`, rounded half-up; NaN / ±Inf render 0 (the `SMin` / `SMax` display extent is on [`crate::TiffFormatInfo`] for callers who want another mapping) |
     ///
     /// 16-bit samples reduce by dropping the low-order byte — the same
     /// reduction the decoder applies to the 16-bit `ColorMap` words.
@@ -627,6 +647,21 @@ impl TiffImage {
                             ((255 - m) * (255 - k) / 255) as u8,
                             ((255 - yy) * (255 - k) / 255) as u8,
                         ]);
+                    }
+                    PixelFormat::GrayF32Le => {
+                        let g = f32_to_u8(f32::from_le_bytes([px(0), px(1), px(2), px(3)]));
+                        d.copy_from_slice(&[g, g, g]);
+                    }
+                    PixelFormat::RgbF32Le => {
+                        let ch = |c: usize| {
+                            f32_to_u8(f32::from_le_bytes([
+                                px(c * 4),
+                                px(c * 4 + 1),
+                                px(c * 4 + 2),
+                                px(c * 4 + 3),
+                            ]))
+                        };
+                        d.copy_from_slice(&[ch(0), ch(1), ch(2)]);
                     }
                 }
             }
@@ -687,6 +722,18 @@ fn format_name(f: PixelFormat) -> &'static str {
         PixelFormat::Rgba => "Rgba",
         PixelFormat::Pal8 => "Pal8",
         PixelFormat::Cmyk => "Cmyk",
+        PixelFormat::GrayF32Le => "GrayF32Le",
+        PixelFormat::RgbF32Le => "RgbF32Le",
+    }
+}
+
+/// Tone-scale one `f32` sample to 8 bits: clamp to `[0, 1]`, then
+/// `× 255` rounded half-up; non-finite samples (NaN / ±Inf) render 0.
+fn f32_to_u8(x: f32) -> u8 {
+    if x.is_finite() {
+        (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+    } else {
+        0
     }
 }
 

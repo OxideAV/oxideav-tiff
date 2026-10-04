@@ -48,11 +48,12 @@ if oxideav_tiff::probe(&bytes) {
 | `decode` / `decode_with(&DecodeOptions)` | First IFD as a `TiffImage` (native layout, `color` + `metadata` filled). |
 | `decode_rgb8` / `decode_rgba8` | `RgbImage` / `RgbaImage { width, height, data }`, tightly packed. |
 | `decode_all` / `decode_all_with` | Every IFD on the next-IFD chain as `Frame { image, delay: None, index, page_number, new_subfile_type }`. |
+| `encode_all(&[Frame], &EncodeOptions)` | Multi-page file, one IFD per frame in order, each written as `encode` would (`PageNumber = (i, n)` + `NewSubfileType` bit 1 unless the frame sets its own); `decode_all(encode_all(frames)) == frames` is pinned. `encode_pages` / `EncodePage` is the depth form. |
 | `decode_from<R: Read>` | Reads to end, then `decode`. |
 | `encode(&TiffImage, &EncodeOptions)` | Single-page file; every native layout is written as itself (no silent conversion). |
 | `encode_rgb8` / `encode_rgba8` | `Rgb24` page / RGB + one unassociated-alpha `ExtraSamples` (TIFF carries alpha; nothing is dropped). |
 | `encode_to<W: Write>` | Streaming variant of `encode`. |
-| `TiffImage { width, height, format, planes, color, metadata, palette }` | `PixelFormat` (= `TiffPixelFormat`), one packed `Plane { stride, data }`, `ColorInfo`, `Metadata { icc, exif, xmp, gamma }`, `Palette { entries: Vec<[u8; 4]> }` for `Pal8`. `new(..) -> Result` validates geometry; `from_rgb8` / `from_rgba8`; `to_rgb8()` / `to_rgba8()` are exact and infallible; `as_bytes()` / `into_raw()`. |
+| `TiffImage { width, height, format, planes, color, metadata, palette }` | `PixelFormat` (= `TiffPixelFormat`), one packed `Plane { stride, data }`, `ColorInfo`, `Metadata { icc, exif, xmp, gamma }`, `Palette { entries: Vec<[u8; 4]> }` for `Pal8`. `new(..) -> Result`, `from_rgb8(..) -> Result` / `from_rgba8(..) -> Result` validate geometry (`InvalidData` on a short buffer); `to_rgb8()` / `to_rgba8()` are exact and infallible; `as_bytes()` / `into_raw()`. |
 | `TiffError` (= `Error`) | `InvalidData`, `Unsupported`, `LimitExceeded`, `Io(std::io::Error)`. |
 
 TIFF-specific depth keeps its own names: `decode_page` /
@@ -96,8 +97,9 @@ standalone.
 ## Supported layouts
 
 Native layouts (`PixelFormat`): `Gray8`, `Gray16Le`, `Rgb24`,
-`Rgb48Le`, `Rgba` (straight alpha), `Pal8` + palette, `Cmyk`. All are
-packed (one plane, `stride = width × bytes per pixel`).
+`Rgb48Le`, `Rgba` (straight alpha), `Pal8` + palette, `Cmyk`,
+`GrayF32Le`, `RgbF32Le` (little-endian `f32` samples). All are packed
+(one plane, `stride = width × bytes per pixel`).
 
 **Decode** — what each on-disk shape becomes (the full matrix is in
 *Format specifics → Decode*):
@@ -111,14 +113,17 @@ packed (one plane, `stride = width × bytes per pixel`).
 | 8-bit RGB + one unassociated-alpha extra sample (`ExtraSamples = [2]`) | `Rgba` |
 | 4- / 8-bit palette (`ColorMap`) | `Pal8` (indices verbatim, 4-bit unpacked) + `palette` |
 | 8-bit CMYK (`InkSet = 1`), uncompressed / JPEG | `Cmyk` |
-| IEEE float gray / RGB (16 / 32 / 64-bit) | `Gray8` / `Rgb24`, tone-scaled from `SMinSampleValue` / `SMaxSampleValue` (or the data extent) to 8 bits — there is no float native layout |
+| IEEE float gray / RGB (`SampleFormat = 3`, 16 / 32 / 64-bit) | `GrayF32Le` / `RgbF32Le` — samples as stored (half widened, double narrowed to `f32`), `WhiteIsZero` re-expressed as `1 − x`; no display scaling. `SMinSampleValue` / `SMaxSampleValue` are reported on `TiffFormatInfo` (`Page.layout`) |
 
 `to_rgb8` / `to_rgba8` kernels: gray replicated; 16-bit samples keep
 the high byte (the same reduction the `ColorMap` words get); `Rgba`
 drops / keeps its straight alpha; `Pal8` looks up the palette (an index
 past it is black); `Cmyk` applies the TIFF 6.0 §16 inversion
-`R = (255−C)(255−K)/255` (and likewise G / B, integer division). Alpha
-is `255` for every other layout.
+`R = (255−C)(255−K)/255` (and likewise G / B, integer division);
+`GrayF32Le` / `RgbF32Le` are tone-scaled by clamping each sample to
+`[0, 1]` and scaling to 255 (round half-up; NaN / ±Inf render 0) — a
+caller wanting the file-declared `SMin` / `SMax` mapping applies it to
+the native plane. Alpha is `255` for every other layout.
 
 **Encode** — `encode` writes every native layout as itself:
 
@@ -129,6 +134,7 @@ is `255` for every other layout.
 | `Rgba` | RGB + `ExtraSamples = [2]` |
 | `Pal8` | `PhotometricInterpretation = 3`, 8-bit indices, `ColorMap` from the palette (`Error::Unsupported` if an entry is not opaque — TIFF palettes carry no alpha) |
 | `Cmyk` | `PhotometricInterpretation = 5`, `InkSet = 1` |
+| `GrayF32Le` / `RgbF32Le` | `PhotometricInterpretation = 1` / `2`, 32 bits, `SampleFormat = 3` (`Predictor` = the §14 floating-point predictor when enabled) |
 
 Compression: `None` (default), `PackBits`, `Lzw`, `Deflate`, `Zstd`
 (50000) for every layout; `Webp` (50001) for `Rgb24` / `Rgba`; `Jpeg`
@@ -192,8 +198,8 @@ the lossless round-trip pin.
 - Layouts outside the decode table (e.g. 16-bit RGBA, 16-bit CMYK,
   non-uniform `BitsPerSample`, deep CMYK JPEG) are `Error::Unsupported`
   / `InvalidData`; see *Backlog*.
-- Float samples are tone-scaled to 8 bits on decode (no `GrayF32` /
-  `RgbF32` native layout yet); the float encode kinds are on
+- Float samples decode to `f32` (`GrayF32Le` / `RgbF32Le`); a 64-bit
+  double is narrowed. The 16- and 64-bit float encode kinds are on
   `EncodePage`.
 - `PlanarConfiguration = 2` pages are re-interleaved into the packed
   layout on decode (`planes` always has one entry).
@@ -208,8 +214,8 @@ the lossless round-trip pin.
 | WhiteIsZero    | 4 / 8          | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
 | WhiteIsZero    | 16             | None / PackBits / LZW / Deflate / **ZSTD** | `Gray16Le` |
 | WhiteIsZero / BlackIsZero | 8 / 16 | None / PackBits / LZW / Deflate / **ZSTD** + **SampleFormat=2 (signed int)** | `Gray8` / `Gray16Le` (offset-binary display map) |
-| WhiteIsZero / BlackIsZero | 16 / 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD** + **SampleFormat=3 (IEEE float)** | `Gray8` (linear extent→display map) |
-| RGB (3 chan)   | 16 / 32 / 64   | None / PackBits / LZW / Deflate / **ZSTD** + **SampleFormat=3 (IEEE float)** | `Rgb24` (shared-extent linear→display map) |
+| WhiteIsZero / BlackIsZero | 16 / 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD** + **SampleFormat=3 (IEEE float)** | `GrayF32Le` (native `f32` samples) |
+| RGB (3 chan)   | 16 / 32 / 64   | None / PackBits / LZW / Deflate / **ZSTD** + **SampleFormat=3 (IEEE float)** | `RgbF32Le` (native `f32` samples) |
 | BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
 | BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` / `Gray16Le` |
 | **Transparency Mask** | 1       | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` (interior = 0xFF, exterior = 0x00) |
@@ -637,25 +643,16 @@ float TIFF stores — 16-bit
 the layout scientific / elevation / HDR-source TIFFs use. §SampleFormat
 fixes the sample size in BitsPerSample (not in this field), so the width
 is read there exactly as for the integer paths, and the binary16 half is
-widened to single precision losslessly. A float sample carries no
-intrinsic display range, so — paralleling the §23 CIELab "some
-conversion to RGB will be required" latitude and the signed-integer
-offset-binary map — the decoder maps the finite sample extent linearly
-onto the 8-bit display plane: a sample at the extent minimum
-renders 0, one at the maximum renders 255. The extent is the
-SMinSampleValue / SMaxSampleValue pair (tags 340 / 341) when both are
-present (§SampleFormat: this "makes it possible for readers to assume
-that data samples are bound to the range [SMinSampleValue,
-SMaxSampleValue] without scanning the image data"), else the actual
-finite min/max scanned from the decoded samples (the spec's stated
-fallback when the bound tags are absent). The grayscale path renders a
-`Gray8` plane; the 3-channel RGB path renders an `Rgb24` plane using a
-**single shared extent across all three colour channels** so the
-relative R / G / B magnitudes — the pixel's chromaticity — survive the
-display map, where a per-channel extent would re-balance the colour.
-Non-finite samples (NaN /
-±Inf) are excluded from the extent and render at the display floor, and
-a degenerate extent (all samples equal) renders a flat plane. Only
+widened to single precision losslessly and a double is narrowed. The
+decoded image is the native `GrayF32Le` / `RgbF32Le` plane — the
+samples as stored, with `WhiteIsZero` re-expressed as `1 − x` — and no
+display scaling happens on decode (IMAGE_CRATE_API). The SMinSampleValue
+/ SMaxSampleValue pair (tags 340 / 341), which §SampleFormat says
+"makes it possible for readers to assume that data samples are bound to
+the range [SMinSampleValue, SMaxSampleValue] without scanning the image
+data", is reported on `TiffFormatInfo` (`Page.layout`) for callers who
+want that mapping; the contract's `to_rgb8` / `to_rgba8` clamp each
+sample to `[0, 1]` and scale to 255 (NaN / ±Inf render 0). Only
 `Predictor = 1` is meaningful — §14 horizontal differencing is defined
 over integer samples and the floating-point predictor (`Predictor = 3`)
 is rejected at the predictor gate — so a float strip declaring a

@@ -1,9 +1,9 @@
 //! f16 (IEEE 754 binary16, `SampleFormat = 3`, `BitsPerSample = 16`)
 //! *encode* round-trip.
 //!
-//! The decoder has widened 16-bit half floats onto the Gray8 / Rgb24
-//! display planes since the float decode round; this file exercises the
-//! new write side (`EncodePixelFormat::{GrayF16, RgbF16}` — raw
+//! The decoder widens 16-bit half floats onto the native `GrayF32Le` /
+//! `RgbF32Le` planes (IMAGE_CRATE_API); this file exercises the
+//! write side (`EncodePixelFormat::{GrayF16, RgbF16}` — raw
 //! binary16 bit patterns) plus the `f32_to_f16_bits` /
 //! `f16_bits_to_f32` narrowing/widening helpers:
 //!
@@ -11,8 +11,8 @@
 //!     `f32` and narrow back bit-exactly (NaN patterns must stay NaN);
 //!     directed cases pin the round-to-nearest-even, overflow-to-Inf,
 //!     and underflow-to-zero edges.
-//!   * **Display-plane oracle.** Encoded f16 pages decode through the
-//!     public `decode_page` to the same display bytes a test-local map
+//!   * **Native-plane oracle.** Encoded f16 pages decode through the
+//!     public `decode_page` to the same `f32` LE bytes a test-local map
 //!     computes from the widened samples — across the compressor ×
 //!     predictor × strip/tile × chunky/planar × classic/BigTIFF matrix.
 //!   * **Raw-byte oracle.** For the uncompressed no-predictor page the
@@ -95,35 +95,15 @@ fn f16_narrowing_directed_edges() {
 }
 
 // ---------------------------------------------------------------------------
-// Display-plane oracle (mirrors the decoder's float display map).
+// Native-plane oracle (the decoder's `GrayF32Le` / `RgbF32Le` output).
 // ---------------------------------------------------------------------------
 
-/// Linear-map samples onto 0..=255 over the shared finite extent,
-/// matching `decoder::build_*_from_float` when SMin/SMax are absent.
+/// The `f32` little-endian plane the decoder returns: every widened
+/// half as `f32`, non-finite values kept (IMAGE_CRATE_API native float).
 fn display_map(samples: &[f64]) -> Vec<u8> {
-    let mut lo = f64::INFINITY;
-    let mut hi = f64::NEG_INFINITY;
-    for &s in samples {
-        if s.is_finite() {
-            lo = lo.min(s);
-            hi = hi.max(s);
-        }
-    }
-    let span = if lo.is_finite() && hi.is_finite() {
-        hi - lo
-    } else {
-        0.0
-    };
     samples
         .iter()
-        .map(|&s| {
-            if !s.is_finite() || span <= 0.0 {
-                0u8
-            } else {
-                let t = ((s - lo) / span).clamp(0.0, 1.0);
-                (t * 255.0 + 0.5) as u8
-            }
-        })
+        .flat_map(|&s| (s as f32).to_le_bytes())
         .collect()
 }
 
@@ -186,7 +166,7 @@ fn encode_gray_f16_matrix_decodes_to_display_map() {
                     };
                     let file = encode_page(&page).expect("encode GrayF16");
                     let img = decode_page(&file).expect("decode GrayF16");
-                    assert_eq!(img.image.format, TiffPixelFormat::Gray8);
+                    assert_eq!(img.image.format, TiffPixelFormat::GrayF32Le);
                     assert_eq!(
                         img.image.planes[0].data, want,
                         "GrayF16 display mismatch (compression={compression:?} \
@@ -222,7 +202,7 @@ fn encode_rgb_f16_matrix_decodes_to_display_map() {
                     };
                     let file = encode_page(&page).expect("encode RgbF16");
                     let img = decode_page(&file).expect("decode RgbF16");
-                    assert_eq!(img.image.format, TiffPixelFormat::Rgb24);
+                    assert_eq!(img.image.format, TiffPixelFormat::RgbF32Le);
                     assert_eq!(
                         img.image.planes[0].data, want,
                         "RgbF16 display mismatch (compression={compression:?} \
@@ -251,7 +231,11 @@ fn encode_f16_nonfinite_samples_render_at_display_floor() {
         f32_to_f16_bits(4.0),
     ];
     let want = expect_gray(&bits);
-    assert_eq!(&want[..3], &[0, 0, 0], "non-finite must floor");
+    assert_eq!(
+        &want[..4],
+        &f32::INFINITY.to_le_bytes(),
+        "+Inf kept natively"
+    );
     let page = EncodePage {
         width: w,
         height: h,
@@ -265,6 +249,15 @@ fn encode_f16_nonfinite_samples_render_at_display_floor() {
     };
     let img = decode_page(&encode_page(&page).unwrap()).unwrap();
     assert_eq!(img.image.planes[0].data, want);
+    // The 8-bit view renders the non-finite samples at the floor and
+    // clamps the rest to [0, 1].
+    assert_eq!(
+        img.image.to_rgb8(),
+        [0u8, 0, 0, 0, 255, 255, 255, 255]
+            .iter()
+            .flat_map(|&g| [g, g, g])
+            .collect::<Vec<u8>>()
+    );
 }
 
 // ---------------------------------------------------------------------------

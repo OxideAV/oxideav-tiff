@@ -25,11 +25,11 @@
 //!
 //!   * **Binary-independent.** Hand-built float TIFFs where the test
 //!     applies the *encoder-side* transform itself, so the decode must
-//!     recover byte-for-byte the same display plane as the un-predicted
+//!     recover byte-for-byte the same native float plane as the un-predicted
 //!     (Predictor = 1) twin built from identical samples.
 //!   * **Black-box validator.** The `magick` (ImageMagick) binary writes
 //!     a Predictor = 1 and a Predictor = 3 float TIFF from one source
-//!     image; both must decode to the identical display plane. ImageMagick
+//!     image; both must decode to the identical native plane. ImageMagick
 //!     is used as an opaque process only — never its source.
 
 use std::fs;
@@ -130,10 +130,12 @@ fn build_float_gray_tiff(w: u32, h: u32, bps: u16, predictor: u16, sample_bytes:
     file
 }
 
+/// The native `GrayF32Le` plane, row by row (4 bytes per pixel).
 fn frame_to_gray8(d: &Page) -> Vec<u8> {
     assert_eq!(d.image.planes.len(), 1);
+    assert_eq!(d.image.format, oxideav_tiff::TiffPixelFormat::GrayF32Le);
     let stride = d.image.planes[0].stride;
-    let row = d.image.width as usize;
+    let row = d.image.width as usize * 4;
     let mut out = Vec::with_capacity(row * d.image.height as usize);
     for y in 0..d.image.height as usize {
         out.extend_from_slice(&d.image.planes[0].data[y * stride..y * stride + row]);
@@ -399,10 +401,12 @@ fn magick_float_tiff_ex(
     bytes
 }
 
+/// The native `RgbF32Le` plane, row by row (12 bytes per pixel).
 fn frame_to_rgb24(d: &Page) -> Vec<u8> {
     assert_eq!(d.image.planes.len(), 1);
+    assert_eq!(d.image.format, oxideav_tiff::TiffPixelFormat::RgbF32Le);
     let stride = d.image.planes[0].stride;
-    let row = d.image.width as usize * 3;
+    let row = d.image.width as usize * 12;
     let mut out = Vec::with_capacity(row * d.image.height as usize);
     for y in 0..d.image.height as usize {
         out.extend_from_slice(&d.image.planes[0].data[y * stride..y * stride + row]);

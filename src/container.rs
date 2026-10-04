@@ -263,6 +263,20 @@ fn merge_pages(packets: &[Packet]) -> Result<Vec<u8>> {
                 .unwrap_or_default()
         })
         .collect();
+    let floats: Vec<Vec<f32>> = images
+        .iter()
+        .map(|img| {
+            if img.format.is_float() {
+                img.as_bytes()
+                    .unwrap_or(&[])
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
     let total = images.len() as u16;
     let mut pages: Vec<EncodePage<'_>> = Vec::with_capacity(images.len());
     for (i, img) in images.iter().enumerate() {
@@ -281,6 +295,8 @@ fn merge_pages(packets: &[Packet]) -> Result<Vec<u8>> {
                 palette: &palettes[i],
             },
             TiffPixelFormat::Cmyk => EncodePixelFormat::Cmyk32 { pixels },
+            TiffPixelFormat::GrayF32Le => EncodePixelFormat::GrayF32 { pixels: &floats[i] },
+            TiffPixelFormat::RgbF32Le => EncodePixelFormat::RgbF32 { pixels: &floats[i] },
         };
         pages.push(EncodePage {
             width: img.width,

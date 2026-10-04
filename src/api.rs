@@ -146,11 +146,11 @@ pub(crate) fn native_layout(entries: &[Entry], bo: ByteOrder) -> Result<Layout> 
             PixelFormat::Gray8
         }
         (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, 1, 16 | 32 | 64) if is_float => {
-            PixelFormat::Gray8
+            PixelFormat::GrayF32Le
         }
         (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, 1, 16) => PixelFormat::Gray16Le,
         (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, 1, _) if deep_jpeg => PixelFormat::Gray16Le,
-        (PHOTO_RGB, 3, 16 | 32 | 64) if is_float => PixelFormat::Rgb24,
+        (PHOTO_RGB, 3, 16 | 32 | 64) if is_float => PixelFormat::RgbF32Le,
         (PHOTO_RGB, 3, 8) => PixelFormat::Rgb24,
         (PHOTO_RGB, 3, 16) => PixelFormat::Rgb48Le,
         (PHOTO_RGB | PHOTO_YCBCR, 3, _) if deep_jpeg => PixelFormat::Rgb48Le,
@@ -317,6 +317,9 @@ pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
 struct PreparedPage<'i> {
     image: &'i TiffImage,
     pixels: std::borrow::Cow<'i, [u8]>,
+    /// The `f32` samples of a float layout (the writer takes typed
+    /// samples); empty otherwise.
+    floats: Vec<f32>,
     palette: Vec<RgbColor>,
     exif_owned: Vec<OwnedEntry>,
     gps_owned: Vec<OwnedEntry>,
@@ -354,9 +357,18 @@ impl<'i> PreparedPage<'i> {
                 (true, Some(blob)) => parse_exif_payload(blob)?,
                 _ => (Vec::new(), Vec::new()),
             };
+        let floats = if image.format.is_float() {
+            pixels
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             image,
             pixels,
+            floats,
             palette,
             exif_owned,
             gps_owned,
@@ -394,6 +406,12 @@ impl<'i> PreparedPage<'i> {
                 palette: &self.palette,
             },
             PixelFormat::Cmyk => EncodePixelFormat::Cmyk32 { pixels },
+            PixelFormat::GrayF32Le => EncodePixelFormat::GrayF32 {
+                pixels: &self.floats,
+            },
+            PixelFormat::RgbF32Le => EncodePixelFormat::RgbF32 {
+                pixels: &self.floats,
+            },
         };
         let (exif_entries, gps_entries) = aux;
         let extras = PageExtras {

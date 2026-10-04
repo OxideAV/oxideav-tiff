@@ -133,7 +133,7 @@ pub struct TiffMetadata {
 /// is absent (and has a spec default) is reported as its resolved
 /// value where the default is unambiguous (`samples_per_pixel` default
 /// 1, `bits_per_sample` default `[1]`), else `None` / empty.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TiffFormatInfo {
     /// PhotometricInterpretation (tag 262) — raw code.
     pub photometric: Option<u16>,
@@ -161,6 +161,14 @@ pub struct TiffFormatInfo {
     pub tile_size: Option<(u32, u32)>,
     /// RowsPerStrip (tag 278) for a stripped image.
     pub rows_per_strip: Option<u32>,
+    /// SMinSampleValue (tag 340), first value, when present and finite
+    /// — the declared display floor of a `SampleFormat = 3` image.
+    /// Float layouts decode natively; this is the extent a caller
+    /// wanting a file-declared mapping (rather than the contract's
+    /// clamp-to-`[0, 1]` `to_rgb8`) applies itself.
+    pub smin_sample_value: Option<f64>,
+    /// SMaxSampleValue (tag 341), first value, when present and finite.
+    pub smax_sample_value: Option<f64>,
 }
 
 /// Gather the raw structural / codec tags from a parsed IFD. Total: a
@@ -190,6 +198,12 @@ pub fn extract_format_info(entries: &[Entry], bo: ByteOrder) -> TiffFormatInfo {
         // Spec default is 1 bit per sample.
         bits_per_sample = vec![1];
     }
+    let first_finite = |tag: u16| -> Option<f64> {
+        find(entries, tag)
+            .and_then(|e| e.as_f64_vec(bo).ok())
+            .and_then(|v| v.into_iter().next())
+            .filter(|x| x.is_finite())
+    };
     let tile_w = find(entries, TAG_TILE_WIDTH).and_then(|e| e.as_u32(bo).ok());
     let tile_h = find(entries, TAG_TILE_LENGTH).and_then(|e| e.as_u32(bo).ok());
     let tile_size = match (tile_w, tile_h) {
@@ -209,6 +223,8 @@ pub fn extract_format_info(entries: &[Entry], bo: ByteOrder) -> TiffFormatInfo {
         tiled: tile_size.is_some(),
         tile_size,
         rows_per_strip: find(entries, TAG_ROWS_PER_STRIP).and_then(|e| e.as_u32(bo).ok()),
+        smin_sample_value: first_finite(TAG_S_MIN_SAMPLE_VALUE),
+        smax_sample_value: first_finite(TAG_S_MAX_SAMPLE_VALUE),
     }
 }
 

@@ -11,19 +11,30 @@
 //! range [SMinSampleValue, SMaxSampleValue] without scanning the image
 //! data"; absent them, this decoder scans the finite sample extent.
 //!
-//! The float sample carries no intrinsic display range, so — like the
-//! §23 CIELab path's "some conversion to a display range will be
-//! required" latitude — the decoder maps the resolved extent linearly
-//! onto the 8-bit Gray8 display plane: a sample at the minimum renders
-//! 0, a sample at the maximum renders 255. The WhiteIsZero polarity
-//! inversion then runs on the unsigned display value.
+//! Float samples decode natively (IMAGE_CRATE_API): the image is
+//! `GrayF32Le`, one little-endian `f32` per pixel exactly as stored
+//! (half / double widened or narrowed), with the WhiteIsZero polarity
+//! re-expressed as `1 − x`. The declared SMin / SMax extent is
+//! reported on `TiffFormatInfo` for callers who want a file-declared
+//! mapping; the contract's `to_rgb8` tone-scales by clamping each
+//! sample to `[0, 1]` and scaling to 255 (non-finite → 0).
 //!
 //! These tests build minimal hand-crafted classic-II TIFF byte strings
 //! and drive them through the public `decode_page` entry point, so the
-//! expected display bytes are computed directly from the linear-mapping
-//! definition — a binary-independent oracle.
+//! expected samples are the ones written — a binary-independent oracle.
 
-use oxideav_tiff::decode_page;
+use oxideav_tiff::{decode_page, TiffPixelFormat};
+
+/// The decoded `GrayF32Le` plane as `f32`s.
+fn gray_f32(d: &oxideav_tiff::Page) -> Vec<f32> {
+    assert_eq!(d.image.format, TiffPixelFormat::GrayF32Le);
+    assert_eq!(d.image.planes[0].stride, d.image.width as usize * 4);
+    d.image.planes[0]
+        .data
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
 
 /// IFD entry, SHORT (field-type = 3) with a single inline value.
 fn entry_short(tag: u16, value: u16) -> [u8; 12] {
@@ -167,84 +178,104 @@ fn expect_err_containing(bytes: &[u8], needle: &str) {
 }
 
 #[test]
-fn float32_blackiszero_scanned_extent() {
-    // Samples 0.0, 0.25, 0.5, 0.75, 1.0 with no SMin/SMax: the decoder
-    // scans the finite extent [0.0, 1.0]. Linear map to 0..255 with
-    // round-half-up: 0, 64, 128, 191, 255.
+fn float32_blackiszero_native_samples() {
+    // Samples 0.0, 0.25, 0.5, 0.75, 1.0 decode as themselves; to_rgb8
+    // clamps to [0, 1] and scales with round-half-up: 0, 64, 128, 191, 255.
     let strip = f32_strip(&[0.0, 0.25, 0.5, 0.75, 1.0]);
     let bytes = build_float_row(5, 32, 1, &strip, &[]);
     let d = decode_page(&bytes).expect("float32 grayscale must decode");
     assert_eq!((d.image.width, d.image.height), (5, 1));
-    assert_eq!(d.image.planes[0].data, vec![0u8, 64, 128, 191, 255]);
+    assert_eq!(gray_f32(&d), vec![0.0, 0.25, 0.5, 0.75, 1.0]);
+    assert_eq!(
+        d.image.to_rgb8(),
+        [0u8, 64, 128, 191, 255]
+            .iter()
+            .flat_map(|&g| [g, g, g])
+            .collect::<Vec<u8>>()
+    );
+    assert_eq!(d.layout.smin_sample_value, None);
+    assert_eq!(d.layout.smax_sample_value, None);
 }
 
 #[test]
-fn float32_negative_to_positive_extent() {
-    // Extent [-1.0, +1.0]; midpoint 0.0 maps to 128. -1 -> 0, +1 -> 255.
+fn float32_negative_samples_kept_and_clamped_in_to_rgb8() {
+    // Native plane keeps -1.0; the 8-bit view clamps it to 0.
     let strip = f32_strip(&[-1.0, 0.0, 1.0]);
     let bytes = build_float_row(3, 32, 1, &strip, &[]);
     let d = decode_page(&bytes).expect("float32 grayscale must decode");
-    assert_eq!(d.image.planes[0].data, vec![0u8, 128, 255]);
+    assert_eq!(gray_f32(&d), vec![-1.0, 0.0, 1.0]);
+    assert_eq!(d.image.to_rgb8(), vec![0u8, 0, 0, 0, 0, 0, 255, 255, 255]);
 }
 
 #[test]
-fn float32_smin_smax_bound_overrides_scan() {
-    // Samples 0.0, 0.5, 1.0 but SMin = -1, SMax = 3 declared, so the
-    // mapping uses span 4: 0.0 -> (0-(-1))/4 = 0.25 -> 64; 0.5 ->
-    // 1.5/4 = 0.375 -> 96; 1.0 -> 2/4 = 0.5 -> 128.
+fn float32_smin_smax_reported_not_applied() {
+    // SMin = -1, SMax = 3 are surfaced on the format info; the samples
+    // are untouched and to_rgb8 still uses the [0, 1] clamp.
     let strip = f32_strip(&[0.0, 0.5, 1.0]);
     let extra = [entry_float(340, -1.0), entry_float(341, 3.0)];
     let bytes = build_float_row(3, 32, 1, &strip, &extra);
     let d = decode_page(&bytes).expect("float32 with SMin/SMax must decode");
-    assert_eq!(d.image.planes[0].data, vec![64u8, 96, 128]);
+    assert_eq!(gray_f32(&d), vec![0.0, 0.5, 1.0]);
+    assert_eq!(d.layout.smin_sample_value, Some(-1.0));
+    assert_eq!(d.layout.smax_sample_value, Some(3.0));
+    assert_eq!(d.image.to_rgb8()[..7], [0u8, 0, 0, 128, 128, 128, 255]);
 }
 
 #[test]
 fn float32_whiteiszero_polarity() {
-    // Extent [0.0, 1.0]; WhiteIsZero inverts the display value:
-    // 0.0 -> 0 -> 255; 1.0 -> 255 -> 0.
+    // WhiteIsZero float is re-expressed black-is-zero: x → 1 − x.
     let strip = f32_strip(&[0.0, 1.0]);
     let bytes = build_float_row(2, 32, 0, &strip, &[]);
     let d = decode_page(&bytes).expect("float32 WhiteIsZero must decode");
-    assert_eq!(d.image.planes[0].data, vec![255u8, 0]);
+    assert_eq!(gray_f32(&d), vec![1.0, 0.0]);
+    assert_eq!(d.image.to_rgb8(), vec![255u8, 255, 255, 0, 0, 0]);
 }
 
 #[test]
-fn float32_nonfinite_renders_floor() {
-    // NaN and +Inf are excluded from the scanned extent and render at
-    // the display floor (0). Finite extent here is [0.0, 1.0].
+fn float32_nonfinite_kept_and_renders_floor() {
+    // NaN and +Inf survive in the native plane; to_rgb8 renders them 0.
     let strip = f32_strip(&[0.0, f32::NAN, 1.0, f32::INFINITY]);
     let bytes = build_float_row(4, 32, 1, &strip, &[]);
     let d = decode_page(&bytes).expect("float32 with non-finite must decode");
-    assert_eq!(d.image.planes[0].data, vec![0u8, 0, 255, 0]);
+    let g = gray_f32(&d);
+    assert_eq!(g[0], 0.0);
+    assert!(g[1].is_nan());
+    assert_eq!(g[2], 1.0);
+    assert_eq!(g[3], f32::INFINITY);
+    assert_eq!(
+        d.image.to_rgb8(),
+        vec![0u8, 0, 0, 0, 0, 0, 255, 255, 255, 0, 0, 0]
+    );
 }
 
 #[test]
-fn float32_flat_image_renders_floor() {
-    // All samples equal -> degenerate extent (span 0) -> flat 0 plane.
+fn float32_flat_image_is_flat() {
+    // All samples equal: natively 2.5 everywhere, clamped to 255 in 8-bit.
     let strip = f32_strip(&[2.5, 2.5, 2.5]);
     let bytes = build_float_row(3, 32, 1, &strip, &[]);
     let d = decode_page(&bytes).expect("flat float32 must decode");
-    assert_eq!(d.image.planes[0].data, vec![0u8, 0, 0]);
+    assert_eq!(gray_f32(&d), vec![2.5, 2.5, 2.5]);
+    assert_eq!(d.image.to_rgb8(), vec![255u8; 9]);
 }
 
 #[test]
-fn float16_half_precision_scanned_extent() {
-    // binary16 samples 0.0, 0.5, 1.0; scanned extent [0,1]: 0,128,255.
+fn float16_half_precision_widened() {
+    // binary16 samples 0.0, 0.5, 1.0 widen exactly to f32.
     let strip = half_strip(&[0.0, 0.5, 1.0]);
     let bytes = build_float_row(3, 16, 1, &strip, &[]);
     let d = decode_page(&bytes).expect("float16 grayscale must decode");
-    assert_eq!(d.image.planes[0].data, vec![0u8, 128, 255]);
+    assert_eq!(gray_f32(&d), vec![0.0, 0.5, 1.0]);
+    assert_eq!(d.image.to_rgb8()[..7], [0u8, 0, 0, 128, 128, 128, 255]);
 }
 
 #[test]
-fn float64_double_precision_scanned_extent() {
-    // binary64 samples 0.0, 0.25, 1.0; scanned extent [0,1]:
-    // 0, 0.25*255+0.5 = 64, 255.
+fn float64_double_precision_narrowed() {
+    // binary64 samples 0.0, 0.25, 1.0 narrow exactly to f32.
     let strip = f64_strip(&[0.0, 0.25, 1.0]);
     let bytes = build_float_row(3, 64, 1, &strip, &[]);
     let d = decode_page(&bytes).expect("float64 grayscale must decode");
-    assert_eq!(d.image.planes[0].data, vec![0u8, 64, 255]);
+    assert_eq!(gray_f32(&d), vec![0.0, 0.25, 1.0]);
+    assert_eq!(d.image.to_rgb8()[..7], [0u8, 0, 0, 64, 64, 64, 255]);
 }
 
 #[test]

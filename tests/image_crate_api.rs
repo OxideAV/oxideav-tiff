@@ -9,9 +9,10 @@ use std::io::Cursor;
 
 use oxideav_tiff::{
     decode, decode_all, decode_from, decode_page, decode_rgb8, decode_rgba8, decode_with, encode,
-    encode_page, encode_rgb8, encode_rgba8, encode_to, info, probe, ColorInfo, ColorRange,
-    DecodeOptions, EncodeOptions, EncodePage, EncodePixelFormat, Error, ExtraSampleKind, Metadata,
-    PageExtras, Palette, PixelFormat, Plane, TiffCompression, TiffImage,
+    encode_all, encode_page, encode_rgb8, encode_rgba8, encode_to, info, probe, ColorInfo,
+    ColorRange, DecodeOptions, EncodeOptions, EncodePage, EncodePixelFormat, Error,
+    ExtraSampleKind, Frame, Metadata, PageExtras, Palette, PixelFormat, Plane, TiffCompression,
+    TiffImage,
 };
 
 fn ramp(n: usize, seed: u8) -> Vec<u8> {
@@ -88,7 +89,14 @@ fn first_ifd_offset(tiff: &[u8]) -> u64 {
 
 fn image(format: PixelFormat, w: u32, h: u32) -> TiffImage {
     let bpp = format.bytes_per_pixel();
-    let data = ramp(w as usize * h as usize * bpp, 3);
+    let data = if format.is_float() {
+        // Finite f32 samples (a byte ramp would also spell NaN patterns).
+        (0..w as usize * h as usize * bpp / 4)
+            .flat_map(|i| ((i as f32) * 0.37 - 2.5).to_le_bytes())
+            .collect()
+    } else {
+        ramp(w as usize * h as usize * bpp, 3)
+    };
     let mut img = TiffImage::new(w, h, format, vec![Plane::new(w as usize * bpp, data)]).unwrap();
     if format == PixelFormat::Pal8 {
         img.palette = Some(Palette::new(
@@ -341,11 +349,13 @@ fn lossless_round_trip_every_native_layout_with_metadata() {
         PixelFormat::Rgba,
         PixelFormat::Pal8,
         PixelFormat::Cmyk,
+        PixelFormat::GrayF32Le,
+        PixelFormat::RgbF32Le,
     ] {
         let img = image(format, 7, 5).with_metadata(meta.clone());
         let single_sample = matches!(
             format,
-            PixelFormat::Gray8 | PixelFormat::Gray16Le | PixelFormat::Pal8
+            PixelFormat::Gray8 | PixelFormat::Gray16Le | PixelFormat::Pal8 | PixelFormat::GrayF32Le
         );
         for (label, opts) in [
             ("none", EncodeOptions::default()),
@@ -381,6 +391,83 @@ fn lossless_round_trip_every_native_layout_with_metadata() {
             assert_eq!(out, bytes);
         }
     }
+}
+
+#[test]
+fn encode_all_writes_one_page_per_frame_losslessly() {
+    // Mixed native layouts across pages, each round-tripping exactly;
+    // the page tags are stamped (i, n) + multi-page unless the frame
+    // sets its own.
+    let frames = vec![
+        Frame::new(image(PixelFormat::Rgb24, 5, 4), 0),
+        Frame::new(image(PixelFormat::Gray16Le, 3, 3), 1),
+        Frame::new(image(PixelFormat::GrayF32Le, 4, 2), 2)
+            .with_page_number(Some((7, 9)))
+            .with_new_subfile_type(Some(0b11)),
+        Frame::new(image(PixelFormat::Pal8, 2, 6), 3),
+    ];
+    for opts in [
+        EncodeOptions::default(),
+        EncodeOptions::default()
+            .with_compression(TiffCompression::Lzw)
+            .with_predictor(true),
+    ] {
+        let bytes = encode_all(&frames, &opts).unwrap();
+        assert_eq!(info(&bytes).unwrap().frames, 4);
+        let back = decode_all(&bytes).unwrap();
+        assert_eq!(back.len(), 4);
+        for (i, (b, f)) in back.iter().zip(&frames).enumerate() {
+            assert_eq!(b.image, f.image, "page {i}");
+            assert_eq!(b.index, i as u32);
+            assert_eq!(b.delay, None);
+        }
+        assert_eq!(back[0].page_number, Some((0, 4)));
+        assert_eq!(back[0].new_subfile_type, Some(0b10));
+        assert_eq!(back[2].page_number, Some((7, 9)));
+        assert_eq!(back[2].new_subfile_type, Some(0b11));
+        // Frames that came out of decode_all round-trip exactly.
+        let again = decode_all(&encode_all(&back, &opts).unwrap()).unwrap();
+        assert_eq!(again, back, "decode_all(encode_all(frames)) == frames");
+        // The first page is what `decode` sees.
+        assert_eq!(decode(&bytes).unwrap(), frames[0].image);
+    }
+    assert!(matches!(
+        encode_all(&[], &EncodeOptions::default()),
+        Err(Error::InvalidData(_))
+    ));
+}
+
+#[test]
+fn float_layouts_decode_natively_and_tone_scale_in_to_rgb8() {
+    let samples = [-0.5f32, 0.0, 0.25, 1.0, 1.5, f32::NAN];
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let img = TiffImage::new(
+        6,
+        1,
+        PixelFormat::GrayF32Le,
+        vec![Plane::new(24, data.clone())],
+    )
+    .unwrap();
+    let bytes = encode(&img, &EncodeOptions::default()).unwrap();
+    let i = info(&bytes).unwrap();
+    assert_eq!(i.format, PixelFormat::GrayF32Le);
+    let back = decode(&bytes).unwrap();
+    assert_eq!(back.format, PixelFormat::GrayF32Le);
+    assert_eq!(back.as_bytes().unwrap(), &data[..]);
+    // clamp [0, 1] × 255, half-up; NaN → 0.
+    let g = [0u8, 0, 64, 255, 255, 0];
+    assert_eq!(
+        back.to_rgb8(),
+        g.iter().flat_map(|&v| [v, v, v]).collect::<Vec<u8>>()
+    );
+    assert_eq!(
+        back.to_rgba8(),
+        g.iter().flat_map(|&v| [v, v, v, 255]).collect::<Vec<u8>>()
+    );
+    let rgb = TiffImage::new(2, 1, PixelFormat::RgbF32Le, vec![Plane::new(24, data)]).unwrap();
+    let back = decode(&encode(&rgb, &EncodeOptions::default()).unwrap()).unwrap();
+    assert_eq!(back, rgb);
+    assert_eq!(back.to_rgb8(), vec![0u8, 0, 64, 255, 255, 0]);
 }
 
 #[test]

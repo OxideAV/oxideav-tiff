@@ -55,6 +55,8 @@ impl From<TiffPixelFormat> for PixelFormat {
             TiffPixelFormat::Rgba => PixelFormat::Rgba,
             TiffPixelFormat::Pal8 => PixelFormat::Pal8,
             TiffPixelFormat::Cmyk => PixelFormat::Cmyk,
+            TiffPixelFormat::GrayF32Le => PixelFormat::GrayF32Le,
+            TiffPixelFormat::RgbF32Le => PixelFormat::RgbF32Le,
         }
     }
 }
@@ -70,10 +72,12 @@ impl TryFrom<PixelFormat> for TiffPixelFormat {
             PixelFormat::Rgba => TiffPixelFormat::Rgba,
             PixelFormat::Pal8 => TiffPixelFormat::Pal8,
             PixelFormat::Cmyk => TiffPixelFormat::Cmyk,
+            PixelFormat::GrayF32Le => TiffPixelFormat::GrayF32Le,
+            PixelFormat::RgbF32Le => TiffPixelFormat::RgbF32Le,
             other => {
                 return Err(Error::unsupported(format!(
                     "TIFF: pixel format {other:?} has no TIFF layout (Gray8 / Gray16Le / \
-                     Rgb24 / Rgb48Le / Rgba / Pal8 / Cmyk)"
+                     Rgb24 / Rgb48Le / Rgba / Pal8 / Cmyk / GrayF32Le / RgbF32Le)"
                 )))
             }
         })
@@ -343,6 +347,8 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             PixelFormat::Gray16Le,
             PixelFormat::Pal8,
             PixelFormat::Cmyk,
+            PixelFormat::GrayF32Le,
+            PixelFormat::RgbF32Le,
         ]);
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_STR))
@@ -539,6 +545,8 @@ mod tests {
             TiffPixelFormat::Rgba,
             TiffPixelFormat::Pal8,
             TiffPixelFormat::Cmyk,
+            TiffPixelFormat::GrayF32Le,
+            TiffPixelFormat::RgbF32Le,
         ] {
             let core: PixelFormat = f.into();
             assert_eq!(TiffPixelFormat::try_from(core).unwrap(), f);

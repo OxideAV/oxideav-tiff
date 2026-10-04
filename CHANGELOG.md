@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `encode_all(&[Frame], &EncodeOptions)` — the contract's multi-page
+  encoder (mirror of `decode_all`): one IFD per frame, each written as
+  `encode` would, `PageNumber = (i, n)` + `NewSubfileType` bit 1 unless the
+  frame carries its own. Pinned: `decode_all(encode_all(frames)) == frames`.
+- Native float layouts `TiffPixelFormat::GrayF32Le` / `RgbF32Le`
+  (little-endian `f32` samples, `is_float()`), accepted by `encode`
+  (`SampleFormat = 3`, 32-bit) and bridged to `oxideav_core::PixelFormat`.
+- `TiffFormatInfo::smin_sample_value` / `smax_sample_value` (tags 340 /
+  341) so callers can apply the file-declared float display extent.
+- `Cargo.toml` `exclude = ["/tests", "/fuzz"]` (crates.io 10 MiB cap).
+
+### Changed
+
+- **`TiffImage::from_rgb8` / `from_rgba8` return `Result`** and reject a
+  zero dimension or a buffer shorter than the geometry with `InvalidData`
+  (the infallible signature is gone; `encode_rgb8` / `encode_rgba8`
+  propagate the error).
+- **Float TIFFs decode natively.** `SampleFormat = 3` grayscale and RGB
+  (16 / 32 / 64-bit) now decode to `GrayF32Le` / `RgbF32Le` with the
+  samples as stored (half widened, double narrowed; `WhiteIsZero`
+  re-expressed as `1 − x`) instead of a `Gray8` / `Rgb24` plane
+  tone-scaled from the `SMin` / `SMax` extent. `info().format` reports
+  the float layout. Tone-scaling lives only in `to_rgb8` / `to_rgba8`:
+  clamp to `[0, 1]`, × 255, NaN / ±Inf → 0. The decode fixtures' pinned
+  bytes changed accordingly (native `f32` planes).
+- `TiffFormatInfo` no longer derives `Eq` (it carries the `f64` extent).
+- The internal JPEG-in-TIFF segment plane is `jpeg::SegmentPlane` (was
+  `jpeg::Plane`, a second public type with a contract name).
+
 ## [0.0.7](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.6...v0.0.7) - 2026-10-03
 
 ### Other

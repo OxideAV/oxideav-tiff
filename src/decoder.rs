@@ -356,9 +356,9 @@ pub(crate) fn decode_ifd(
     // unsigned integer data)") and value 2 (two's-complement signed
     // integer grayscale — see the grayscale build arms) through the
     // integer assembly path; value 3 (IEEE floating point) decodes for
-    // single-channel grayscale at the IEEE widths (16-bit half / 32-bit
-    // single / 64-bit double) by mapping the floating sample extent onto
-    // the unsigned display plane — see the grayscale float build arm. An
+    // single-channel grayscale and 3-channel RGB at the IEEE widths
+    // (16-bit half / 32-bit single / 64-bit double) to the native
+    // `GrayF32Le` / `RgbF32Le` planes — see the float build arms. An
     // absent field defaults to unsigned per the §SampleFormat default-1
     // paragraph.
     let sample_format = if let Some(sf_entry) = find(entries, TAG_SAMPLE_FORMAT) {
@@ -577,7 +577,7 @@ pub(crate) fn decode_ifd(
     // The integer assembly paths handle 1/4/8/16-bit samples. A
     // SampleFormat = 3 (IEEE float) image additionally admits the 32-bit
     // (single) and 64-bit (double) widths the float photometric uses —
-    // their decode runs through `build_gray8_from_float`, validated
+    // their decode runs through `build_f32_plane`, validated
     // against the float grayscale arms below.
     let float_width_ok =
         sample_format == SAMPLE_FORMAT_IEEE_FP && (bps_first == 32 || bps_first == 64);
@@ -1035,37 +1035,18 @@ pub(crate) fn decode_ifd(
         // SampleFormat = 3 (IEEE floating-point) grayscale: 16-bit half,
         // 32-bit single, 64-bit double. The guards take precedence over
         // the integer 16-bit arm below, so the unsigned/signed-integer
-        // path only runs when the field is not float. Output is a Gray8
-        // display plane scaled from the float extent (see the
-        // SampleFormat = 3 note above and `build_gray8_from_float`).
-        (PHOTO_BLACK_IS_ZERO, 1, 16) | (PHOTO_WHITE_IS_ZERO, 1, 16)
+        // path only runs when the field is not float. Output is the
+        // native `GrayF32Le` plane (samples as stored, widened /
+        // narrowed to f32; WhiteIsZero re-expressed as `1 − x`); tone
+        // scaling happens only in `to_rgb8` / `to_rgba8`.
+        (PHOTO_BLACK_IS_ZERO, 1, bpsw @ (16 | 32 | 64))
+        | (PHOTO_WHITE_IS_ZERO, 1, bpsw @ (16 | 32 | 64))
             if sample_format == SAMPLE_FORMAT_IEEE_FP =>
         {
             let inv = photometric == PHOTO_WHITE_IS_ZERO;
-            let (dmin, dmax) = float_display_extent(entries, bo);
             (
-                build_gray8_from_float(&pixel_buf, width, height, bo, 16, inv, dmin, dmax)?,
-                TiffPixelFormat::Gray8,
-            )
-        }
-        (PHOTO_BLACK_IS_ZERO, 1, 32) | (PHOTO_WHITE_IS_ZERO, 1, 32)
-            if sample_format == SAMPLE_FORMAT_IEEE_FP =>
-        {
-            let inv = photometric == PHOTO_WHITE_IS_ZERO;
-            let (dmin, dmax) = float_display_extent(entries, bo);
-            (
-                build_gray8_from_float(&pixel_buf, width, height, bo, 32, inv, dmin, dmax)?,
-                TiffPixelFormat::Gray8,
-            )
-        }
-        (PHOTO_BLACK_IS_ZERO, 1, 64) | (PHOTO_WHITE_IS_ZERO, 1, 64)
-            if sample_format == SAMPLE_FORMAT_IEEE_FP =>
-        {
-            let inv = photometric == PHOTO_WHITE_IS_ZERO;
-            let (dmin, dmax) = float_display_extent(entries, bo);
-            (
-                build_gray8_from_float(&pixel_buf, width, height, bo, 64, inv, dmin, dmax)?,
-                TiffPixelFormat::Gray8,
+                build_f32_plane(&pixel_buf, width, height, 1, bo, bpsw, inv)?,
+                TiffPixelFormat::GrayF32Le,
             )
         }
         (PHOTO_BLACK_IS_ZERO, 1, 16) | (PHOTO_WHITE_IS_ZERO, 1, 16) => {
@@ -1080,17 +1061,12 @@ pub(crate) fn decode_ifd(
         // 32-bit single, 64-bit double, three interleaved colour
         // channels per pixel. These guarded arms take precedence over
         // the integer 16-bit RGB arm below, so the integer path only
-        // runs when the field is not float. Output is an Rgb24 display
-        // plane scaled from a single shared float extent across the
-        // three channels (see the SampleFormat = 3 note above and
-        // `build_rgb24_from_float`).
-        (PHOTO_RGB, 3, bpsw @ (16 | 32 | 64)) if sample_format == SAMPLE_FORMAT_IEEE_FP => {
-            let (dmin, dmax) = float_display_extent(entries, bo);
-            (
-                build_rgb24_from_float(&pixel_buf, width, height, bo, bpsw, dmin, dmax)?,
-                TiffPixelFormat::Rgb24,
-            )
-        }
+        // runs when the field is not float. Output is the native
+        // `RgbF32Le` plane (see the grayscale float arm).
+        (PHOTO_RGB, 3, bpsw @ (16 | 32 | 64)) if sample_format == SAMPLE_FORMAT_IEEE_FP => (
+            build_f32_plane(&pixel_buf, width, height, 3, bo, bpsw, false)?,
+            TiffPixelFormat::RgbF32Le,
+        ),
         (PHOTO_RGB, 3, 8) => (
             build_rgb24(&pixel_buf, width, height),
             TiffPixelFormat::Rgb24,
@@ -3044,200 +3020,48 @@ pub(crate) fn half_to_f32(bits: u16) -> f32 {
     }
 }
 
-/// Read every floating-point sample (16-/32-/64-bit IEEE 754) from the
-/// assembled byte buffer into `f64`s, in storage order. `bps` selects
-/// the width.
-fn read_float_samples(src: &[u8], n: usize, bo: ByteOrder, bps: u16) -> Vec<f64> {
-    let mut out = Vec::with_capacity(n);
-    match bps {
-        16 => {
-            for i in 0..n {
-                out.push(half_to_f32(bo.read_u16(&src[i * 2..i * 2 + 2])) as f64);
-            }
-        }
-        32 => {
-            for i in 0..n {
-                out.push(bo.read_f32(&src[i * 4..i * 4 + 4]) as f64);
-            }
-        }
-        // 64-bit double.
-        _ => {
-            for i in 0..n {
-                out.push(bo.read_f64(&src[i * 8..i * 8 + 8]));
-            }
-        }
-    }
-    out
-}
-
-/// Determine the [min, max] display extent for a `SampleFormat = 3`
-/// image. TIFF 6.0 §SampleFormat (page 80): SMinSampleValue (340) and
-/// SMaxSampleValue (341) bound the samples "without scanning the image
-/// data". When both are present (and SMin < SMax) they define the
-/// extent; otherwise the caller scans the actual finite sample extent.
-/// Returns `None` for each missing/unusable bound.
-fn float_display_extent(entries: &[Entry], bo: ByteOrder) -> (Option<f64>, Option<f64>) {
-    let smin = find(entries, TAG_S_MIN_SAMPLE_VALUE)
-        .and_then(|e| e.as_f64_vec(bo).ok())
-        .and_then(|v| v.into_iter().next())
-        .filter(|x| x.is_finite());
-    let smax = find(entries, TAG_S_MAX_SAMPLE_VALUE)
-        .and_then(|e| e.as_f64_vec(bo).ok())
-        .and_then(|v| v.into_iter().next())
-        .filter(|x| x.is_finite());
-    (smin, smax)
-}
-
-/// Render `SampleFormat = 3` IEEE-float grayscale to a Gray8 display
-/// plane. The float extent [`dmin`, `dmax`] (from SMin/SMaxSampleValue
-/// when present, else scanned from the finite samples) maps linearly to
-/// 0..=255: a sample at `dmin` renders 0, a sample at `dmax` renders
-/// 255, in between scaled and rounded. Non-finite samples (NaN / ±Inf)
-/// render at the display floor (0). The WhiteIsZero polarity inversion
-/// runs on the resulting unsigned display value, as for the integer
-/// paths. A degenerate extent (all samples equal) renders a flat 0
-/// plane. `bps` selects the IEEE width (16 / 32 / 64).
-#[allow(clippy::too_many_arguments)]
-fn build_gray8_from_float(
+/// Assemble the native `f32` little-endian plane of a `SampleFormat = 3`
+/// image: `channels` interleaved IEEE samples per pixel at `bps` bits
+/// (16-bit half, 32-bit single, 64-bit double), each converted to `f32`
+/// as stored (a double is narrowed). `invert` (WhiteIsZero) re-expresses
+/// every sample as `1 − x` so the plane is black-is-zero over the
+/// nominal `[0, 1]` range. No display scaling happens here — that is
+/// [`TiffImage::to_rgb8`]'s job.
+fn build_f32_plane(
     src: &[u8],
     w: u32,
     h: u32,
+    channels: usize,
     bo: ByteOrder,
     bps: u16,
     invert: bool,
-    dmin: Option<f64>,
-    dmax: Option<f64>,
 ) -> Result<TiffImage> {
-    let n = (w as usize) * (h as usize);
+    let n = (w as usize) * (h as usize) * channels;
     let bytes_per = (bps / 8) as usize;
     if src.len() < n * bytes_per {
-        return Err(Error::invalid(
-            "TIFF: float grayscale strip data shorter than image",
-        ));
+        return Err(Error::invalid("TIFF: float strip data shorter than image"));
     }
-    let samples = read_float_samples(src, n, bo, bps);
-
-    // Resolve the display extent: prefer the SMin/SMax tag pair, else
-    // scan the finite samples for their actual min/max.
-    let (mut lo, mut hi) = (dmin, dmax);
-    if lo.is_none() || hi.is_none() {
-        let mut smin = f64::INFINITY;
-        let mut smax = f64::NEG_INFINITY;
-        for &s in &samples {
-            if s.is_finite() {
-                if s < smin {
-                    smin = s;
-                }
-                if s > smax {
-                    smax = s;
-                }
-            }
-        }
-        if smin.is_finite() && smax.is_finite() {
-            lo.get_or_insert(smin);
-            hi.get_or_insert(smax);
-        }
-    }
-    let lo = lo.unwrap_or(0.0);
-    let hi = hi.unwrap_or(0.0);
-    let span = hi - lo;
-
-    let stride = w as usize;
+    let stride = w as usize * channels * 4;
     let mut data = Vec::with_capacity(stride * h as usize);
-    for &s in &samples {
-        let mut v = if !s.is_finite() || span <= 0.0 {
-            0u8
-        } else {
-            let t = ((s - lo) / span).clamp(0.0, 1.0);
-            (t * 255.0 + 0.5) as u8
+    for i in 0..n {
+        let v = match bps {
+            16 => half_to_f32(bo.read_u16(&src[i * 2..i * 2 + 2])),
+            32 => bo.read_f32(&src[i * 4..i * 4 + 4]),
+            _ => bo.read_f64(&src[i * 8..i * 8 + 8]) as f32,
         };
-        if invert {
-            v = 255 - v;
-        }
-        data.push(v);
+        let v = if invert { 1.0 - v } else { v };
+        data.extend_from_slice(&v.to_le_bytes());
     }
+    let format = if channels == 1 {
+        TiffPixelFormat::GrayF32Le
+    } else {
+        TiffPixelFormat::RgbF32Le
+    };
     Ok(TiffImage::from_parts(
         w,
         h,
-        TiffPixelFormat::Gray8,
-        vec![Plane { stride, data }],
-    ))
-}
-
-/// Render `SampleFormat = 3` IEEE-float RGB to an Rgb24 display plane.
-/// Three interleaved colour channels per pixel (`R G B R G B …`) are read
-/// as floats and mapped through a *single shared* extent [`dmin`, `dmax`]:
-/// a sample at `dmin` renders 0, one at `dmax` renders 255, in between
-/// scaled and rounded. The extent comes from SMin/SMaxSampleValue when
-/// both are present, else is scanned from the finite samples of all three
-/// channels together — so the relative R / G / B magnitudes (the pixel's
-/// chromaticity) survive the conversion; a per-channel extent would
-/// re-balance the colour. Non-finite samples (NaN / ±Inf) render at the
-/// display floor (0). A degenerate extent (all samples equal) renders a
-/// flat 0 plane. `bps` selects the IEEE width (16 / 32 / 64).
-#[allow(clippy::too_many_arguments)]
-fn build_rgb24_from_float(
-    src: &[u8],
-    w: u32,
-    h: u32,
-    bo: ByteOrder,
-    bps: u16,
-    dmin: Option<f64>,
-    dmax: Option<f64>,
-) -> Result<TiffImage> {
-    let pixels = (w as usize) * (h as usize);
-    let n = pixels * 3;
-    let bytes_per = (bps / 8) as usize;
-    if src.len() < n * bytes_per {
-        return Err(Error::invalid(
-            "TIFF: float RGB strip data shorter than image",
-        ));
-    }
-    let samples = read_float_samples(src, n, bo, bps);
-
-    // Resolve the shared display extent: prefer the SMin/SMax tag pair,
-    // else scan the finite samples across all three channels for their
-    // actual min/max (the spec's stated fallback when the bound tags are
-    // absent).
-    let (mut lo, mut hi) = (dmin, dmax);
-    if lo.is_none() || hi.is_none() {
-        let mut smin = f64::INFINITY;
-        let mut smax = f64::NEG_INFINITY;
-        for &s in &samples {
-            if s.is_finite() {
-                if s < smin {
-                    smin = s;
-                }
-                if s > smax {
-                    smax = s;
-                }
-            }
-        }
-        if smin.is_finite() && smax.is_finite() {
-            lo.get_or_insert(smin);
-            hi.get_or_insert(smax);
-        }
-    }
-    let lo = lo.unwrap_or(0.0);
-    let hi = hi.unwrap_or(0.0);
-    let span = hi - lo;
-
-    let stride = w as usize * 3;
-    let mut data = Vec::with_capacity(stride * h as usize);
-    for &s in &samples {
-        let v = if !s.is_finite() || span <= 0.0 {
-            0u8
-        } else {
-            let t = ((s - lo) / span).clamp(0.0, 1.0);
-            (t * 255.0 + 0.5) as u8
-        };
-        data.push(v);
-    }
-    Ok(TiffImage::from_parts(
-        w,
-        h,
-        TiffPixelFormat::Rgb24,
-        vec![Plane { stride, data }],
+        format,
+        vec![Plane::new(stride, data)],
     ))
 }
 
