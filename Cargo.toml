@@ -52,7 +52,7 @@ compcol = { version = "0.6", default-features = false, features = [
 # entry points we consume are part of its framework-free surface.
 # Not optional — Compression=50001 works in every build configuration,
 # exactly like Compression=50000 (Zstandard) does.
-oxideav-webp = { version = "0.2", default-features = false }
+oxideav-webp = { version = "0.3", default-features = false }
 
 [features]
 default = ["registry"]
