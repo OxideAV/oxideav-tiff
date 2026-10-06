@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.8...v0.0.9) - 2026-10-05
+
+### Other
+
+- oxideav-webp 0.3
+
 ### Changed
 
 - `oxideav-webp` requirement moves to the 0.3 line (WebP-in-TIFF rides the contract-era crate; the umbrella was linking 0.2.3 and 0.3.0 side by side).
