@@ -18,10 +18,15 @@
 //! packet are also structured `attachments()` (raw bytes verbatim, per
 //! `docs/image/tiff/tiff-icc-xmp-tags.md`).
 //!
-//! The muxer writes one packet (a complete single-page TIFF file, as
-//! the codec encoder produces) verbatim; several packets are
-//! re-assembled into one multi-page file through the standalone
-//! decode + [`crate::encode_pages`] path.
+//! The muxer takes one or more `tiff` streams (the gateway's one per
+//! picture geometry) and writes one packet (a complete TIFF file, as
+//! the codec encoder produces) verbatim; several packets become the
+//! pages of one multi-page file in write order, each page re-encoded
+//! under its stream's options (compression / predictor / planar /
+//! tiling / BigTIFF — the same option bag the encoder parsed) with its
+//! own metadata blobs and descriptive tags carried along; pages may
+//! differ in geometry. Identical packet payloads (a multi-stream file
+//! remuxed straight from the demuxer) are written once.
 
 use std::io::{Read, SeekFrom, Write};
 
@@ -37,7 +42,8 @@ use crate::decoder::ifd_chain;
 use crate::ifd::parse_header;
 use crate::image::Metadata;
 use crate::metadata::extract_metadata;
-use crate::registry::{metadata_to_blobs, page_geometry};
+use crate::options::EncodeOptions;
+use crate::registry::{metadata_to_blobs, page_geometry, RegistryEncodeOptions};
 
 pub fn register(reg: &mut ContainerRegistry) {
     reg.register_demuxer("tiff", open_demuxer);
@@ -207,24 +213,34 @@ impl Demuxer for TiffDemuxer {
     }
 }
 
-/// Open the TIFF muxer: exactly one video stream whose codec is
-/// `tiff`. Packets are complete single-page TIFF files (what
-/// [`crate::make_encoder`] emits).
+/// Open the TIFF muxer: one or more video streams whose codec is
+/// `tiff` (one per picture geometry). Packets are complete TIFF files
+/// (what [`crate::make_encoder`] emits); each stream's
+/// `params.options` are parsed with the encoder's schema and govern
+/// how its pages are re-encoded when several packets are assembled
+/// into one multi-page file.
 pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<Box<dyn Muxer>> {
-    if streams.len() != 1 {
+    if streams.is_empty() {
         return Err(Error::unsupported(
-            "TIFF muxer: exactly one video stream expected",
+            "TIFF muxer: at least one video stream expected",
         ));
     }
-    let s = &streams[0];
-    if s.params.codec_id.as_str() != crate::CODEC_ID_STR {
-        return Err(Error::invalid(format!(
-            "TIFF muxer: codec_id must be tiff (got {})",
-            s.params.codec_id
-        )));
+    let mut options: Vec<(u32, EncodeOptions)> = Vec::with_capacity(streams.len());
+    for s in streams {
+        if s.params.codec_id.as_str() != crate::CODEC_ID_STR {
+            return Err(Error::invalid(format!(
+                "TIFF muxer: codec_id must be tiff (got {} on stream {})",
+                s.params.codec_id, s.index
+            )));
+        }
+        let opts = oxideav_core::parse_options::<RegistryEncodeOptions>(&s.params.options)
+            .map_err(|e| Error::invalid(format!("TIFF muxer: stream {} options: {e}", s.index)))?
+            .resolve();
+        options.push((s.index, opts));
     }
     Ok(Box::new(TiffMuxer {
         output,
+        options,
         packets: Vec::new(),
         header_written: false,
         trailer_written: false,
@@ -233,6 +249,8 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
 
 struct TiffMuxer {
     output: Box<dyn WriteSeek>,
+    /// Per stream index: the resolved encode options of that stream.
+    options: Vec<(u32, EncodeOptions)>,
     packets: Vec<Packet>,
     header_written: bool,
     trailer_written: bool,
@@ -252,6 +270,17 @@ impl Muxer for TiffMuxer {
         if !self.header_written {
             return Err(Error::other("TIFF muxer: write_header not called"));
         }
+        if !self.options.iter().any(|(i, _)| *i == packet.stream_index) {
+            return Err(Error::invalid(format!(
+                "TIFF muxer: packet on unknown stream {}",
+                packet.stream_index
+            )));
+        }
+        // A multi-stream file remuxed straight from the demuxer hands
+        // the same whole file once per stream: keep one copy.
+        if self.packets.iter().any(|p| p.data == packet.data) {
+            return Ok(());
+        }
         self.packets.push(packet.clone());
         Ok(())
     }
@@ -264,10 +293,10 @@ impl Muxer for TiffMuxer {
             0 => return Err(Error::invalid("TIFF muxer: no packets written")),
             // One packet is already a complete TIFF file.
             1 => self.output.write_all(&self.packets[0].data)?,
-            // Several packets: decode each (native layout, lossless)
-            // and write them back as the pages of one multi-page file.
+            // Several packets: the pages of each, in write order,
+            // re-encoded under their stream's options.
             _ => {
-                let bytes = merge_pages(&self.packets)?;
+                let bytes = merge_pages(&self.packets, &self.options)?;
                 self.output.write_all(&bytes)?;
             }
         }
@@ -277,80 +306,31 @@ impl Muxer for TiffMuxer {
     }
 }
 
-/// Re-assemble several single-page TIFF packets into one multi-page
-/// file: every page of every packet is decoded in its native layout
-/// and re-encoded (losslessly, uncompressed) in order.
-fn merge_pages(packets: &[Packet]) -> Result<Vec<u8>> {
-    use crate::encoder::{EncodePage, EncodePixelFormat, ExtraSampleKind, PageExtras};
-    use crate::{RgbColor, TiffCompression, TiffImage, TiffPixelFormat};
-
-    let mut images: Vec<TiffImage> = Vec::new();
+/// Re-assemble several TIFF packets into one multi-page file: every
+/// page of every packet is decoded in its native layout (metadata
+/// blobs and descriptive tags included) and re-encoded in write order
+/// under its stream's options — compression, predictor, planar,
+/// tiling and BigTIFF as the encoder would have written a single
+/// page. A lossy JPEG stream is quantised a second time (through the
+/// same tables); a lossless scheme reproduces the pixels exactly.
+fn merge_pages(packets: &[Packet], options: &[(u32, EncodeOptions)]) -> Result<Vec<u8>> {
+    let mut decoded: Vec<(Vec<crate::Page>, &EncodeOptions)> = Vec::with_capacity(packets.len());
     for p in packets {
-        for page in crate::decode_pages(&p.data)? {
-            images.push(page.image);
-        }
+        let opts = options
+            .iter()
+            .find(|(i, _)| *i == p.stream_index)
+            .map(|(_, o)| o)
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "TIFF muxer: packet on unknown stream {}",
+                    p.stream_index
+                ))
+            })?;
+        decoded.push((crate::decode_pages(&p.data)?, opts));
     }
-    let palettes: Vec<Vec<RgbColor>> = images
+    let pages: Vec<(&crate::Page, &EncodeOptions)> = decoded
         .iter()
-        .map(|img| {
-            img.palette
-                .as_ref()
-                .map(|p| p.to_rgb_triples())
-                .unwrap_or_default()
-        })
+        .flat_map(|(pages, opts)| pages.iter().map(move |p| (p, *opts)))
         .collect();
-    let floats: Vec<Vec<f32>> = images
-        .iter()
-        .map(|img| {
-            if img.format.is_float() {
-                img.as_bytes()
-                    .unwrap_or(&[])
-                    .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        })
-        .collect();
-    let total = images.len() as u16;
-    let mut pages: Vec<EncodePage<'_>> = Vec::with_capacity(images.len());
-    for (i, img) in images.iter().enumerate() {
-        let pixels: &[u8] = img.as_bytes().unwrap_or(&[]);
-        let kind = match img.format {
-            TiffPixelFormat::Gray8 => EncodePixelFormat::Gray8 { pixels },
-            TiffPixelFormat::Gray16Le => EncodePixelFormat::Gray16Le { pixels },
-            TiffPixelFormat::Rgb24 => EncodePixelFormat::Rgb24 { pixels },
-            TiffPixelFormat::Rgb48Le => EncodePixelFormat::Rgb48 { pixels },
-            TiffPixelFormat::Rgba => EncodePixelFormat::Rgba32 {
-                pixels,
-                kind: ExtraSampleKind::UnassociatedAlpha,
-            },
-            TiffPixelFormat::Pal8 => EncodePixelFormat::Palette8 {
-                indices: pixels,
-                palette: &palettes[i],
-            },
-            TiffPixelFormat::Cmyk => EncodePixelFormat::Cmyk32 { pixels },
-            TiffPixelFormat::GrayF32Le => EncodePixelFormat::GrayF32 { pixels: &floats[i] },
-            TiffPixelFormat::RgbF32Le => EncodePixelFormat::RgbF32 { pixels: &floats[i] },
-        };
-        pages.push(EncodePage {
-            width: img.width,
-            height: img.height,
-            kind,
-            compression: TiffCompression::None,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras {
-                page_number: Some((i as u16, total)),
-                multi_page: true,
-                icc_profile: img.metadata.icc.as_deref(),
-                xmp: img.metadata.xmp.as_deref(),
-                ..PageExtras::default()
-            },
-        });
-    }
-    Ok(crate::encode_pages(&pages)?)
+    Ok(crate::api::encode_decoded_pages(&pages)?)
 }

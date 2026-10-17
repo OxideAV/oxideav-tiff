@@ -270,7 +270,7 @@ pub fn decode_pages(bytes: &[u8]) -> Result<Vec<Page>> {
 pub fn encode(image: &TiffImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     let prep = PreparedPage::prepare(image, opts)?;
     let aux = prep.aux_entries();
-    let page = prep.page(&aux, opts, None);
+    let page = prep.page(&aux, opts, None, None);
     encode_pages(std::slice::from_ref(&page))
 }
 
@@ -307,10 +307,54 @@ pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
         .map(|(i, ((p, a), f))| {
             let page_number = f.page_number.unwrap_or((i as u16, total));
             let subfile = f.new_subfile_type.unwrap_or(0b10);
-            p.page(a, opts, Some((page_number, subfile)))
+            p.page(a, opts, Some((page_number, subfile)), None)
         })
         .collect();
     encode_pages(&pages)
+}
+
+/// Re-encode decoded [`Page`]s as one multi-page file, each under its
+/// own options — the registry muxer's assembly of several packets:
+/// every page is written as [`encode`] writes it (native layout,
+/// compression and metadata blobs per its options) with its
+/// descriptive [`crate::TiffMetadata`] carried along (the TIFF 6.0 §8
+/// strings, the resolution triple — `opts.software` / `opts.resolution`
+/// win when set) and `PageNumber = (i, n)` + `NewSubfileType` bit 1.
+/// `Orientation` is not re-written: the decoder already applied it to
+/// the pixels.
+#[cfg(feature = "registry")]
+pub(crate) fn encode_decoded_pages(pages: &[(&Page, &EncodeOptions)]) -> Result<Vec<u8>> {
+    if pages.is_empty() {
+        return Err(Error::invalid(
+            "encode_decoded_pages: at least one page is required",
+        ));
+    }
+    let total = u16::try_from(pages.len()).map_err(|_| {
+        Error::unsupported(format!(
+            "encode_decoded_pages: {} pages exceed the 16-bit PageNumber total",
+            pages.len()
+        ))
+    })?;
+    let prepared = pages
+        .iter()
+        .map(|(p, opts)| PreparedPage::prepare(&p.image, opts))
+        .collect::<Result<Vec<_>>>()?;
+    let aux: Vec<_> = prepared.iter().map(PreparedPage::aux_entries).collect();
+    let encode_pages_in: Vec<EncodePage<'_>> = prepared
+        .iter()
+        .zip(&aux)
+        .zip(pages)
+        .enumerate()
+        .map(|(i, ((prep, a), (page, opts)))| {
+            prep.page(
+                a,
+                opts,
+                Some(((i as u16, total), 0b10)),
+                Some(&page.metadata),
+            )
+        })
+        .collect();
+    encode_pages(&encode_pages_in)
 }
 
 /// The owned per-page material [`encode`] / [`encode_all`] hand to the
@@ -384,12 +428,15 @@ impl<'i> PreparedPage<'i> {
     }
 
     /// The borrowing page description; `paging` = `(PageNumber,
-    /// NewSubfileType)` for a multi-page chain.
+    /// NewSubfileType)` for a multi-page chain; `desc` = a decoded
+    /// page's descriptive metadata to carry along (strings and
+    /// resolution; `opts` win where both are set).
     fn page<'p>(
         &'p self,
         aux: &'p (Vec<AuxIfdEntry<'p>>, Vec<AuxIfdEntry<'p>>),
         opts: &'p EncodeOptions,
         paging: Option<((u16, u16), u32)>,
+        desc: Option<&'p crate::TiffMetadata>,
     ) -> EncodePage<'p> {
         let image = self.image;
         let pixels: &[u8] = &self.pixels;
@@ -415,9 +462,35 @@ impl<'i> PreparedPage<'i> {
             },
         };
         let (exif_entries, gps_entries) = aux;
+        let text = |f: fn(&crate::TiffMetadata) -> &Option<String>| -> Option<&'p str> {
+            desc.and_then(|d| f(d).as_deref())
+        };
+        let resolution = opts.resolution.or_else(|| {
+            let d = desc?;
+            let unit = match d.resolution_unit {
+                Some(crate::ResolutionUnit::None) => RESOLUTION_UNIT_NONE,
+                Some(crate::ResolutionUnit::Centimeter) => RESOLUTION_UNIT_CENTIMETER,
+                _ => RESOLUTION_UNIT_INCH,
+            };
+            match (d.x_resolution, d.y_resolution) {
+                (Some(x), Some(y)) if x.1 != 0 && y.1 != 0 => {
+                    Some(crate::PageResolution { x, y, unit })
+                }
+                _ => None,
+            }
+        });
         let extras = PageExtras {
-            resolution: opts.resolution,
-            software: opts.software.as_deref(),
+            resolution,
+            software: opts.software.as_deref().or(text(|d| &d.software)),
+            description: text(|d| &d.image_description),
+            date_time: text(|d| &d.date_time),
+            artist: text(|d| &d.artist),
+            copyright: text(|d| &d.copyright),
+            document_name: text(|d| &d.document_name),
+            make: text(|d| &d.make),
+            model: text(|d| &d.model),
+            page_name: text(|d| &d.page_name),
+            host_computer: text(|d| &d.host_computer),
             xmp: if opts.embed_xmp {
                 image.metadata.xmp.as_deref()
             } else {

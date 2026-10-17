@@ -143,7 +143,21 @@ returns the pages whose native layout equals the stream's declared one,
 one frame per page (`pts` = the page's position on the IFD chain), so
 every frame's label is truthful (a decoder built without a geometry
 returns every page). The first page must be decodable; a later page
-outside the decode table is left out of every stream. JPEG-in-TIFF *decode* (`Compression = 7` / `6`) routes
+outside the decode table is left out of every stream.
+
+**Muxer:** one or more `tiff` streams (the gateway's one per picture
+geometry). A single packet is written verbatim; several packets become
+the pages of one multi-page file in write order — pages may differ in
+geometry — each page re-encoded under its stream's options
+(compression / predictor / planar / tile / bigtiff, the same option bag
+the encoder parsed) with its own metadata blobs and TIFF 6.0 §8 strings
+/ resolution carried along and `PageNumber = (i, n)` written. Streams
+must agree on the BigTIFF variant. A lossy JPEG stream is quantised a
+second time through the same tables (use `encode_all` / `encode_pages`
+for a single-pass multi-page JPEG file); every other scheme reproduces
+the pixels exactly. Identical packet payloads — a multi-stream file
+remuxed straight from the demuxer — are written once, so a remux is
+byte-identical. JPEG-in-TIFF *decode* (`Compression = 7` / `6`) routes
 through `oxideav-mjpeg` and therefore needs `registry`; everything else
 — including WebP-in-TIFF (`Compression = 50001`, via `oxideav-webp`'s
 framework-free surface) and the in-crate JPEG-in-TIFF *encoder* — works

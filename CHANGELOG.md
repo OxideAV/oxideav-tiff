@@ -31,6 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stream's geometry (`pts` = page index; every page without a geometry),
   so every frame's label is truthful. Previously only the first page was
   decoded.
+- **Multi-stream muxer (mixed geometry).** `open_muxer` takes one or
+  more `tiff` streams (the gateway's one per picture geometry); several
+  packets become the pages of one multi-page file in write order, pages
+  may differ in geometry, and each page is re-encoded under its stream's
+  options (compression / predictor / planar / tile / bigtiff) with its
+  metadata blobs and §8 strings / resolution carried along (the old
+  merge wrote every page uncompressed and dropped Exif). Identical
+  packet payloads are written once, so a demux → mux remux of a
+  multi-stream file is byte-identical. Refusals (no streams, another
+  codec, unknown stream, mixed BigTIFF variants) are typed.
 - `ACCEPTED_PIXEL_FORMATS`: the registry encoder declares its nine input
   layouts on `CodecCapabilities::accepted_pixel_formats` (ladder order);
   `make_encoder` refuses undeclared layouts and the layout × scheme
