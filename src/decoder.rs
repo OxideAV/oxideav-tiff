@@ -167,6 +167,7 @@ pub(crate) fn decode_page_entries(
         exif: crate::exif::extract_exif_payload(input, header, entries),
         xmp: metadata.xmp.clone(),
         gamma: None,
+        iptc: metadata.iptc.clone(),
     };
     Ok(Page::new(image, metadata, layout))
 }

@@ -155,7 +155,8 @@ impl Default for DecodeOptions {
 /// The defaults write a classic (32-bit offset) little-endian TIFF with
 /// `Compression = 1` (none), a single strip, chunky
 /// `PlanarConfiguration = 1`, no predictor, and every metadata blob the
-/// image carries (ICC profile, XMP packet, Exif IFD) embedded. Every
+/// image carries (ICC profile, XMP packet, Exif IFD, IPTC record
+/// stream) embedded. Every
 /// behaviour variant is a field; the full per-page surface (sub-IFDs,
 /// page numbers, the TIFF 6.0 §8 descriptive strings, multi-page
 /// files) stays on [`crate::EncodePage`] / [`crate::encode_pages`].
@@ -188,6 +189,8 @@ pub struct EncodeOptions {
     /// Embed `metadata.exif` (an Exif TIFF payload) as the Exif IFD
     /// (34665) and GPS IFD (34853). Default `true`.
     pub embed_exif: bool,
+    /// Embed `metadata.iptc` as tag 33723. Default `true`.
+    pub embed_iptc: bool,
     /// `Software` (tag 305) string. Default `None` (tag omitted).
     pub software: Option<String>,
     /// `XResolution` / `YResolution` / `ResolutionUnit` (282 / 283 /
@@ -207,6 +210,7 @@ impl Default for EncodeOptions {
             embed_icc: true,
             embed_xmp: true,
             embed_exif: true,
+            embed_iptc: true,
             software: None,
             resolution: None,
         }
@@ -270,6 +274,12 @@ impl EncodeOptions {
     /// Embed (or skip) the Exif / GPS IFDs.
     pub fn with_embed_exif(mut self, embed: bool) -> Self {
         self.embed_exif = embed;
+        self
+    }
+
+    /// Embed (or skip) the IPTC record stream.
+    pub fn with_embed_iptc(mut self, embed: bool) -> Self {
+        self.embed_iptc = embed;
         self
     }
 

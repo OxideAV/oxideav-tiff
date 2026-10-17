@@ -6,9 +6,10 @@
 //! §8 ASCII information fields (ImageDescription, Software, Artist, …),
 //! the resolution triple (XResolution / YResolution / ResolutionUnit),
 //! the page-level layout tags (Orientation, PageNumber, the two
-//! SubfileType flavours), and the two registered opaque payloads —
+//! SubfileType flavours), and the registered opaque payloads —
 //! the XMP packet (tag 700) and the embedded ICC profile (tag 34675),
-//! per `docs/image/tiff/tiff-icc-xmp-tags.md`. None of these steer
+//! per `docs/image/tiff/tiff-icc-xmp-tags.md`, plus the IPTC-IIM
+//! record stream (tag 33723). None of these steer
 //! pixel reconstruction, so they were previously discarded; exposing
 //! them lets a caller read back exactly what the encoder's
 //! [`crate::encoder::PageExtras`] wrote.
@@ -121,6 +122,10 @@ pub struct TiffMetadata {
     /// `Count` (a mismatch is malformed and drops the field, per the
     /// total-extraction rule).
     pub icc_profile: Option<Vec<u8>>,
+    /// IPTC-IIM record stream (tag 33723): the dataset bytes verbatim.
+    /// Accepted as BYTE or UNDEFINED, exactly like [`Self::xmp`]; the
+    /// payload is opaque to this crate.
+    pub iptc: Option<Vec<u8>>,
 }
 
 /// Raw structural / codec tags describing *how* the image is stored —
@@ -245,7 +250,8 @@ fn rational(e: &Entry, bo: ByteOrder) -> Option<(u32, u32)> {
     }
 }
 
-/// Extract an opaque byte payload (XMP packet / ICC profile) verbatim.
+/// Extract an opaque byte payload (XMP packet / ICC profile / IPTC
+/// record stream) verbatim.
 ///
 /// Per `docs/image/tiff/tiff-icc-xmp-tags.md` §4: accept both BYTE (1)
 /// and UNDEFINED (7) — each is a 1-byte opaque element, so `Count` is
@@ -341,5 +347,6 @@ pub fn extract_metadata(entries: &[Entry], bo: ByteOrder) -> TiffMetadata {
 
         xmp: opaque_bytes(entries, TAG_XMP),
         icc_profile: icc_profile(entries),
+        iptc: opaque_bytes(entries, TAG_IPTC),
     }
 }

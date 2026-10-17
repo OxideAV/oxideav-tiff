@@ -218,6 +218,12 @@ pub struct PageExtras<'a> {
     /// (that size "is the authoritative payload length; treat a
     /// mismatch as malformed"). At most one per IFD.
     pub icc_profile: Option<&'a [u8]>,
+    /// Write an IPTC-IIM record stream (tag 33723, type UNDEFINED × N)
+    /// — the `1C 02 …` dataset bytes, stored verbatim as an opaque
+    /// payload exactly like [`Self::xmp`] (`Count` is the exact byte
+    /// length; the file's byte order never applies). Must be
+    /// non-empty. The crate does not interpret the datasets.
+    pub iptc: Option<&'a [u8]>,
     /// Split the image into strips of this many rows (TIFF 6.0
     /// §"RowsPerStrip"; the spec recommends strips of about 8K bytes
     /// so readers can stream). `None` keeps the historical
@@ -3270,6 +3276,23 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
             inline_threshold,
             &mut externals,
         )?);
+    }
+    // 33723 IPTC-IIM record stream (UNDEFINED × N) — an opaque payload
+    // stored verbatim like the XMP packet; sits between 33432
+    // (Copyright) and 34665 (Exif IFD pointer) in ascending order.
+    if let Some(records) = p.extras.iptc {
+        if records.is_empty() {
+            return Err(Error::invalid(
+                "TIFF encode: IPTC record stream (tag 33723) must be non-empty",
+            ));
+        }
+        entries.push(opaque_entry(
+            TAG_IPTC,
+            TYPE_UNDEFINED,
+            records,
+            inline_threshold,
+            &mut externals,
+        ));
     }
     // 34665 Exif IFD pointer / 34853 GPS IFD pointer (LONG / LONG8) —
     // offsets of the auxiliary child IFDs planned below, resolved at

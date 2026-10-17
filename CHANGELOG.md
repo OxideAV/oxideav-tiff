@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- IPTC-IIM record stream carriage (tag 33723): `Metadata::iptc` /
+  `with_iptc`, `TiffMetadata::iptc`, `PageExtras::iptc`,
+  `EncodeOptions::embed_iptc` / `with_embed_iptc`, `ImageInfo::has_iptc`,
+  `TAG_IPTC`. Read from BYTE or UNDEFINED entries verbatim, written as
+  UNDEFINED between Copyright and the Exif pointer; an empty payload is
+  `InvalidData`.
+
 ## [0.0.9](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.8...v0.0.9) - 2026-10-05
 
 ### Other

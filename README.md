@@ -160,13 +160,15 @@ other malformed layout tag is already an error in both modes.
 `TiffCompression::Jpeg(JpegOptions)`), `predictor` (§14 horizontal
 differencing), `planar` (`PlanarConfiguration = 2`), `tiling`
 (`(TileWidth, TileLength)`, multiples of 16), `rows_per_strip`,
-`bigtiff`, `embed_icc` / `embed_xmp` / `embed_exif` (default `true`),
+`bigtiff`, `embed_icc` / `embed_xmp` / `embed_exif` / `embed_iptc`
+(default `true`),
 `software` (tag 305), `resolution` (`PageResolution`).
 
 ## Metadata and colour
 
 `TiffImage::metadata` carries the ICC profile (tag 34675, verbatim),
-the XMP packet (tag 700, verbatim) and `exif`: the page's Exif IFD
+the XMP packet (tag 700, verbatim), the IPTC-IIM record stream (tag
+33723, verbatim) and `exif`: the page's Exif IFD
 (34665) and GPS IFD (34853) re-serialised as one little-endian Exif
 TIFF payload (IFD0 holding the two pointer tags, child entries copied
 with their values re-laid out; IFD-typed pointers such as
@@ -758,7 +760,7 @@ return a `Page` whose `metadata: TiffMetadata` and
 | Resolution | XResolution (282), YResolution (283) as raw `(num, den)` RATIONALs; ResolutionUnit (296) | `Option<(u32, u32)>` / `Option<ResolutionUnit>` |
 | Page structure | Orientation (274), PageNumber (297), NewSubfileType (254), SubfileType (255) | `Option<u16>` / `Option<(u16, u16)>` / `Option<u32>` |
 | Format (`TiffFormatInfo`) | PhotometricInterpretation (262), Compression (259), BitsPerSample (258), SamplesPerPixel (277), PlanarConfiguration (284), Predictor (317), FillOrder (266), SampleFormat (339), tiled-vs-stripped layout (TileWidth/Length 322/323 or RowsPerStrip 278) | raw tag codes / `Vec<u16>` / `bool` / `Option<(u32, u32)>` |
-| Registered opaque payloads | XMP packet (700), embedded ICC profile / InterColorProfile (34675) | `Option<Vec<u8>>` each, byte-for-byte |
+| Registered opaque payloads | XMP packet (700), embedded ICC profile / InterColorProfile (34675), IPTC-IIM record stream (33723) | `Option<Vec<u8>>` each, byte-for-byte |
 
 Extraction is **total**: a malformed informational entry (wrong field
 type, truncated RATIONAL, out-of-range enum, over-long / unterminated /
@@ -794,6 +796,18 @@ BigTIFF, strip/tile/planar layouts and per page of a multi-page chain;
 black-box interop (`tests/icc_xmp_blackbox.rs`) proves both directions
 against `magick`, `tiffcp` and `tiffdump` as opaque validator
 processes.
+
+#### IPTC record stream (33723)
+
+Tag 33723 carries the IPTC-IIM dataset stream (`1C <record> <dataset>
+<len> …`) as an opaque byte string — the same carriage as the XMP
+packet: decode accepts BYTE or UNDEFINED, `Count` is the exact payload
+length, the bytes are surfaced verbatim in `TiffMetadata::iptc` /
+`Metadata::iptc` and never byte-swapped; encode writes
+`PageExtras::iptc` / `Metadata::iptc` as UNDEFINED between Copyright
+(33432) and the Exif pointer (34665), refusing an empty payload. The
+datasets are not interpreted. `tests/iptc_roundtrip.rs` pins the
+round-trip, both field types, the ordering and a `tiffdump` listing.
 
 ### Encode
 

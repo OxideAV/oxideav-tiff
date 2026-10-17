@@ -215,6 +215,15 @@ pub const TAG_XMP: u16 = 700;
 /// independent of the enclosing file's `II`/`MM` order — the payload
 /// is copied verbatim, never byte-swapped.
 pub const TAG_ICC_PROFILE: u16 = 34675;
+/// IPTC-IIM metadata (tag 33723 / 0x83BB): the IPTC Information
+/// Interchange Model record stream (`1C 02 …` datasets) stored as an
+/// opaque byte string, the payload form the framework's
+/// `BlobKind::IPTC` convention names. Written as type UNDEFINED
+/// (readers accept BYTE); `Count` is the exact payload byte length and
+/// the bytes are copied verbatim — the TIFF `II`/`MM` byte order never
+/// applies to them. The tag number is a registered-identifier fact;
+/// the record stream itself is opaque to this crate.
+pub const TAG_IPTC: u16 = 33723;
 
 /// Byte length of the fixed ICC.1 profile header that starts every
 /// embedded profile (size field at +0, `acsp` signature at +36, tag

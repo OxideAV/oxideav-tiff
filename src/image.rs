@@ -275,13 +275,16 @@ impl Default for ColorInfo {
 }
 
 /// The metadata blobs every image crate surfaces: an ICC profile, an
-/// Exif payload, an XMP packet and a file gamma. TIFF sources them
-/// from the ICC profile tag (34675), the Exif IFD (34665, plus the GPS
-/// IFD 34853) re-serialised as a standalone Exif TIFF payload, and the
-/// XMP packet tag (700); TIFF has no gamma tag (its §20
-/// `TransferFunction` is a table), so `gamma` is always `None` on
-/// decode. The full TIFF 6.0 §8 descriptive field set is on
-/// [`TiffMetadata`] (through [`Page`] / [`crate::decode_page`]).
+/// Exif payload, an XMP packet, an IPTC record stream and a file
+/// gamma. TIFF sources them from the ICC profile tag (34675), the Exif
+/// IFD (34665, plus the GPS IFD 34853) re-serialised as a standalone
+/// Exif TIFF payload, the XMP packet tag (700) and the IPTC tag
+/// (33723); TIFF has no gamma tag (its §20 `TransferFunction` is a
+/// table), so `gamma` is always `None` on decode. The full TIFF 6.0 §8
+/// descriptive field set is on [`TiffMetadata`] (through [`Page`] /
+/// [`crate::decode_page`]). With the `registry` feature the same four
+/// payloads travel as framework `MetadataBlob`s
+/// ([`crate::metadata_to_blobs`] / [`crate::metadata_from_blobs`]).
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Metadata {
@@ -297,6 +300,9 @@ pub struct Metadata {
     /// File gamma. TIFF carries none; always `None` after decode and
     /// ignored on encode.
     pub gamma: Option<f32>,
+    /// IPTC-IIM record stream (tag 33723, the `1C 02 …` datasets,
+    /// verbatim).
+    pub iptc: Option<Vec<u8>>,
 }
 
 impl Metadata {
@@ -329,9 +335,19 @@ impl Metadata {
         self
     }
 
+    /// Set (or clear) the IPTC record stream.
+    pub fn with_iptc(mut self, iptc: impl Into<Option<Vec<u8>>>) -> Self {
+        self.iptc = iptc.into();
+        self
+    }
+
     /// `true` when no field is set.
     pub fn is_empty(&self) -> bool {
-        self.icc.is_none() && self.exif.is_none() && self.xmp.is_none() && self.gamma.is_none()
+        self.icc.is_none()
+            && self.exif.is_none()
+            && self.xmp.is_none()
+            && self.gamma.is_none()
+            && self.iptc.is_none()
     }
 }
 
@@ -408,7 +424,7 @@ pub struct TiffImage {
     pub planes: Vec<Plane>,
     /// Colour signalling (range + H.273 code points).
     pub color: ColorInfo,
-    /// ICC / Exif / XMP / gamma.
+    /// ICC / Exif / XMP / IPTC / gamma.
     pub metadata: Metadata,
     /// Colour table for `Pal8`.
     pub palette: Option<Palette>,
@@ -938,6 +954,8 @@ pub struct ImageInfo {
     pub has_exif: bool,
     /// An XMP packet (tag 700) is present.
     pub has_xmp: bool,
+    /// An IPTC record stream (tag 33723) is present.
+    pub has_iptc: bool,
     /// `BitsPerSample` of the first sample as stored (1 / 4 / 8 / 12 /
     /// 16 / 32 / 64).
     pub bits_per_sample: u16,

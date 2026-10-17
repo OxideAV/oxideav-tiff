@@ -68,6 +68,7 @@ pub fn info(bytes: &[u8]) -> Result<ImageInfo> {
         has_icc: md.icc_profile.is_some(),
         has_exif: find(entries, TAG_EXIF_IFD).is_some() || find(entries, TAG_GPS_IFD).is_some(),
         has_xmp: md.xmp.is_some(),
+        has_iptc: md.iptc.is_some(),
         bits_per_sample: layout.bits_per_sample,
         samples_per_pixel: layout.samples_per_pixel,
         photometric: layout.photometric,
@@ -424,6 +425,11 @@ impl<'i> PreparedPage<'i> {
             },
             icc_profile: if opts.embed_icc {
                 image.metadata.icc.as_deref()
+            } else {
+                None
+            },
+            iptc: if opts.embed_iptc {
+                image.metadata.iptc.as_deref()
             } else {
                 None
             },
