@@ -31,6 +31,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stream's geometry (`pts` = page index; every page without a geometry),
   so every frame's label is truthful. Previously only the first page was
   decoded.
+- `ACCEPTED_PIXEL_FORMATS`: the registry encoder declares its nine input
+  layouts on `CodecCapabilities::accepted_pixel_formats` (ladder order);
+  `make_encoder` refuses undeclared layouts and the layout × scheme
+  pairs the writer cannot code with a typed `Unsupported` before the
+  first frame.
+
+### Changed
+
+- **`quality` governs JPEG-in-TIFF only.** The registry encoder's
+  `quality` option (0..=100) no longer switches the compression to JPEG:
+  with `compression = jpeg` it sets the DCT quantiser scale (`1..=99`),
+  selects the lossless `SOF3` process at `100`, and is ignored by every
+  other scheme — in any option order (a `quality` given before
+  `compression` used to be lost). `EncodeOptions`' own schema `apply`
+  follows the same rule.
 
 ## [0.0.9](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.8...v0.0.9) - 2026-10-05
 

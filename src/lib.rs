@@ -252,5 +252,5 @@ pub use registry::register_into;
 pub use registry::{
     __oxideav_entry, from_color_signal, make_decoder, make_encoder, merge_blobs,
     metadata_from_blobs, metadata_to_blobs, register, register_codecs, register_containers,
-    to_color_signal, TiffDecoder, TiffEncoder,
+    to_color_signal, TiffDecoder, TiffEncoder, ACCEPTED_PIXEL_FORMATS,
 };

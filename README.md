@@ -90,7 +90,37 @@ specified `ColorInfo` as its colour-signal side-channel, and the
 image's metadata as the frame's blobs record. The
 encoder's options schema (`compression`, `quality`, `predictor`,
 `planar`, `tile`, `rows_per_strip`, `bigtiff`) maps onto
-`EncodeOptions`.
+`EncodeOptions`; `quality` (0..=100) is the framework's advisory knob
+and governs JPEG-in-TIFF only — `1..=99` the DCT quantiser scale,
+`100` the lossless `SOF3` process, `0` the lowest DCT quality — in any
+option order; every other scheme is lossless and ignores it (it never
+switches the scheme).
+
+**Declared layouts:** the registry encoder declares exactly the nine
+layouts it codes on `CodecCapabilities::accepted_pixel_formats`
+(`ACCEPTED_PIXEL_FORMATS`, ladder order: `Rgb24`, `Rgba`, `Rgb48Le`,
+`RgbF32Le`, `Cmyk`, `Pal8`, `Gray8`, `Gray16Le`, `GrayF32Le`), writes
+each as itself with the output label equal to the input, and refuses
+anything else — and every layout × scheme pair the writer cannot code
+(WebP with anything but `Rgb24` / `Rgba`; JPEG with `Pal8` / `Rgba` /
+float, or with `Gray16Le` / `Rgb48Le` under the DCT process) — with a
+typed `Unsupported` from `make_encoder`, never a silent conversion. A
+`Pal8` frame whose palette-alpha record has a transparent entry is
+refused the same way (a TIFF `ColorMap` holds no alpha).
+
+| Declared input | Written as | Schemes |
+|---|---|---|
+| `Rgb24` | RGB, 8-bit | all; WebP; JPEG (DCT / lossless) |
+| `Rgba` | RGB + `ExtraSamples = [2]` | all; WebP |
+| `Rgb48Le` | RGB, 16-bit | all; JPEG lossless (`quality = 100`) |
+| `RgbF32Le` | RGB, `SampleFormat = 3`, 32-bit | all |
+| `Cmyk` | `PhotometricInterpretation = 5` | all; JPEG |
+| `Pal8` | `PhotometricInterpretation = 3` + `ColorMap` | all |
+| `Gray8` | `PhotometricInterpretation = 1`, 8-bit | all; JPEG |
+| `Gray16Le` | `PhotometricInterpretation = 1`, 16-bit | all; JPEG lossless |
+| `GrayF32Le` | `PhotometricInterpretation = 1`, `SampleFormat = 3` | all |
+
+("all" = `none` / `packbits` / `lzw` / `deflate` / `zstd`.)
 
 **Metadata blobs** (core 0.1.40 `oxideav_core::blob`): the four
 payloads TIFF carries are framework `MetadataBlob`s —

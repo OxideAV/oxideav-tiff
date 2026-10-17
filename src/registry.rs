@@ -322,6 +322,63 @@ impl TryFrom<(&VideoFrame, &CodecParameters)> for TiffImage {
 
 // ---- CodecOptionsStruct (registry-only schema for EncodeOptions) ------------
 
+/// The framework's advisory `quality` (0..=100) onto a JPEG-in-TIFF
+/// scheme: `1..=99` is the DCT quantiser scale, `100` the lossless
+/// `SOF3` process (predictor 1), `0` the lowest DCT quality. Any other
+/// compression scheme is lossless already and ignores it — the
+/// option never switches the scheme.
+fn apply_quality(opts: &mut EncodeOptions, quality: u8) {
+    if let TiffCompression::Jpeg(ref mut j) = opts.compression {
+        if quality >= 100 {
+            j.process = crate::JpegProcess::Lossless { predictor: 1 };
+        } else {
+            j.quality = quality.max(1);
+            j.process = crate::JpegProcess::Dct;
+        }
+    }
+}
+
+/// The registry encoder's option bag: [`EncodeOptions`] plus the
+/// framework's advisory `quality`, applied after every other option so
+/// `{"quality": "90", "compression": "jpeg"}` and the reverse order
+/// resolve alike ([`resolve`](Self::resolve)). Same schema as
+/// [`EncodeOptions`].
+// internal — the factory's parse target; not part of the stable API
+#[doc(hidden)]
+#[derive(Debug, Clone, Default)]
+pub struct RegistryEncodeOptions {
+    pub inner: EncodeOptions,
+    pub quality: Option<u8>,
+}
+
+impl RegistryEncodeOptions {
+    /// The resolved [`EncodeOptions`].
+    pub fn resolve(mut self) -> EncodeOptions {
+        if let Some(q) = self.quality {
+            apply_quality(&mut self.inner, q);
+        }
+        self.inner
+    }
+}
+
+impl CodecOptionsStruct for RegistryEncodeOptions {
+    const SCHEMA: &'static [OptionField] = <EncodeOptions as CodecOptionsStruct>::SCHEMA;
+
+    fn apply(&mut self, key: &str, value: &OptionValue) -> Result<()> {
+        if key == "quality" {
+            let q = value.as_u32()?;
+            if q > 100 {
+                return Err(Error::invalid(format!(
+                    "TIFF encoder: quality {q} out of 0..=100"
+                )));
+            }
+            self.quality = Some(q as u8);
+            return Ok(());
+        }
+        self.inner.apply(key, value)
+    }
+}
+
 impl CodecOptionsStruct for EncodeOptions {
     const SCHEMA: &'static [OptionField] = &[
         OptionField {
@@ -336,7 +393,9 @@ impl CodecOptionsStruct for EncodeOptions {
             name: "quality",
             kind: OptionKind::U32,
             default: OptionValue::U32(75),
-            help: "JPEG-in-TIFF quality 1..=100 (only with compression = jpeg).",
+            help: "Advisory quality 0..=100: governs JPEG-in-TIFF only (compression = jpeg; \
+                   1..=99 = the DCT quantiser scale, 100 = the lossless SOF3 process); \
+                   ignored by every other scheme, in any option order.",
         },
         OptionField {
             name: "predictor",
@@ -398,19 +457,14 @@ impl CodecOptionsStruct for EncodeOptions {
             }
             "quality" => {
                 let q = value.as_u32()?;
-                if !(1..=100).contains(&q) {
+                if q > 100 {
                     return Err(Error::invalid(format!(
-                        "TIFF encoder: quality {q} out of 1..=100"
+                        "TIFF encoder: quality {q} out of 0..=100"
                     )));
                 }
-                if let TiffCompression::Jpeg(ref mut j) = self.compression {
-                    j.quality = q as u8;
-                } else {
-                    self.compression = TiffCompression::Jpeg(crate::JpegOptions {
-                        quality: q as u8,
-                        ..Default::default()
-                    });
-                }
+                // Advisory: governs JPEG-in-TIFF only, never switches
+                // the compression scheme (see `apply_quality`).
+                apply_quality(self, q as u8);
             }
             "predictor" => self.predictor = value.as_bool()?,
             "planar" => self.planar = value.as_bool()?,
@@ -431,30 +485,38 @@ impl CodecOptionsStruct for EncodeOptions {
 
 // ---- Registration -------------------------------------------------------------
 
+/// The input layouts the registry encoder codes, in the ladder's
+/// order (the closest colour rung first, then the other colour
+/// families, grey last): every one is written as itself — see
+/// [`TiffPixelFormat`] — and anything else is a typed `Unsupported`
+/// refusal from [`make_encoder`], never a silent conversion.
+pub const ACCEPTED_PIXEL_FORMATS: [PixelFormat; 9] = [
+    PixelFormat::Rgb24,
+    PixelFormat::Rgba,
+    PixelFormat::Rgb48Le,
+    PixelFormat::RgbF32Le,
+    PixelFormat::Cmyk,
+    PixelFormat::Pal8,
+    PixelFormat::Gray8,
+    PixelFormat::Gray16Le,
+    PixelFormat::GrayF32Le,
+];
+
 /// Register the TIFF codec (decoder + encoder) into the supplied
-/// [`CodecRegistry`].
+/// [`CodecRegistry`]. The capabilities declare
+/// [`ACCEPTED_PIXEL_FORMATS`] as the encoder's accepted set.
 pub fn register_codecs(reg: &mut CodecRegistry) {
     let caps = CodecCapabilities::video("tiff_sw")
         .with_intra_only(true)
         .with_lossless(true)
         .with_max_size(65535, 65535)
-        .with_pixel_formats(vec![
-            PixelFormat::Rgb24,
-            PixelFormat::Rgba,
-            PixelFormat::Rgb48Le,
-            PixelFormat::Gray8,
-            PixelFormat::Gray16Le,
-            PixelFormat::Pal8,
-            PixelFormat::Cmyk,
-            PixelFormat::GrayF32Le,
-            PixelFormat::RgbF32Le,
-        ]);
+        .with_pixel_formats(ACCEPTED_PIXEL_FORMATS.to_vec());
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_STR))
             .capabilities(caps)
             .decoder(make_decoder)
             .encoder(make_encoder)
-            .encoder_options::<EncodeOptions>(),
+            .encoder_options::<RegistryEncodeOptions>(),
     );
 }
 
@@ -642,7 +704,7 @@ impl Decoder for TiffDecoder {
 /// stream's `params.blobs` are written into every page, overridden
 /// per kind by the blobs on a frame's own record ([`merge_blobs`]).
 pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
-    let opts = parse_options::<EncodeOptions>(&params.options)?;
+    let opts = parse_options::<RegistryEncodeOptions>(&params.options)?.resolve();
     let width = params
         .width
         .ok_or_else(|| Error::invalid("TIFF encoder: missing width"))?;
@@ -650,7 +712,8 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         .height
         .ok_or_else(|| Error::invalid("TIFF encoder: missing height"))?;
     let pix_core = params.pixel_format.unwrap_or(PixelFormat::Rgb24);
-    TiffPixelFormat::try_from(pix_core)?;
+    let pix = TiffPixelFormat::try_from(pix_core)?;
+    check_layout_scheme(pix, &opts.compression)?;
 
     let mut output_params = params.clone();
     output_params.media_type = MediaType::Video;
@@ -665,6 +728,42 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         pending: std::collections::VecDeque::new(),
         eof: false,
     }))
+}
+
+/// The layout × scheme pairs the writer refuses, refused up front with
+/// a typed `Unsupported` (the writer's own message would only come
+/// with the first frame): WebP (50001) codes 8-bit chunky RGB / RGBA
+/// only; JPEG-in-TIFF (7) codes greyscale / RGB / CMYK — 8-bit under
+/// either process, 16-bit under the lossless process only — never
+/// palette, alpha or float pages.
+fn check_layout_scheme(pix: TiffPixelFormat, scheme: &TiffCompression) -> Result<()> {
+    let refuse = |why: &str| {
+        Err(Error::unsupported(format!(
+            "TIFF encoder: {pix:?} cannot be written with {why}; accepted: {}",
+            match scheme {
+                TiffCompression::Webp => "Rgb24 / Rgba",
+                _ => "Gray8 / Rgb24 / Cmyk (DCT or lossless), Gray16Le / Rgb48Le (lossless)",
+            }
+        )))
+    };
+    match scheme {
+        TiffCompression::Webp if !matches!(pix, TiffPixelFormat::Rgb24 | TiffPixelFormat::Rgba) => {
+            refuse("WebP-in-TIFF (Compression = 50001)")
+        }
+        TiffCompression::Jpeg(j) => match pix {
+            TiffPixelFormat::Gray8 | TiffPixelFormat::Rgb24 | TiffPixelFormat::Cmyk => Ok(()),
+            TiffPixelFormat::Gray16Le | TiffPixelFormat::Rgb48Le
+                if matches!(j.process, crate::JpegProcess::Lossless { .. }) =>
+            {
+                Ok(())
+            }
+            TiffPixelFormat::Gray16Le | TiffPixelFormat::Rgb48Le => {
+                refuse("the JPEG-in-TIFF DCT process (16-bit input needs quality 100 / the lossless process)")
+            }
+            _ => refuse("JPEG-in-TIFF (Compression = 7)"),
+        },
+        _ => Ok(()),
+    }
 }
 
 /// TIFF `Encoder` trait impl: every video frame becomes one packet
