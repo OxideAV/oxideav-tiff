@@ -47,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairs the writer cannot code with a typed `Unsupported` before the
   first frame.
 
+- Fuzz target `registry_encode` (the registry encoder over hostile
+  blobs / option bags, then the decoder, demuxer and muxer merge over
+  its output); `decode` now also drives the demuxer's streams and the
+  registry decoder. Both ran ≥ 10 minutes without a finding.
+
 ### Changed
 
 - **`quality` governs JPEG-in-TIFF only.** The registry encoder's

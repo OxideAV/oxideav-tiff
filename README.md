@@ -1392,8 +1392,17 @@ remaining gaps are:
 
 ## Fuzzing
 
-Two `cargo-fuzz` targets live under `fuzz/fuzz_targets/`:
-`decode.rs` (arbitrary bytes through every public decoder surface) and
+Three `cargo-fuzz` targets live under `fuzz/fuzz_targets/`:
+`decode.rs` (arbitrary bytes through every public decoder surface, the
+demuxer's geometry-grouped streams and the registry decoder's one
+frame per page), `registry_encode.rs` (the registry seam: the input
+steers the framework encoder's layout / scheme / quality option bag and
+supplies hostile metadata blobs on the stream and the frame record —
+an Exif block the encoder parses into child IFDs, an ICC profile whose
+size field it checks, XMP / IPTC it copies, a palette-alpha record —
+and whatever it writes must decode through the registry decoder, the
+demuxer and the muxer's multi-packet merge, which is also fed the raw
+input as a hostile packet) and
 `jpeg_roundtrip.rs` (the JPEG-in-TIFF writer → reader pair: the input
 steers `TiffCompression::Jpeg`'s configuration and raster; every file
 the writer produces must decode — lossless sample-exact — a one-byte
@@ -1419,7 +1428,13 @@ Run with nightly + cargo-fuzz:
 
 ```sh
 cargo +nightly fuzz run decode -- -max_total_time=60
+cargo +nightly fuzz run registry_encode -- -max_total_time=60
 ```
+
+Round 477 ran `decode` (541 k runs) and `registry_encode` (162 k runs
+over two sessions, one at full input length) for ten minutes each
+after the blob / multi-page / muxer work landed; neither found a
+crash.
 
 The harness has caught and pinned several panic vectors as regression
 tests: an LZW first-after-Clear non-leaf code forming a self-referential

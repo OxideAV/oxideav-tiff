@@ -41,6 +41,9 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+# The registry targets build frames / parameters / blobs with the
+# framework types the crate's `registry` feature adapts.
+oxideav-core = "0.1"
 
 [dependencies.oxideav-tiff]
 path = ".."
@@ -78,5 +81,18 @@ doc = false
 [[bin]]
 name = "jpeg_roundtrip"
 path = "fuzz_targets/jpeg_roundtrip.rs"
+test = false
+doc = false
+
+# Registry seam: arbitrary bytes steer the framework encoder (layout,
+# scheme, quality, hostile metadata blobs — an Exif block the encoder
+# must parse into child IFDs, an ICC profile whose size field it
+# checks, XMP / IPTC it copies, a palette-alpha record) and whatever it
+# writes must decode through the registry decoder, the demuxer and the
+# multi-packet muxer merge; the muxer merge is also fed the raw bytes
+# as a hostile packet.
+[[bin]]
+name = "registry_encode"
+path = "fuzz_targets/registry_encode.rs"
 test = false
 doc = false

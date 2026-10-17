@@ -55,7 +55,10 @@
 //! controls its own input runs and is exercised through the
 //! crate-local roundtrip tests.
 
+use std::io::Cursor;
+
 use libfuzzer_sys::fuzz_target;
+use oxideav_core::{CodecId, CodecParameters, CodecRegistry, Packet, PixelFormat, TimeBase};
 use oxideav_tiff::compress::{unpack_deflate, unpack_lzw, unpack_packbits, unpack_zstd};
 use oxideav_tiff::ifd::{parse_header, parse_ifd};
 use oxideav_tiff::metadata::{extract_format_info, extract_metadata};
@@ -134,6 +137,54 @@ fuzz_target!(|data: &[u8]| {
         // file whose first IFD overlaps the header is malformed but
         // must not panic the parser.
         let _ = parse_ifd(data, hdr.byte_order, hdr.variant, 0);
+    }
+
+    // -----------------------------------------------------------------
+    // 2b. The registry seam: the demuxer groups the IFD chain into one
+    //     stream per page geometry (every page's metadata becomes
+    //     stream blobs — ICC size check, Exif child-IFD re-serialise,
+    //     XMP / IPTC copies), and the codec decoder returns one frame
+    //     per page of its stream's geometry, lazily, each with its own
+    //     blobs record. Drive the demuxer's streams through their own
+    //     decoders, then a bare decoder (every page) and one with a
+    //     geometry no page has (fallback to every page).
+    // -----------------------------------------------------------------
+    let codecs = CodecRegistry::new();
+    let mut params: Vec<CodecParameters> = Vec::new();
+    if let Ok(mut dmx) =
+        oxideav_tiff::container::open_demuxer(Box::new(Cursor::new(data.to_vec())), &codecs)
+    {
+        let _ = dmx.metadata();
+        let _ = dmx.attachments();
+        params.extend(dmx.streams().iter().map(|s| s.params.clone()));
+        while let Ok(pkt) = dmx.next_packet() {
+            if let Some(p) = params.get(pkt.stream_index as usize) {
+                if let Ok(mut dec) = oxideav_tiff::make_decoder(p) {
+                    if dec.send_packet(&pkt).is_ok() {
+                        while dec.receive_frame().is_ok() {}
+                    }
+                    let _ = dec.flush();
+                    let _ = dec.receive_frame();
+                }
+            }
+        }
+    }
+    let mut bare = CodecParameters::video(CodecId::new("tiff"));
+    let mut odd = bare.clone();
+    odd.width = Some(u32::MAX);
+    odd.height = Some(1);
+    odd.pixel_format = Some(PixelFormat::Cmyk);
+    bare.limits.max_pixels_per_frame = 1 << 16;
+    for p in [&bare, &odd] {
+        if let Ok(mut dec) = oxideav_tiff::make_decoder(p) {
+            let mut pkt = Packet::new(0, TimeBase::new(1, 1), data.to_vec());
+            pkt.pts = Some(i64::MAX - 1);
+            if dec.send_packet(&pkt).is_ok() {
+                while let Ok(oxideav_core::Frame::Video(v)) = dec.receive_frame() {
+                    let _ = v.blobs();
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------
