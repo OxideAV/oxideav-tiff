@@ -1,14 +1,22 @@
-//! TIFF container: a single TIFF file becomes one [`Packet`] on
-//! stream `0`. Width / height / pixel-format are pulled from the
-//! first IFD up-front so callers that read `StreamInfo` before
-//! seeing any frames get accurate metadata.
+//! TIFF container: the demuxer declares one video stream per distinct
+//! page geometry (`width × height × layout` after `Orientation`, in
+//! first-appearance order on the IFD chain — a single-page or uniform
+//! multi-page file is exactly one stream) and hands the whole file to
+//! each stream as its single [`Packet`]; the codec decoder returns the
+//! pages of its stream's geometry (see [`crate::make_decoder`]). Width
+//! / height / pixel-format are pulled from the IFDs up-front so callers
+//! that read `StreamInfo` before seeing any frames get accurate,
+//! truthful labels for every page.
 //!
-//! Container-level metadata surfaces through the core `Demuxer`
-//! accessors: the TIFF 6.0 §8 ASCII descriptive fields of the first
-//! IFD become flat `metadata()` key/value pairs, and the registered
-//! opaque payloads — the embedded ICC profile (tag 34675) and the
-//! XMP packet (tag 700), per `docs/image/tiff/tiff-icc-xmp-tags.md` —
-//! become structured `attachments()` carrying the raw bytes verbatim.
+//! Metadata: each stream's `CodecParameters::blobs` carry the first
+//! page of its geometry's ICC profile (tag 34675) / Exif block / XMP
+//! packet (tag 700) / IPTC record stream (tag 33723) as framework
+//! blobs ([`crate::metadata_to_blobs`]); every decoded page carries
+//! its own on the frame record. The pre-blob surfaces stay: the TIFF
+//! 6.0 §8 ASCII descriptive fields of the first IFD are flat
+//! `metadata()` key/value pairs, and the first IFD's ICC profile / XMP
+//! packet are also structured `attachments()` (raw bytes verbatim, per
+//! `docs/image/tiff/tiff-icc-xmp-tags.md`).
 //!
 //! The muxer writes one packet (a complete single-page TIFF file, as
 //! the codec encoder produces) verbatim; several packets are
@@ -25,8 +33,11 @@ use oxideav_core::{
     ContainerRegistry, Demuxer, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek, MAX_PROBE_SCORE,
 };
 
-use crate::ifd::{parse_header, parse_ifd};
+use crate::decoder::ifd_chain;
+use crate::ifd::parse_header;
+use crate::image::Metadata;
 use crate::metadata::extract_metadata;
+use crate::registry::{metadata_to_blobs, page_geometry};
 
 pub fn register(reg: &mut ContainerRegistry) {
     reg.register_demuxer("tiff", open_demuxer);
@@ -59,36 +70,53 @@ pub fn open_demuxer(
     let mut buf = Vec::new();
     input.read_to_end(&mut buf)?;
     let header = parse_header(&buf)?;
-    let (entries, _next) = parse_ifd(
-        &buf,
-        header.byte_order,
-        header.variant,
-        header.first_ifd_offset,
-    )?;
+    let chain = ifd_chain(&buf, &header)?;
     let bo = header.byte_order;
+    let entries = &chain[0];
 
-    // The stream parameters are exactly what the standalone `info`
-    // reports: the layout `decode` will hand back, after Orientation.
-    let info = crate::info(&buf)?;
-    let pf: PixelFormat = info.format.into();
-
-    let mut params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
-    params.width = Some(info.width);
-    params.height = Some(info.height);
-    params.pixel_format = Some(pf);
-    let stream = StreamInfo {
-        index: 0,
-        params,
-        time_base: TimeBase::new(1, 1),
-        start_time: Some(0),
-        duration: None,
-    };
+    // One stream per distinct page geometry — the layout `decode`
+    // hands back, after Orientation — in first-appearance order. The
+    // first page must resolve (as `info` requires); a later page whose
+    // layout the decoder does not support is left out of every stream.
+    let mut streams: Vec<StreamInfo> = Vec::new();
+    let mut geometries: Vec<(u32, u32, PixelFormat)> = Vec::new();
+    for (i, page) in chain.iter().enumerate() {
+        let g = match page_geometry(page, bo) {
+            Ok(g) => g,
+            Err(e) if i == 0 => return Err(e.into()),
+            Err(_) => continue,
+        };
+        if geometries.contains(&g) {
+            continue;
+        }
+        geometries.push(g);
+        let mut params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
+        params.width = Some(g.0);
+        params.height = Some(g.1);
+        params.pixel_format = Some(g.2);
+        // The first page of the geometry lends the stream its blobs.
+        let md = extract_metadata(page, bo);
+        params.blobs = metadata_to_blobs(&Metadata {
+            icc: md.icc_profile,
+            exif: crate::exif::extract_exif_payload(&buf, &header, page),
+            xmp: md.xmp,
+            gamma: None,
+            iptc: md.iptc,
+        });
+        streams.push(StreamInfo {
+            index: streams.len() as u32,
+            params,
+            time_base: TimeBase::new(1, 1),
+            start_time: Some(0),
+            duration: None,
+        });
+    }
 
     // Container-level metadata from the first IFD: the §8 ASCII
     // descriptive fields become flat key/value pairs, the ICC / XMP
     // payloads become structured attachments. Extraction is total, so
     // malformed informational tags simply produce fewer entries.
-    let md = extract_metadata(&entries, bo);
+    let md = extract_metadata(entries, bo);
     let mut metadata: Vec<(String, String)> = Vec::new();
     for (key, value) in [
         ("document_name", &md.document_name),
@@ -126,9 +154,11 @@ pub fn open_demuxer(
         });
     }
 
+    let remaining = (0..streams.len() as u32).collect();
     Ok(Box::new(TiffDemuxer {
-        streams: vec![stream],
-        data: Some(buf),
+        streams,
+        data: buf,
+        remaining,
         metadata,
         attachments,
     }))
@@ -136,8 +166,10 @@ pub fn open_demuxer(
 
 struct TiffDemuxer {
     streams: Vec<StreamInfo>,
-    /// `None` once the sole packet has been emitted.
-    data: Option<Vec<u8>>,
+    /// The whole file — every stream's single packet.
+    data: Vec<u8>,
+    /// Streams whose packet has not been emitted yet, in order.
+    remaining: std::collections::VecDeque<u32>,
     /// Flat §8 descriptive metadata from the first IFD.
     metadata: Vec<(String, String)>,
     /// ICC profile / XMP packet payloads from the first IFD.
@@ -152,16 +184,20 @@ impl Demuxer for TiffDemuxer {
         &self.streams
     }
     fn next_packet(&mut self) -> Result<Packet> {
-        match self.data.take() {
-            Some(bytes) => {
-                let mut pkt = Packet::new(0, TimeBase::new(1, 1), bytes);
-                pkt.pts = Some(0);
-                pkt.dts = Some(0);
-                pkt.flags.keyframe = true;
-                Ok(pkt)
-            }
-            None => Err(Error::Eof),
-        }
+        let Some(index) = self.remaining.pop_front() else {
+            return Err(Error::Eof);
+        };
+        // The last stream takes the buffer; earlier ones a copy.
+        let bytes = if self.remaining.is_empty() {
+            std::mem::take(&mut self.data)
+        } else {
+            self.data.clone()
+        };
+        let mut pkt = Packet::new(index, TimeBase::new(1, 1), bytes);
+        pkt.pts = Some(0);
+        pkt.dts = Some(0);
+        pkt.flags.keyframe = true;
+        Ok(pkt)
     }
     fn metadata(&self) -> &[(String, String)] {
         &self.metadata

@@ -85,10 +85,35 @@ ContainerRegistry)` install the two halves separately; `make_decoder` /
 `From<TiffImage> for VideoFrame`, `TiffImage::from_video_frame(&VideoFrame,
 &CodecParameters)` and `TryFrom<(&VideoFrame, &CodecParameters)>` bridge
 the two layers; `Pal8` travels with the frame's palette side-channel
-and a specified `ColorInfo` as its colour-signal side-channel. The
+(plus the palette-alpha record when an entry is not opaque), a
+specified `ColorInfo` as its colour-signal side-channel, and the
+image's metadata as the frame's blobs record. The
 encoder's options schema (`compression`, `quality`, `predictor`,
 `planar`, `tile`, `rows_per_strip`, `bigtiff`) maps onto
-`EncodeOptions`. JPEG-in-TIFF *decode* (`Compression = 7` / `6`) routes
+`EncodeOptions`.
+
+**Metadata blobs** (core 0.1.40 `oxideav_core::blob`): the four
+payloads TIFF carries are framework `MetadataBlob`s —
+`BlobKind::ICC` = tag 34675 (a complete profile), `BlobKind::EXIF` =
+the Exif + GPS IFDs as a TIFF-structured Exif block starting at the
+byte-order mark (`Metadata::exif`), `BlobKind::XMP` = tag 700,
+`BlobKind::IPTC` = tag 33723 — converted by `metadata_to_blobs` /
+`metadata_from_blobs`. The demuxer puts the first page of each stream's
+blobs on `CodecParameters::blobs`; the decoder attaches every page's
+own blobs to its frame record (pages differ); the encoder writes the
+union, a frame blob overriding a stream blob of the same kind
+(`merge_blobs`). Other kinds are ignored (TIFF has no tag for them);
+`SaveOptions`-level replacement is the gateway's job.
+
+**Multi-page files:** the demuxer declares one video stream per
+distinct page geometry (`width × height × layout` after `Orientation`,
+first-appearance order — a uniform multi-page file is one stream), each
+carrying the whole file as its single packet; the decoder of a stream
+returns the pages whose native layout equals the stream's declared one,
+one frame per page (`pts` = the page's position on the IFD chain), so
+every frame's label is truthful (a decoder built without a geometry
+returns every page). The first page must be decodable; a later page
+outside the decode table is left out of every stream. JPEG-in-TIFF *decode* (`Compression = 7` / `6`) routes
 through `oxideav-mjpeg` and therefore needs `registry`; everything else
 — including WebP-in-TIFF (`Compression = 50001`, via `oxideav-webp`'s
 framework-free surface) and the in-crate JPEG-in-TIFF *encoder* — works

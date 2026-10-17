@@ -15,6 +15,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TAG_IPTC`. Read from BYTE or UNDEFINED entries verbatim, written as
   UNDEFINED between Copyright and the Exif pointer; an empty payload is
   `InvalidData`.
+- **Metadata blobs through the registry** (core 0.1.40
+  `oxideav_core::blob`): `metadata_to_blobs` / `metadata_from_blobs` /
+  `merge_blobs`; the demuxer puts the first page of each stream's ICC /
+  Exif / XMP / IPTC on `CodecParameters::blobs`, the decoder attaches
+  every page's own blobs to its frame record, `From<TiffImage> for
+  VideoFrame` carries them (and the palette-alpha record for a
+  non-opaque palette), `TiffImage::from_video_frame` reads frame blobs
+  then stream blobs per kind, and the registry encoder writes the union
+  (frame overrides stream). Registry and standalone paths write
+  identical bytes for the same request.
+- **Multi-page files through the registry**: the demuxer declares one
+  stream per distinct page geometry (first-appearance order; uniform
+  files stay one stream), the decoder returns one frame per page of its
+  stream's geometry (`pts` = page index; every page without a geometry),
+  so every frame's label is truthful. Previously only the first page was
+  decoded.
 
 ## [0.0.9](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.8...v0.0.9) - 2026-10-05
 

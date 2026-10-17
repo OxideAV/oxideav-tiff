@@ -14,21 +14,52 @@
 //!   [`crate::decode_with`] / [`crate::encode`] (one implementation).
 //! * `From<TiffImage> for VideoFrame`, [`TiffImage::from_video_frame`]
 //!   and `TryFrom<(&VideoFrame, &CodecParameters)>` — the plane plus
-//!   the palette / colour-signal side-channels.
+//!   the palette / colour-signal / metadata-blobs side-channels.
+//! * [`metadata_to_blobs`] / [`metadata_from_blobs`] — the image's
+//!   ICC / Exif / XMP / IPTC as framework [`MetadataBlob`]s and back.
 //! * `From<TiffError> for oxideav_core::Error` and the
 //!   `CodecOptionsStruct` schema for [`EncodeOptions`].
+//!
+//! # Metadata blobs
+//!
+//! The four payloads TIFF carries travel on the framework's blob
+//! carriage (`oxideav_core::blob`): the demuxer puts the first page of
+//! each stream's blobs on `CodecParameters::blobs`, the decoder
+//! attaches every page's own blobs to its frame's record (pages
+//! differ), and the encoder writes the union — a frame blob overrides
+//! a stream blob of the same kind. The payload conventions match the
+//! kinds' definitions: a complete ICC profile (tag 34675), the Exif
+//! IFD + GPS IFD re-serialised as a TIFF-structured Exif block
+//! starting at the byte-order mark ([`crate::Metadata::exif`]), the XMP
+//! packet (tag 700) and the IPTC-IIM record stream (tag 33723).
+//!
+//! # Multi-page files
+//!
+//! The demuxer declares one stream per distinct page geometry
+//! (`width × height × layout`, first-appearance order — a uniform
+//! multi-page file is one stream), each carrying the whole file as its
+//! single packet; the decoder of a stream returns the pages whose
+//! native layout equals the stream's declared one, one frame per page
+//! (`pts` = the page's position on the IFD chain), so every frame's
+//! label is truthful. A decoder built without a geometry returns every
+//! page.
+
+use std::collections::VecDeque;
 
 use oxideav_core::{
-    frame::VideoPlane, parse_options, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct,
-    CodecParameters, CodecRegistry, ColorPrimaries, ColorSignal, ContainerRegistry, Decoder,
-    Encoder, Error, Frame, MatrixCoefficients, MediaType, OptionField, OptionKind, OptionValue,
-    Packet, PixelFormat, Result, RuntimeContext, TimeBase, TransferCharacteristics, VideoFrame,
+    frame::VideoPlane, parse_options, BlobKind, CodecCapabilities, CodecId, CodecInfo,
+    CodecOptionsStruct, CodecParameters, CodecRegistry, ColorPrimaries, ColorSignal,
+    ContainerRegistry, Decoder, Encoder, Error, Frame, MatrixCoefficients, MediaType, MetadataBlob,
+    OptionField, OptionKind, OptionValue, Packet, PixelFormat, Result, RuntimeContext, TimeBase,
+    TransferCharacteristics, VideoFrame,
 };
 
 use crate::container;
+use crate::decoder::{decode_page_entries, ifd_chain};
 use crate::encoder::TiffCompression;
 use crate::error::TiffError;
-use crate::image::{ColorInfo, ColorRange, Palette, Plane, TiffImage, TiffPixelFormat};
+use crate::ifd::{parse_header, ByteOrder, Entry, ParsedHeader};
+use crate::image::{ColorInfo, ColorRange, Metadata, Palette, Plane, TiffImage, TiffPixelFormat};
 use crate::options::{DecodeOptions, EncodeOptions};
 use crate::CODEC_ID_STR;
 
@@ -110,11 +141,64 @@ pub fn from_color_signal(s: &ColorSignal) -> ColorInfo {
     ColorInfo::new(range, s.primaries.0, s.transfer.0, s.matrix.0)
 }
 
+// ---- Metadata ⇄ blobs -----------------------------------------------------------
+
+/// The image's metadata as framework blobs, in the well-known order:
+/// [`BlobKind::ICC`] (tag 34675), [`BlobKind::EXIF`] (the Exif + GPS
+/// IFDs as a TIFF-structured Exif block), [`BlobKind::XMP`] (tag 700)
+/// and [`BlobKind::IPTC`] (tag 33723) — one blob per payload the image
+/// carries, `data` verbatim, no `mime`. `gamma` has no blob (TIFF
+/// carries none).
+pub fn metadata_to_blobs(metadata: &Metadata) -> Vec<MetadataBlob> {
+    let mut out = Vec::with_capacity(4);
+    for (kind, payload) in [
+        (BlobKind::ICC, &metadata.icc),
+        (BlobKind::EXIF, &metadata.exif),
+        (BlobKind::XMP, &metadata.xmp),
+        (BlobKind::IPTC, &metadata.iptc),
+    ] {
+        if let Some(p) = payload {
+            out.push(MetadataBlob::new(kind, p.clone()));
+        }
+    }
+    out
+}
+
+/// The first blob of each well-known kind TIFF can carry (ICC / Exif /
+/// XMP / IPTC) as the image's [`Metadata`]; blobs of any other kind
+/// are left alone (TIFF has no tag for them), `gamma` stays `None`.
+pub fn metadata_from_blobs(blobs: &[MetadataBlob]) -> Metadata {
+    let first = |kind: BlobKind| blobs.iter().find(|b| b.is(&kind)).map(|b| b.data.clone());
+    Metadata::new()
+        .with_icc(first(BlobKind::ICC))
+        .with_exif(first(BlobKind::EXIF))
+        .with_xmp(first(BlobKind::XMP))
+        .with_iptc(first(BlobKind::IPTC))
+}
+
+/// The blobs a page is written with: the frame's own first, then the
+/// stream's blobs of every kind the frame does not carry (a frame blob
+/// overrides a stream blob of the same kind — the gateway's
+/// precedence rule).
+pub fn merge_blobs(frame: &[MetadataBlob], stream: &[MetadataBlob]) -> Vec<MetadataBlob> {
+    let mut out: Vec<MetadataBlob> = frame.to_vec();
+    out.extend(
+        stream
+            .iter()
+            .filter(|s| !frame.iter().any(|f| f.kind == s.kind))
+            .cloned(),
+    );
+    out
+}
+
 // ---- TiffImage ⇄ VideoFrame ----------------------------------------------------
 
 fn stamp_frame_side_channels(frame: &mut VideoFrame, image: &TiffImage) {
     if let (TiffPixelFormat::Pal8, Some(p)) = (image.format, &image.palette) {
         frame.set_palette(p.to_rgb_triples().concat());
+        if p.has_alpha() {
+            frame.set_palette_alpha(p.entries.iter().map(|e| e[3]).collect());
+        }
     }
     let c = image.color;
     if c.primaries != ColorInfo::UNSPECIFIED
@@ -123,6 +207,7 @@ fn stamp_frame_side_channels(frame: &mut VideoFrame, image: &TiffImage) {
     {
         frame.set_color_signal(to_color_signal(&c));
     }
+    frame.set_blobs(metadata_to_blobs(&image.metadata));
 }
 
 /// [`From<TiffImage>`] with an explicit `pts`, moving the plane.
@@ -143,8 +228,10 @@ pub(crate) fn image_into_video_frame(mut image: TiffImage, pts: Option<i64>) -> 
 
 impl From<TiffImage> for VideoFrame {
     /// The pixel plane (`pts` `None`), plus the palette side-channel
-    /// for `Pal8` and the colour-signal side-channel when the image
-    /// signals more than the TIFF default.
+    /// for `Pal8` (and its alpha record when an entry is not opaque),
+    /// the colour-signal side-channel when the image signals more than
+    /// the TIFF default, and the metadata-blobs record
+    /// ([`metadata_to_blobs`]) when the image carries metadata.
     fn from(image: TiffImage) -> Self {
         image_into_video_frame(image, None)
     }
@@ -167,8 +254,12 @@ impl TiffImage {
     /// parameters that describe it (`width`, `height` and
     /// `pixel_format` are required). The frame's palette side-channel
     /// becomes [`TiffImage::palette`] for `Pal8` (falling back to the
-    /// `extradata` RGB triples); its colour-signal side-channel becomes
-    /// [`TiffImage::color`].
+    /// `extradata` RGB triples; the palette-alpha record, when
+    /// attached, fills the entries' alpha); its colour-signal
+    /// side-channel becomes [`TiffImage::color`]; its metadata blobs,
+    /// then the stream's `params.blobs` of every kind the frame does
+    /// not carry ([`merge_blobs`]), become [`TiffImage::metadata`]
+    /// ([`metadata_from_blobs`]).
     pub fn from_video_frame(frame: &VideoFrame, params: &CodecParameters) -> crate::Result<Self> {
         let width = params
             .width
@@ -199,10 +290,12 @@ impl TiffImage {
             let rgb: Option<&[u8]> = frame
                 .palette()
                 .or((!params.extradata.is_empty()).then_some(params.extradata.as_slice()));
+            let alpha = frame.palette_alpha().unwrap_or(&[]);
             img.palette = rgb.map(|rgb| {
                 Palette::new(
                     rgb.chunks_exact(3)
-                        .map(|c| [c[0], c[1], c[2], 255])
+                        .enumerate()
+                        .map(|(i, c)| [c[0], c[1], c[2], alpha.get(i).copied().unwrap_or(255)])
                         .collect(),
                 )
             });
@@ -215,6 +308,7 @@ impl TiffImage {
         if let Some(sig) = frame.color_signal() {
             img.color = from_color_signal(&sig);
         }
+        img.metadata = metadata_from_blobs(&merge_blobs(&frame.blobs(), &params.blobs));
         Ok(img)
     }
 }
@@ -390,7 +484,11 @@ oxideav_core::register!("tiff", register);
 
 /// Factory registered with the codec registry. The framework's
 /// [`oxideav_core::DecoderLimits`] tighten the standalone
-/// [`DecodeOptions`] (never loosen them).
+/// [`DecodeOptions`] (never loosen them). When `params` carry a
+/// geometry (`width`, `height`, `pixel_format`) the decoder returns
+/// the pages of each packet whose native layout equals it (the
+/// demuxer's one-stream-per-geometry contract); without one — or when
+/// no page matches — it returns every page.
 pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
     let limits = params.limits();
     let mut opts = DecodeOptions::default();
@@ -403,21 +501,54 @@ pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
                 m.min(limits.max_alloc_bytes_per_frame)
             }),
     );
+    let want = match (params.width, params.height, params.pixel_format) {
+        (Some(w), Some(h), Some(pf)) => Some((w, h, pf)),
+        _ => None,
+    };
     Ok(Box::new(TiffDecoder {
         codec_id: CodecId::new(CODEC_ID_STR),
         opts,
+        want,
         pending: None,
         eof: false,
     }))
 }
 
+/// A page's geometry as the stream declares it: the layout
+/// [`crate::decode`] returns, after `Orientation`.
+pub(crate) fn page_geometry(
+    entries: &[Entry],
+    bo: ByteOrder,
+) -> crate::Result<(u32, u32, PixelFormat)> {
+    let l = crate::api::native_layout(entries, bo)?;
+    let (w, h) = if l.orientation >= 5 {
+        (l.height, l.width)
+    } else {
+        (l.width, l.height)
+    };
+    Ok((w, h, l.format.into()))
+}
+
+/// One packet's file, parsed, with the pages still to be returned.
+struct PendingFile {
+    data: Vec<u8>,
+    header: ParsedHeader,
+    chain: Vec<Vec<Entry>>,
+    pages: VecDeque<usize>,
+    base_pts: Option<i64>,
+}
+
 /// TIFF `Decoder` trait impl: each `send_packet` carries one complete
-/// TIFF file and the matching `receive_frame` returns its first page
-/// decoded through [`crate::decode_with`].
+/// TIFF file; the following `receive_frame`s return its pages (those
+/// of the stream's geometry, or all of them — see [`make_decoder`]),
+/// one per call, decoded through the standalone page decoder with the
+/// page's own metadata on the frame's blobs record. A frame's `pts`
+/// is the packet's `pts` plus the page's position on the IFD chain.
 pub struct TiffDecoder {
     codec_id: CodecId,
     opts: DecodeOptions,
-    pending: Option<VideoFrame>,
+    want: Option<(u32, u32, PixelFormat)>,
+    pending: Option<PendingFile>,
     eof: bool,
 }
 
@@ -426,21 +557,77 @@ impl Decoder for TiffDecoder {
         &self.codec_id
     }
     fn send_packet(&mut self, packet: &Packet) -> Result<()> {
-        let img = crate::decode_with(&packet.data, &self.opts)?;
-        self.pending = Some(image_into_video_frame(img, packet.pts));
-        Ok(())
-    }
-    fn receive_frame(&mut self) -> Result<Frame> {
-        match self.pending.take() {
-            Some(f) => Ok(Frame::Video(f)),
-            None => {
-                if self.eof {
-                    Err(Error::Eof)
-                } else {
-                    Err(Error::NeedMore)
+        let data = packet.data.clone();
+        let header = parse_header(&data)?;
+        let chain = ifd_chain(&data, &header)?;
+        let bo = header.byte_order;
+        let mut resolvable: VecDeque<usize> = VecDeque::new();
+        let mut matching: VecDeque<usize> = VecDeque::new();
+        let mut first_err: Option<TiffError> = None;
+        for (i, entries) in chain.iter().enumerate() {
+            match page_geometry(entries, bo) {
+                Ok(g) => {
+                    resolvable.push_back(i);
+                    if self.want == Some(g) {
+                        matching.push_back(i);
+                    }
+                }
+                Err(e) => {
+                    first_err.get_or_insert(e);
                 }
             }
         }
+        if resolvable.is_empty() {
+            return Err(first_err
+                .unwrap_or_else(|| TiffError::invalid("TIFF: no IFDs in file"))
+                .into());
+        }
+        let pages = if matching.is_empty() {
+            resolvable
+        } else {
+            matching
+        };
+        self.pending = Some(PendingFile {
+            data,
+            header,
+            chain,
+            pages,
+            base_pts: packet.pts,
+        });
+        Ok(())
+    }
+    fn receive_frame(&mut self) -> Result<Frame> {
+        let Some(file) = self.pending.as_mut() else {
+            return Err(if self.eof {
+                Error::Eof
+            } else {
+                Error::NeedMore
+            });
+        };
+        let Some(i) = file.pages.pop_front() else {
+            self.pending = None;
+            return Err(if self.eof {
+                Error::Eof
+            } else {
+                Error::NeedMore
+            });
+        };
+        let page = decode_page_entries(&file.data, &file.header, &file.chain[i], &self.opts);
+        let page = match page {
+            Ok(p) => p,
+            Err(e) => {
+                self.pending = None;
+                return Err(e.into());
+            }
+        };
+        let pts = match file.base_pts {
+            Some(p) => Some(p + i as i64),
+            None => (i > 0).then_some(i as i64),
+        };
+        if file.pages.is_empty() {
+            self.pending = None;
+        }
+        Ok(Frame::Video(image_into_video_frame(page.image, pts)))
     }
     fn flush(&mut self) -> Result<()> {
         self.eof = true;
@@ -451,7 +638,9 @@ impl Decoder for TiffDecoder {
 // ---- Encoder --------------------------------------------------------------------
 
 /// Factory registered with the codec registry: one packet (a complete
-/// single-page TIFF file) per frame, through [`crate::encode`].
+/// single-page TIFF file) per frame, through [`crate::encode`]. The
+/// stream's `params.blobs` are written into every page, overridden
+/// per kind by the blobs on a frame's own record ([`merge_blobs`]).
 pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     let opts = parse_options::<EncodeOptions>(&params.options)?;
     let width = params
@@ -479,7 +668,8 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
 }
 
 /// TIFF `Encoder` trait impl: every video frame becomes one packet
-/// holding a complete single-page TIFF file.
+/// holding a complete single-page TIFF file carrying the merged
+/// stream + frame metadata blobs.
 pub struct TiffEncoder {
     output_params: CodecParameters,
     opts: EncodeOptions,
