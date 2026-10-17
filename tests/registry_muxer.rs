@@ -433,3 +433,79 @@ fn refusals_are_typed() {
     m.write_packet(&pk2[0]).unwrap();
     assert!(m.write_trailer().is_err());
 }
+
+/// Black-box: an independent TIFF directory lister sees the three
+/// pages of a mixed-geometry muxed file in write order with their own
+/// sizes and schemes. Skips (with a note) when the tool is not
+/// installed.
+#[test]
+fn tiffinfo_lists_mixed_geometry_pages_in_write_order() {
+    use std::process::{Command, Stdio};
+    if Command::new("tiffinfo")
+        .arg("-h")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_err()
+    {
+        eprintln!("skipping: `tiffinfo` not available");
+        return;
+    }
+    let ctx = ctx();
+    let a0 = image(TiffPixelFormat::Gray8, 4, 4, 0);
+    let b = image(TiffPixelFormat::Rgb24, 2, 3, 9);
+    let a1 = image(TiffPixelFormat::Gray8, 4, 4, 77);
+    let (pa, out_a) = encode_group(
+        &ctx,
+        &params(4, 4, PixelFormat::Gray8, &[("compression", "lzw")]),
+        0,
+        &[(&a0, vec![]), (&a1, vec![])],
+    );
+    let (pb, out_b) = encode_group(
+        &ctx,
+        &params(2, 3, PixelFormat::Rgb24, &[("compression", "deflate")]),
+        1,
+        &[(&b, vec![])],
+    );
+    let bytes = mux(
+        &ctx,
+        &[stream(0, out_a), stream(1, out_b)],
+        &[&pa[0], &pb[0], &pa[1]],
+    );
+    let dir = std::env::temp_dir().join(format!(
+        "oxideav-tiff-mux-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mixed.tif");
+    std::fs::write(&path, &bytes).unwrap();
+    let out = Command::new("tiffinfo").arg(&path).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let dirs = text.matches("TIFF Directory at offset").count();
+    assert_eq!(dirs, 3, "{text}");
+    let widths: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("Image Width: "))
+        .map(|l| l.split_whitespace().next().unwrap_or(""))
+        .collect();
+    assert_eq!(widths, ["4", "2", "4"], "{text}");
+    let schemes: Vec<String> = text
+        .lines()
+        .filter(|l| l.trim().starts_with("Compression Scheme:"))
+        .map(|l| l.trim().to_string())
+        .collect();
+    assert_eq!(schemes.len(), 3, "{text}");
+    assert!(
+        schemes[0].contains("LZW") && schemes[2].contains("LZW"),
+        "{text}"
+    );
+    assert!(
+        schemes[1].contains("Deflate") || schemes[1].contains("deflate"),
+        "{text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
