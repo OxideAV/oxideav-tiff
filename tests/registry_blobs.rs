@@ -17,8 +17,8 @@ use oxideav_core::{
 };
 use oxideav_tiff::container::open_demuxer;
 use oxideav_tiff::{
-    decode, decode_all, encode, encode_all, merge_blobs, metadata_from_blobs, metadata_to_blobs,
-    EncodeOptions, Metadata, Palette, Plane, TiffImage, TiffPixelFormat,
+    EncodeOptions, Metadata, Palette, Plane, TiffImage, TiffPixelFormat, decode, decode_all,
+    encode, encode_all, merge_blobs, metadata_from_blobs, metadata_to_blobs,
 };
 
 fn icc(len: usize) -> Vec<u8> {

@@ -13,8 +13,8 @@
 
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
-    TiffCompression, TiffPixelFormat,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, TiffPixelFormat, decode_all,
+    decode_page, encode_page, encode_pages,
 };
 
 /// Deterministic signed 8-bit raster spanning the full i8 range.

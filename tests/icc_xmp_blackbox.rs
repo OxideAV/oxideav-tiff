@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, decode_page, encode_page,
 };
 
 fn binary_available(name: &str) -> bool {
@@ -95,10 +95,10 @@ fn system_icc_profile() -> Option<Vec<u8>> {
         "/usr/share/color/icc/colord/sRGB.icc",
     ];
     for c in candidates {
-        if let Ok(bytes) = fs::read(c) {
-            if bytes.len() >= 132 {
-                return Some(bytes);
-            }
+        if let Ok(bytes) = fs::read(c)
+            && bytes.len() >= 132
+        {
+            return Some(bytes);
         }
     }
     None

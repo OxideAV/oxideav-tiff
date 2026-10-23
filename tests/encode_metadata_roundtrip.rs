@@ -6,7 +6,7 @@
 
 use oxideav_tiff::ifd::{parse_header, parse_ifd};
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, decode_page, encode_page,
 };
 
 fn page<'a>(w: u32, h: u32, pixels: &'a [u8], extras: PageExtras<'a>) -> EncodePage<'a> {

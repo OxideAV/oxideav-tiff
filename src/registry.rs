@@ -47,21 +47,21 @@
 use std::collections::VecDeque;
 
 use oxideav_core::{
-    frame::VideoPlane, parse_options, BlobKind, CodecCapabilities, CodecId, CodecInfo,
-    CodecOptionsStruct, CodecParameters, CodecRegistry, ColorPrimaries, ColorSignal,
-    ContainerRegistry, Decoder, Encoder, Error, Frame, MatrixCoefficients, MediaType, MetadataBlob,
-    OptionField, OptionKind, OptionValue, Packet, PixelFormat, Result, RuntimeContext, TimeBase,
-    TransferCharacteristics, VideoFrame,
+    BlobKind, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
+    CodecRegistry, ColorPrimaries, ColorSignal, ContainerRegistry, Decoder, Encoder, Error, Frame,
+    MatrixCoefficients, MediaType, MetadataBlob, OptionField, OptionKind, OptionValue, Packet,
+    PixelFormat, Result, RuntimeContext, TimeBase, TransferCharacteristics, VideoFrame,
+    frame::VideoPlane, parse_options,
 };
 
+use crate::CODEC_ID_STR;
 use crate::container;
 use crate::decoder::{decode_page_entries, ifd_chain};
 use crate::encoder::TiffCompression;
 use crate::error::TiffError;
-use crate::ifd::{parse_header, ByteOrder, Entry, ParsedHeader};
+use crate::ifd::{ByteOrder, Entry, ParsedHeader, parse_header};
 use crate::image::{ColorInfo, ColorRange, Metadata, Palette, Plane, TiffImage, TiffPixelFormat};
 use crate::options::{DecodeOptions, EncodeOptions};
-use crate::CODEC_ID_STR;
 
 impl From<TiffError> for Error {
     fn from(e: TiffError) -> Self {
@@ -109,7 +109,7 @@ impl TryFrom<PixelFormat> for TiffPixelFormat {
                 return Err(Error::unsupported(format!(
                     "TIFF: pixel format {other:?} has no TIFF layout (Gray8 / Gray16Le / \
                      Rgb24 / Rgb48Le / Rgba / Pal8 / Cmyk / GrayF32Le / RgbF32Le)"
-                )))
+                )));
             }
         })
     }
@@ -293,7 +293,9 @@ impl TiffImage {
             let alpha = frame.palette_alpha().unwrap_or(&[]);
             img.palette = rgb.map(|rgb| {
                 Palette::new(
-                    rgb.chunks_exact(3)
+                    rgb.as_chunks::<3>()
+                        .0
+                        .iter()
                         .enumerate()
                         .map(|(i, c)| [c[0], c[1], c[2], alpha.get(i).copied().unwrap_or(255)])
                         .collect(),
@@ -451,7 +453,7 @@ impl CodecOptionsStruct for EncodeOptions {
                     other => {
                         return Err(Error::invalid(format!(
                             "TIFF encoder: unknown compression '{other}'"
-                        )))
+                        )));
                     }
                 };
             }
@@ -757,9 +759,9 @@ fn check_layout_scheme(pix: TiffPixelFormat, scheme: &TiffCompression) -> Result
             {
                 Ok(())
             }
-            TiffPixelFormat::Gray16Le | TiffPixelFormat::Rgb48Le => {
-                refuse("the JPEG-in-TIFF DCT process (16-bit input needs quality 100 / the lossless process)")
-            }
+            TiffPixelFormat::Gray16Le | TiffPixelFormat::Rgb48Le => refuse(
+                "the JPEG-in-TIFF DCT process (16-bit input needs quality 100 / the lossless process)",
+            ),
             _ => refuse("JPEG-in-TIFF (Compression = 7)"),
         },
         _ => Ok(()),

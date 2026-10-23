@@ -18,8 +18,8 @@
 //!      via a byte-level IFD walker independent of our decoder.
 
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
-    TiffPixelFormat,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, TiffPixelFormat, decode_page,
+    encode_page,
 };
 
 /// Pack a logical (L%, a, b) where L is the perceptual 0..100 scale

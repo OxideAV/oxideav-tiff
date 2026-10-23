@@ -50,8 +50,8 @@
 
 use crate::error::{Result, TiffError as Error};
 use crate::jpeg_enc::{
-    encode_frame, gather_stats, scaled_quant_table, HuffSpec, HuffStats, JpegComponent, JpegFrame,
-    JpegProcess, JpegTableSet, QUANT_CHROMINANCE_K2, QUANT_LUMINANCE_K1,
+    HuffSpec, HuffStats, JpegComponent, JpegFrame, JpegProcess, JpegTableSet, QUANT_CHROMINANCE_K2,
+    QUANT_LUMINANCE_K1, encode_frame, gather_stats, scaled_quant_table,
 };
 use crate::types::*;
 

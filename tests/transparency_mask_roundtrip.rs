@@ -19,8 +19,8 @@
 //! byte layout a downstream compositor multiplies with the main image).
 
 use oxideav_tiff::{
-    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
-    TiffCompression, TiffPixelFormat,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, TiffPixelFormat, decode_all,
+    decode_page, encode_page, encode_pages,
 };
 
 // A small 16x8 mask: top half = exterior (all 0-bits), bottom half =

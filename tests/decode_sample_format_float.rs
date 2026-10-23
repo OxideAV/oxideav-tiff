@@ -23,7 +23,7 @@
 //! and drive them through the public `decode_page` entry point, so the
 //! expected samples are the ones written — a binary-independent oracle.
 
-use oxideav_tiff::{decode_page, TiffPixelFormat};
+use oxideav_tiff::{TiffPixelFormat, decode_page};
 
 /// The decoded `GrayF32Le` plane as `f32`s.
 fn gray_f32(d: &oxideav_tiff::Page) -> Vec<f32> {
@@ -31,7 +31,9 @@ fn gray_f32(d: &oxideav_tiff::Page) -> Vec<f32> {
     assert_eq!(d.image.planes[0].stride, d.image.width as usize * 4);
     d.image.planes[0]
         .data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }

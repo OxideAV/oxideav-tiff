@@ -219,7 +219,7 @@ fn signed_rgb_is_rejected() {
     let strip_off = out.len() as u32; // 8
     out.extend_from_slice(&[0x00u8, 0x10, 0x20]); // R,G,B
     out.push(0); // word-align
-                 // Out-of-line BitsPerSample [8,8,8].
+    // Out-of-line BitsPerSample [8,8,8].
     let bps_off = out.len() as u32;
     out.extend_from_slice(&8u16.to_le_bytes());
     out.extend_from_slice(&8u16.to_le_bytes());

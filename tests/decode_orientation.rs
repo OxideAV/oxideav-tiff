@@ -267,7 +267,7 @@ fn build_rgb24(w: u16, h: u16, pixels: &[u8], orientation: Option<u16>) -> Vec<u
     out.extend_from_slice(&n.to_le_bytes());
     out.extend_from_slice(&entry_short(256, w)); // ImageWidth
     out.extend_from_slice(&entry_short(257, h)); // ImageLength
-                                                 // BitsPerSample: SHORT, count 3, offset → bps_off.
+    // BitsPerSample: SHORT, count 3, offset → bps_off.
     let mut bps = [0u8; 12];
     bps[0..2].copy_from_slice(&258u16.to_le_bytes());
     bps[2..4].copy_from_slice(&3u16.to_le_bytes()); // SHORT

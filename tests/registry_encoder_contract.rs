@@ -13,7 +13,7 @@ use oxideav_core::{
     VideoFrame,
 };
 use oxideav_tiff::{
-    decode, info, EncodeOptions, Palette, Plane, TiffImage, TiffPixelFormat, ACCEPTED_PIXEL_FORMATS,
+    ACCEPTED_PIXEL_FORMATS, EncodeOptions, Palette, Plane, TiffImage, TiffPixelFormat, decode, info,
 };
 
 fn ctx() -> RuntimeContext {
@@ -277,15 +277,16 @@ fn quality_governs_jpeg_only_in_any_option_order() {
     let q0 = jpeg(&[("compression", "jpeg"), ("quality", "0")]);
     assert_eq!(info(&q0).unwrap().compression, 7);
     assert!(q0.len() <= q50a.len());
-    assert!(ctx
-        .codecs
-        .first_encoder(&params(
-            32,
-            16,
-            PixelFormat::Rgb24,
-            &[("compression", "jpeg"), ("quality", "101")]
-        ))
-        .is_err());
+    assert!(
+        ctx.codecs
+            .first_encoder(&params(
+                32,
+                16,
+                PixelFormat::Rgb24,
+                &[("compression", "jpeg"), ("quality", "101")]
+            ))
+            .is_err()
+    );
 }
 
 #[test]

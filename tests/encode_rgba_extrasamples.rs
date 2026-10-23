@@ -14,8 +14,8 @@
 
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, ExtraSampleKind, PageExtras,
-    TiffCompression, TiffPixelFormat,
+    EncodePage, EncodePixelFormat, ExtraSampleKind, PageExtras, TiffCompression, TiffPixelFormat,
+    decode_page, encode_page,
 };
 
 /// Deterministic RGBA raster; alpha varies independently of color.
@@ -35,7 +35,9 @@ fn pixels_rgba(w: u32, h: u32) -> Vec<u8> {
 /// The RGB triples of an RGBA raster — the decoder's §ExtraSamples
 /// render (leading color components verbatim, extra dropped).
 fn rgb_of(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|q| [q[0], q[1], q[2]])
         .collect()
 }

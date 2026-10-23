@@ -30,7 +30,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use oxideav_tiff::types::*;
-use oxideav_tiff::{decode_page, TiffPixelFormat};
+use oxideav_tiff::{TiffPixelFormat, decode_page};
 
 // ---------------------------------------------------------------------------
 // Black-box binary plumbing (availability-gated).
@@ -202,7 +202,9 @@ fn from_pnm16(pnm: &[u8]) -> Option<(Vec<u16>, usize, usize)> {
         return None;
     }
     let samples = pnm[i..]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
     Some((samples, w, h))

@@ -55,25 +55,13 @@ fn spec(tag: u16, ty: u16, count: u64, value: Vec<u8>) -> Spec {
 }
 
 fn w16(le: bool, v: u16) -> [u8; 2] {
-    if le {
-        v.to_le_bytes()
-    } else {
-        v.to_be_bytes()
-    }
+    if le { v.to_le_bytes() } else { v.to_be_bytes() }
 }
 fn w32(le: bool, v: u32) -> [u8; 4] {
-    if le {
-        v.to_le_bytes()
-    } else {
-        v.to_be_bytes()
-    }
+    if le { v.to_le_bytes() } else { v.to_be_bytes() }
 }
 fn w64(le: bool, v: u64) -> [u8; 8] {
-    if le {
-        v.to_le_bytes()
-    } else {
-        v.to_be_bytes()
-    }
+    if le { v.to_le_bytes() } else { v.to_be_bytes() }
 }
 
 /// Base IFD entries for a 1×1 Gray8 uncompressed image whose single

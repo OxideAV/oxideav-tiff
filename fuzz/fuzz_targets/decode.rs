@@ -63,8 +63,8 @@ use oxideav_tiff::compress::{unpack_deflate, unpack_lzw, unpack_packbits, unpack
 use oxideav_tiff::ifd::{parse_header, parse_ifd};
 use oxideav_tiff::metadata::{extract_format_info, extract_metadata};
 use oxideav_tiff::{
-    decode, decode_all, decode_page, decode_page_at, decode_pages, decode_rgba8, decode_with, info,
-    probe, DecodeOptions,
+    DecodeOptions, decode, decode_all, decode_page, decode_page_at, decode_pages, decode_rgba8,
+    decode_with, info, probe,
 };
 
 /// Cap the standalone-decompressor `expected_len` so a tiny fuzz
@@ -158,14 +158,14 @@ fuzz_target!(|data: &[u8]| {
         let _ = dmx.attachments();
         params.extend(dmx.streams().iter().map(|s| s.params.clone()));
         while let Ok(pkt) = dmx.next_packet() {
-            if let Some(p) = params.get(pkt.stream_index as usize) {
-                if let Ok(mut dec) = oxideav_tiff::make_decoder(p) {
-                    if dec.send_packet(&pkt).is_ok() {
-                        while dec.receive_frame().is_ok() {}
-                    }
-                    let _ = dec.flush();
-                    let _ = dec.receive_frame();
+            if let Some(p) = params.get(pkt.stream_index as usize)
+                && let Ok(mut dec) = oxideav_tiff::make_decoder(p)
+            {
+                if dec.send_packet(&pkt).is_ok() {
+                    while dec.receive_frame().is_ok() {}
                 }
+                let _ = dec.flush();
+                let _ = dec.receive_frame();
             }
         }
     }

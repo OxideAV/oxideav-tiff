@@ -37,11 +37,11 @@
 //! (separate component planes, §"PlanarConfiguration") via
 //! [`EncodePage::planar`].
 
-use crate::ccitt::{encode_ccitt, CcittVariant, FillOrder};
+use crate::ccitt::{CcittVariant, FillOrder, encode_ccitt};
 use crate::compress::{pack_deflate, pack_lzw, pack_packbits, pack_zstd};
 use crate::error::{Result, TiffError as Error};
 pub use crate::jpeg_wrap::JpegOptions;
-use crate::jpeg_wrap::{build_jpeg_segments, JpegPageInput};
+use crate::jpeg_wrap::{JpegPageInput, build_jpeg_segments};
 use crate::types::*;
 
 /// One palette entry as stored in the on-disk `ColorMap` tag (each
@@ -1195,7 +1195,7 @@ fn assign_page_addrs(plan: &PlannedPage, cursor: &mut u64, bigtiff: bool) -> Pla
             | BlobId::AuxValue(_)
             | BlobId::MetaValue(_) => 2,
         };
-        if *cursor % align != 0 {
+        if !(*cursor).is_multiple_of(align) {
             *cursor += align - (*cursor % align);
         }
         ext_addrs.push((*id, *cursor, blob.len() as u64));
@@ -1206,7 +1206,7 @@ fn assign_page_addrs(plan: &PlannedPage, cursor: &mut u64, bigtiff: bool) -> Pla
     // (4 bytes per value); BigTIFF uses LONG8 (8 bytes per value),
     // so the alignment + per-entry stride both follow the variant.
     let (strip_offsets_array, strip_byte_counts_array) = if plan.strips.len() > 1 {
-        if *cursor % array_align != 0 {
+        if !(*cursor).is_multiple_of(array_align) {
             *cursor += array_align - (*cursor % array_align);
         }
         let so = *cursor;
@@ -1233,7 +1233,7 @@ fn assign_page_addrs(plan: &PlannedPage, cursor: &mut u64, bigtiff: bool) -> Pla
         .filter(|(l, _)| *l == ChildLink::SubIfd)
         .count() as u64;
     let sub_ifd_array = if n_subs * array_align > inline_threshold {
-        if *cursor % array_align != 0 {
+        if !(*cursor).is_multiple_of(array_align) {
             *cursor += array_align - (*cursor % array_align);
         }
         let at = *cursor;
@@ -1243,7 +1243,7 @@ fn assign_page_addrs(plan: &PlannedPage, cursor: &mut u64, bigtiff: bool) -> Pla
         None
     };
     // IFD must be 2-byte aligned (entries start with u16 fields).
-    if *cursor % 2 != 0 {
+    if !(*cursor).is_multiple_of(2) {
         *cursor += 1;
     }
     let ifd_offset = *cursor;
@@ -2273,7 +2273,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 // constrained to be integer multiples of
                 // YCbCrSubsampleHoriz and YCbCrSubsampleVert
                 // respectively."
-                if p.width % (sh as u32) != 0 || p.height % (sv as u32) != 0 {
+                if !p.width.is_multiple_of(sh as u32) || !p.height.is_multiple_of(sv as u32) {
                     return Err(Error::invalid(format!(
                         "TIFF encode/YCbCrSubsampled24: ImageWidth ({}) must be a multiple of \
                          ChromaSubsampleHoriz ({sh}) and ImageLength ({}) a multiple of \
@@ -2347,13 +2347,13 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                      §15: tile fields replace RowsPerStrip / the strip fields",
                 ));
             }
-            if let Some((_, sv)) = ycbcr_subsampling_nontrivial {
-                if r as usize % sv != 0 {
-                    return Err(Error::invalid(format!(
-                        "TIFF encode: rows_per_strip ({r}) must be an integer multiple of \
+            if let Some((_, sv)) = ycbcr_subsampling_nontrivial
+                && !(r as usize).is_multiple_of(sv)
+            {
+                return Err(Error::invalid(format!(
+                    "TIFF encode: rows_per_strip ({r}) must be an integer multiple of \
                          YCbCrSubsampleVert ({sv}) — TIFF 6.0 §21 page 90"
-                    )));
-                }
+                )));
             }
             r.min(p.height)
         }
@@ -2368,7 +2368,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         // multiples of 8 × Hmax / 8 × Vmax.
         let (sh, sv) = ycbcr_subsampling_nontrivial.unwrap_or((1, 1));
         if matches!(opts.process, crate::jpeg_enc::JpegProcess::Dct) {
-            if rows_per_strip < p.height && rows_per_strip as usize % (8 * sv) != 0 {
+            if rows_per_strip < p.height && !(rows_per_strip as usize).is_multiple_of(8 * sv) {
                 return Err(Error::invalid(format!(
                     "TIFF encode/JPEG: rows_per_strip ({rows_per_strip}) must be a multiple \
                      of the MCU height 8 × YCbCrSubsampleVert = {} for the DCT processes \
@@ -2376,16 +2376,16 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                     8 * sv
                 )));
             }
-            if let Some((tw, th)) = p.tiling {
-                if tw as usize % (8 * sh) != 0 || th as usize % (8 * sv) != 0 {
-                    return Err(Error::invalid(format!(
-                        "TIFF encode/JPEG: TileWidth/TileLength ({tw}x{th}) must be multiples \
+            if let Some((tw, th)) = p.tiling
+                && (!(tw as usize).is_multiple_of(8 * sh) || !(th as usize).is_multiple_of(8 * sv))
+            {
+                return Err(Error::invalid(format!(
+                    "TIFF encode/JPEG: TileWidth/TileLength ({tw}x{th}) must be multiples \
                          of the MCU size {}x{} (8 × YCbCrSubSampling) for the DCT processes \
                          (TN2)",
-                        8 * sh,
-                        8 * sv
-                    )));
-                }
+                    8 * sh,
+                    8 * sv
+                )));
             }
         }
         let input = JpegPageInput {
@@ -3404,7 +3404,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
 /// with only the codec's own loss.
 pub fn rgb24_to_ycbcr24(rgb: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgb.len());
-    for px in rgb.chunks_exact(3) {
+    for px in rgb.as_chunks::<3>().0 {
         let (r, g, b) = (px[0] as f64, px[1] as f64, px[2] as f64);
         let y = 0.299 * r + 0.587 * g + 0.114 * b;
         let cb = (b - y) / (2.0 - 2.0 * 0.114) + 128.0;
@@ -3494,14 +3494,14 @@ fn jpeg_plan_gate(p: &EncodePage<'_>, opts: JpegOptions) -> Result<()> {
                      defines selection values 1..=7"
                 )));
             }
-            if let EncodePixelFormat::YCbCrSubsampled24 { subsampling, .. } = &p.kind {
-                if *subsampling != (1, 1) {
-                    return Err(Error::invalid(
-                        "TIFF encode/JPEG: the lossless process is written for \
+            if let EncodePixelFormat::YCbCrSubsampled24 { subsampling, .. } = &p.kind
+                && *subsampling != (1, 1)
+            {
+                return Err(Error::invalid(
+                    "TIFF encode/JPEG: the lossless process is written for \
                          non-subsampled data only (YCbCrSubSampling = [1, 1]); \
                          chroma-subsampled YCbCr pairs with the DCT process",
-                    ));
-                }
+                ));
             }
         }
     }
@@ -3798,7 +3798,7 @@ fn build_planes_ycbcr_subsampled(
     let ch = height / sv;
     // Y plane: full resolution, transported unchanged.
     let mut y_plane = vec![0u8; width * height];
-    for (i, chunk) in src.chunks_exact(3).enumerate() {
+    for (i, chunk) in src.as_chunks::<3>().0.iter().enumerate() {
         y_plane[i] = chunk[0];
     }
     // Chroma planes: per-block rounded box-filter mean.
@@ -3874,7 +3874,7 @@ fn build_tiles_planar_ycbcr_subsampled(
     let ch = height / sv;
     // Y plane: full resolution, transported unchanged.
     let mut y_plane = vec![0u8; width * height];
-    for (i, chunk) in src.chunks_exact(3).enumerate() {
+    for (i, chunk) in src.as_chunks::<3>().0.iter().enumerate() {
         y_plane[i] = chunk[0];
     }
     // Chroma planes: per-block rounded box-filter mean (§21
@@ -4170,11 +4170,7 @@ fn build_tiles_sub4(
         let xx = x.min(width - 1);
         let yy = y.min(height - 1);
         let b = packed[yy * src_row_bytes + xx / 2];
-        if xx & 1 == 0 {
-            b >> 4
-        } else {
-            b & 0x0F
-        }
+        if xx & 1 == 0 { b >> 4 } else { b & 0x0F }
     };
 
     let mut out = Vec::with_capacity(tiles_across * tiles_down);

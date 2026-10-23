@@ -39,7 +39,7 @@
 //! Run with:
 //!     cargo bench -p oxideav-tiff --bench lzw
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 use oxideav_tiff::compress::pack_lzw;
 

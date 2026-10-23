@@ -11,7 +11,7 @@ use std::io::Cursor;
 
 use oxideav_core::CodecRegistry;
 use oxideav_tiff::container::open_demuxer;
-use oxideav_tiff::{encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression};
+use oxideav_tiff::{EncodePage, EncodePixelFormat, PageExtras, TiffCompression, encode_page};
 
 fn minimal_icc(total_len: usize) -> Vec<u8> {
     assert!(total_len >= 132);

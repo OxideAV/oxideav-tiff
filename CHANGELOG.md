@@ -54,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- edition 2024, MSRV 1.95
 - **`quality` governs JPEG-in-TIFF only.** The registry encoder's
   `quality` option (0..=100) no longer switches the compression to JPEG:
   with `compression = jpeg` it sets the DCT quantiser scale (`1..=99`),

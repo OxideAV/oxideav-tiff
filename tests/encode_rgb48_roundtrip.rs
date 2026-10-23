@@ -16,8 +16,8 @@
 
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
-    TiffCompression, TiffPixelFormat,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, TiffPixelFormat, decode_all,
+    decode_page, encode_page, encode_pages,
 };
 
 /// Deterministic 16-bit RGB test raster exercising the full sample
@@ -348,7 +348,7 @@ fn rgb48_imagemagick_reads_our_output() {
     assert_eq!(data.len(), (w * h * 6) as usize, "PPM payload size");
     // PPM stores big-endian samples; our input is little-endian.
     let mut got_le = Vec::with_capacity(data.len());
-    for s in data.chunks_exact(2) {
+    for s in data.as_chunks::<2>().0 {
         let v = u16::from_be_bytes([s[0], s[1]]);
         got_le.extend_from_slice(&v.to_le_bytes());
     }

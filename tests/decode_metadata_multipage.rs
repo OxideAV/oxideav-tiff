@@ -9,8 +9,8 @@
 //! back.
 
 use oxideav_tiff::{
-    decode_all, decode_pages, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
-    PageResolution, ResolutionUnit, TiffCompression,
+    EncodePage, EncodePixelFormat, PageExtras, PageResolution, ResolutionUnit, TiffCompression,
+    decode_all, decode_pages, encode_pages,
 };
 
 fn page<'a>(w: u32, h: u32, pixels: &'a [u8], extras: PageExtras<'a>) -> EncodePage<'a> {

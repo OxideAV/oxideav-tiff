@@ -154,7 +154,7 @@ fn fixture_payloads_re_encode_and_survive() {
     // Full preservation loop over an externally written file: decode
     // the fixture, re-encode the payloads onto a fresh page with our
     // writer, decode again — the pins must still hold after two hops.
-    use oxideav_tiff::{encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression};
+    use oxideav_tiff::{EncodePage, EncodePixelFormat, PageExtras, TiffCompression, encode_page};
     let tiff = load("icc_xmp_gray16.tif");
     let d = decode_page(&tiff).expect("decode fixture");
     let icc = d.metadata.icc_profile.expect("icc");

@@ -36,7 +36,7 @@ use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use oxideav_tiff::{decode_page, Page};
+use oxideav_tiff::{Page, decode_page};
 
 // ---------------------------------------------------------------------------
 // Hand-built classic-II TIFF assembly (little-endian).

@@ -16,11 +16,11 @@
 //! in `encode_imagemagick_validators.rs` stay focused on baseline
 //! structures it prints.
 
-use oxideav_tiff::ifd::{find, parse_header, parse_ifd, ByteOrder, Entry, TiffVariant};
+use oxideav_tiff::ifd::{ByteOrder, Entry, TiffVariant, find, parse_header, parse_ifd};
 use oxideav_tiff::types::{TAG_EXIF_IFD, TAG_GPS_IFD, TAG_NEW_SUBFILE_TYPE, TAG_SUB_IFDS};
 use oxideav_tiff::{
-    decode_page, decode_page_at, encode_page, encode_pages, AuxIfdEntry, EncodePage,
-    EncodePixelFormat, PageExtras, TiffCompression,
+    AuxIfdEntry, EncodePage, EncodePixelFormat, PageExtras, TiffCompression, decode_page,
+    decode_page_at, encode_page, encode_pages,
 };
 
 fn gray_page<'a>(pixels: &'a [u8], w: u32, h: u32, extras: PageExtras<'a>) -> EncodePage<'a> {
@@ -505,7 +505,7 @@ fn foreign_subifd_pointer_typed_ifd13_reads() {
     f.extend_from_slice(b"II");
     f.extend_from_slice(&42u16.to_le_bytes());
     f.extend_from_slice(&0u32.to_le_bytes()); // patched below
-                                              // Main 2x2 gray pixels + child 1x1 gray pixel.
+    // Main 2x2 gray pixels + child 1x1 gray pixel.
     let main_px = [10u8, 20, 30, 40];
     let child_px = [200u8];
     let main_px_off = f.len() as u32;
@@ -513,7 +513,7 @@ fn foreign_subifd_pointer_typed_ifd13_reads() {
     let child_px_off = f.len() as u32;
     f.extend_from_slice(&child_px);
     f.push(0); // pad to even
-               // Child IFD (offset known before main IFD since it comes first).
+    // Child IFD (offset known before main IFD since it comes first).
     let child_ifd_off = f.len() as u32;
     let child_entries: [(u16, u16, u32, u32); 8] = [
         (256, 3, 1, 1),            // width 1
@@ -538,7 +538,7 @@ fn foreign_subifd_pointer_typed_ifd13_reads() {
         }
     }
     f.extend_from_slice(&0u32.to_le_bytes()); // child next IFD
-                                              // Main IFD with tag 330 typed 13 (IFD).
+    // Main IFD with tag 330 typed 13 (IFD).
     let main_ifd_off = f.len() as u32;
     let main_entries: [(u16, u16, u32, u32); 9] = [
         (256, 3, 1, 2),
@@ -782,16 +782,18 @@ fn orientation_write_roundtrips_through_decoder_reorientation() {
     }
     // Out-of-range rejected; orientation 1 written explicitly decodes
     // identically to the untagged default.
-    assert!(encode_page(&gray_page(
-        &px,
-        w,
-        h,
-        PageExtras {
-            orientation: Some(9),
-            ..Default::default()
-        }
-    ))
-    .is_err());
+    assert!(
+        encode_page(&gray_page(
+            &px,
+            w,
+            h,
+            PageExtras {
+                orientation: Some(9),
+                ..Default::default()
+            }
+        ))
+        .is_err()
+    );
     let f1 = encode_page(&gray_page(
         &px,
         w,

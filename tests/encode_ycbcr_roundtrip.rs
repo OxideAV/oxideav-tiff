@@ -31,8 +31,8 @@
 //!      writer remain rejected with a precise error.
 
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
-    TiffPixelFormat,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, TiffPixelFormat, decode_page,
+    encode_page,
 };
 
 /// Build a hand-rolled classic-II TIFF for a 3-sample 8-bit chunky
@@ -58,7 +58,7 @@ fn build_classic_ycbcr_tiff(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
     // aligned), then the strip pixels.
     let bps_off = blobs_offset;
     let mut cursor = bps_off + 6;
-    if cursor % 4 != 0 {
+    if !cursor.is_multiple_of(4) {
         cursor += 4 - (cursor % 4);
     }
     let rbw_off = cursor;

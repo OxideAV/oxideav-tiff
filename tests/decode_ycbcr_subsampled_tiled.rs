@@ -21,7 +21,7 @@
 //! against the encoder's own output, so a regression in either path
 //! would surface as a divergence here or there.
 
-use oxideav_tiff::{decode_page, TiffPixelFormat};
+use oxideav_tiff::{TiffPixelFormat, decode_page};
 
 // ---------------------------------------------------------------------------
 // Reference data-unit packer (mirrors TIFF 6.0 §21 page 93 / 94)
@@ -180,7 +180,7 @@ fn build_strip(width: u32, height: u32, sh: u16, sv: u16, strip: &[u8]) -> Vec<u
 
     let bps_off = blobs_offset;
     let mut cursor = bps_off + 6;
-    if cursor % 4 != 0 {
+    if !cursor.is_multiple_of(4) {
         cursor += 4 - (cursor % 4);
     }
     let rbw_off = cursor;
@@ -255,7 +255,7 @@ fn build_tiled_comp(
 
     let bps_off = cursor;
     cursor = bps_off + 6;
-    if cursor % 4 != 0 {
+    if !cursor.is_multiple_of(4) {
         cursor += 4 - (cursor % 4);
     }
     let rbw_off = cursor;
@@ -299,8 +299,8 @@ fn build_tiled_comp(
     push_entry(&mut buf, 284, 3, 1, short_val(1)); // PlanarConfiguration
     push_entry(&mut buf, 322, 4, 1, tile_w.to_le_bytes()); // TileWidth
     push_entry(&mut buf, 323, 4, 1, tile_h.to_le_bytes()); // TileLength
-                                                           // TileOffsets (324) / TileByteCounts (325): inline single value when
-                                                           // n == 1, else point at the out-of-line LONG arrays written below.
+    // TileOffsets (324) / TileByteCounts (325): inline single value when
+    // n == 1, else point at the out-of-line LONG arrays written below.
     if inline {
         push_entry(&mut buf, 324, 4, 1, tile_offsets[0].to_le_bytes());
         push_entry(

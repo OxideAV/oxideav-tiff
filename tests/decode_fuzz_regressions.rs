@@ -11,7 +11,7 @@
 //! (`MAX_IMAGE_PIXELS` sanity gate up-front against attacker-claimed
 //! `ImageWidth * ImageLength`).
 
-use oxideav_tiff::{decode, decode_all, decode_page, info, ColorInfo};
+use oxideav_tiff::{ColorInfo, decode, decode_all, decode_page, info};
 
 #[test]
 fn fuzz_r454_huge_samples_per_pixel_allocation_rejected() {
@@ -113,7 +113,7 @@ fn fuzz_r126_huge_dimensions_rejected_up_front() {
     v.extend_from_slice(b"II");
     v.extend_from_slice(&42u16.to_le_bytes()); // classic magic
     v.extend_from_slice(&8u32.to_le_bytes()); // first IFD at offset 8
-                                              // IFD: 2 bytes count + N*12 entries + 4 bytes next-IFD pointer.
+    // IFD: 2 bytes count + N*12 entries + 4 bytes next-IFD pointer.
     let entries: &[(u16, u16, u32, u32)] = &[
         (256, 4, 1, u32::MAX), // ImageWidth = u32::MAX
         (257, 4, 1, u32::MAX), // ImageLength = u32::MAX
@@ -133,8 +133,8 @@ fn fuzz_r126_huge_dimensions_rejected_up_front() {
         v.extend_from_slice(&val.to_le_bytes());
     }
     v.extend_from_slice(&0u32.to_le_bytes()); // no more IFDs
-                                              // Pad to make the StripOffsets=100 dereference legal so we
-                                              // exercise the dimension gate, not the EOF check.
+    // Pad to make the StripOffsets=100 dereference legal so we
+    // exercise the dimension gate, not the EOF check.
     v.resize(200, 0);
     let err = match decode_page(&v) {
         Ok(_) => panic!("expected dimension-rejection error"),

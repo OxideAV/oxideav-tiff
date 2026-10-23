@@ -27,7 +27,7 @@
 //! back.
 
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, decode_page, encode_page,
 };
 
 /// Build a `(width, height, packed_msb_first_bytes)` triplet for a

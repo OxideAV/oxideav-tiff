@@ -21,7 +21,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use oxideav_tiff::{decode_page, Page};
+use oxideav_tiff::{Page, decode_page};
 
 // ---------------------------------------------------------------------------
 // Hand-built planar TIFF

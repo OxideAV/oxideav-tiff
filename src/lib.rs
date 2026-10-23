@@ -223,9 +223,9 @@ pub use options::{DecodeOptions, EncodeOptions};
 pub use api::{decode_page, decode_page_at, decode_pages};
 pub use decoder::{decode_page_at_with, decode_page_with, decode_pages_with};
 pub use encoder::{
-    encode_page, encode_pages, f16_bits_to_f32, f32_to_f16_bits, rgb24_to_ycbcr24, AuxIfdEntry,
-    EncodePage, EncodePixelFormat, ExtraSampleKind, PageExtras, PageResolution, RgbColor,
-    TiffCompression,
+    AuxIfdEntry, EncodePage, EncodePixelFormat, ExtraSampleKind, PageExtras, PageResolution,
+    RgbColor, TiffCompression, encode_page, encode_pages, f16_bits_to_f32, f32_to_f16_bits,
+    rgb24_to_ycbcr24,
 };
 pub use jpeg_enc::JpegProcess;
 pub use jpeg_wrap::{JpegOptions, JpegTablesLayout};
@@ -250,7 +250,7 @@ pub use image::TiffPlane;
 pub use registry::register_into;
 #[cfg(feature = "registry")]
 pub use registry::{
-    __oxideav_entry, from_color_signal, make_decoder, make_encoder, merge_blobs,
-    metadata_from_blobs, metadata_to_blobs, register, register_codecs, register_containers,
-    to_color_signal, TiffDecoder, TiffEncoder, ACCEPTED_PIXEL_FORMATS,
+    __oxideav_entry, ACCEPTED_PIXEL_FORMATS, TiffDecoder, TiffEncoder, from_color_signal,
+    make_decoder, make_encoder, merge_blobs, metadata_from_blobs, metadata_to_blobs, register,
+    register_codecs, register_containers, to_color_signal,
 };

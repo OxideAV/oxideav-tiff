@@ -16,9 +16,8 @@ use oxideav_core::{
 };
 use oxideav_tiff::container::{open_demuxer, open_muxer};
 use oxideav_tiff::{
-    decode_all, decode_pages, encode_all, encode_page, EncodeOptions, EncodePage,
-    EncodePixelFormat, Metadata, PageExtras, PageResolution, Plane, TiffCompression, TiffImage,
-    TiffPixelFormat,
+    EncodeOptions, EncodePage, EncodePixelFormat, Metadata, PageExtras, PageResolution, Plane,
+    TiffCompression, TiffImage, TiffPixelFormat, decode_all, decode_pages, encode_all, encode_page,
 };
 
 /// An in-memory sink the muxer owns while the test keeps a handle.
@@ -392,14 +391,16 @@ fn refusals_are_typed() {
         Err(Error::InvalidData(_))
     ));
     // Options the encoder would refuse.
-    assert!(open_muxer(
-        Box::new(sink.clone()),
-        &[stream(
-            0,
-            params(2, 2, PixelFormat::Rgb24, &[("compression", "rar")])
-        )]
-    )
-    .is_err());
+    assert!(
+        open_muxer(
+            Box::new(sink.clone()),
+            &[stream(
+                0,
+                params(2, 2, PixelFormat::Rgb24, &[("compression", "rar")])
+            )]
+        )
+        .is_err()
+    );
     // A packet on an undeclared stream.
     let img = image(TiffPixelFormat::Gray8, 2, 2, 0);
     let (pk, out) = encode_group(

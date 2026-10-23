@@ -14,7 +14,7 @@
 
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, decode_page, encode_page,
 };
 
 fn page<'a>(
@@ -121,7 +121,13 @@ fn rgb24_planar_multi_strip_plane_major_order() {
     let want: Vec<u64> = [40u64, 40, 10, 40, 40, 10, 40, 40, 10].to_vec();
     assert_eq!(counts, want, "per-plane 4/4/1-row uncompressed strips");
     // Plane payloads: strip 0 must be the R plane's first 4 rows.
-    let r_plane_head: Vec<u8> = px.chunks_exact(3).map(|c| c[0]).take(40).collect();
+    let r_plane_head: Vec<u8> = px
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|c| c[0])
+        .take(40)
+        .collect();
     let s0 = offs[0] as usize;
     assert_eq!(&file[s0..s0 + 40], &r_plane_head[..]);
 }
@@ -309,16 +315,18 @@ fn rows_per_strip_validation() {
     let px = gray(8, 8);
     let kind = EncodePixelFormat::Gray8 { pixels: &px };
     // Zero rejected.
-    assert!(encode_page(&page(
-        kind.clone(),
-        8,
-        8,
-        TiffCompression::None,
-        false,
-        false,
-        Some(0)
-    ))
-    .is_err());
+    assert!(
+        encode_page(&page(
+            kind.clone(),
+            8,
+            8,
+            TiffCompression::None,
+            false,
+            false,
+            Some(0)
+        ))
+        .is_err()
+    );
     // Tiling + rows_per_strip rejected.
     let mut tiled = page(
         kind.clone(),

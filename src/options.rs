@@ -98,19 +98,19 @@ impl DecodeOptions {
     /// Check the geometry limits against an IFD's declared dimensions
     /// — called before any pixel allocation.
     pub(crate) fn check_dimensions(&self, width: u32, height: u32) -> Result<()> {
-        if let Some(m) = self.max_width {
-            if width > m {
-                return Err(TiffError::limit(format!(
-                    "TIFF: ImageWidth {width} exceeds the {m} limit"
-                )));
-            }
+        if let Some(m) = self.max_width
+            && width > m
+        {
+            return Err(TiffError::limit(format!(
+                "TIFF: ImageWidth {width} exceeds the {m} limit"
+            )));
         }
-        if let Some(m) = self.max_height {
-            if height > m {
-                return Err(TiffError::limit(format!(
-                    "TIFF: ImageLength {height} exceeds the {m} limit"
-                )));
-            }
+        if let Some(m) = self.max_height
+            && height > m
+        {
+            return Err(TiffError::limit(format!(
+                "TIFF: ImageLength {height} exceeds the {m} limit"
+            )));
         }
         if let Some(m) = self.max_pixels {
             let px = (width as u64).saturating_mul(height as u64);
@@ -126,12 +126,12 @@ impl DecodeOptions {
     /// Check the assembled-bytes limit — called before any pixel
     /// allocation.
     pub(crate) fn check_bytes(&self, total: u64, what: &str) -> Result<()> {
-        if let Some(m) = self.max_bytes {
-            if total > m {
-                return Err(TiffError::limit(format!(
-                    "TIFF: image too large ({what} = {total} bytes > {m})"
-                )));
-            }
+        if let Some(m) = self.max_bytes
+            && total > m
+        {
+            return Err(TiffError::limit(format!(
+                "TIFF: image too large ({what} = {total} bytes > {m})"
+            )));
         }
         Ok(())
     }

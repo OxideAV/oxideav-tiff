@@ -36,7 +36,7 @@ use oxideav_core::{
     BlobKind, CodecId, CodecOptions, CodecParameters, CodecRegistry, Frame, MetadataBlob, Packet,
     PixelFormat, StreamInfo, TimeBase, VideoFrame,
 };
-use oxideav_tiff::{Palette, Plane, TiffImage, TiffPixelFormat, ACCEPTED_PIXEL_FORMATS};
+use oxideav_tiff::{ACCEPTED_PIXEL_FORMATS, Palette, Plane, TiffImage, TiffPixelFormat};
 
 /// An in-memory sink the muxer owns.
 #[derive(Clone, Default)]

@@ -409,7 +409,7 @@ fn parse_ifd_classic(input: &[u8], bo: ByteOrder, offset: u64) -> Result<(Vec<En
                 let p = bo.read_u32(val_off_slot) as usize;
                 let total = usize::try_from(total_u64)
                     .map_err(|_| Error::invalid("TIFF: entry total bytes exceed usize"))?;
-                if p.checked_add(total).map_or(true, |end| end > input.len()) {
+                if p.checked_add(total).is_none_or(|end| end > input.len()) {
                     return Err(Error::invalid(format!(
                         "TIFF: entry tag={tag} value offset past EOF"
                     )));
@@ -486,7 +486,7 @@ fn parse_ifd_big(input: &[u8], bo: ByteOrder, offset: u64) -> Result<(Vec<Entry>
                 let p = bo.read_u64(val_off_slot) as usize;
                 let total = usize::try_from(total)
                     .map_err(|_| Error::invalid("BigTIFF: entry total bytes exceed usize"))?;
-                if p.checked_add(total).map_or(true, |end| end > input.len()) {
+                if p.checked_add(total).is_none_or(|end| end > input.len()) {
                     return Err(Error::invalid(format!(
                         "BigTIFF: entry tag={tag} value offset past EOF"
                     )));
@@ -580,7 +580,7 @@ mod tests {
         v.extend_from_slice(&3u16.to_le_bytes()); // SHORT
         v.extend_from_slice(&1u32.to_le_bytes()); // count = 1
         v.extend_from_slice(&[0x40, 0x00, 0x00, 0x00]); // value 0x40 inline
-                                                        // next-IFD
+        // next-IFD
         v.extend_from_slice(&0u32.to_le_bytes());
         let h = parse_header(&v).unwrap();
         let (entries, next) = parse_ifd(&v, h.byte_order, h.variant, h.first_ifd_offset).unwrap();
@@ -652,9 +652,9 @@ mod tests {
         v.extend_from_slice(&8u16.to_le_bytes()); // offset bytesize
         v.extend_from_slice(&0u16.to_le_bytes()); // reserved
         v.extend_from_slice(&16u64.to_le_bytes()); // first_ifd_offset → just after header
-                                                   // IFD at offset 16: 8 bytes count + N*20 entries + 8 bytes next.
+        // IFD at offset 16: 8 bytes count + N*20 entries + 8 bytes next.
         v.extend_from_slice(&1u64.to_le_bytes()); // count = 1
-                                                  // Entry: tag=0, field_type=16 (LONG8), count=u64::MAX
+        // Entry: tag=0, field_type=16 (LONG8), count=u64::MAX
         v.extend_from_slice(&0u16.to_le_bytes()); // tag
         v.extend_from_slice(&16u16.to_le_bytes()); // LONG8
         v.extend_from_slice(&u64::MAX.to_le_bytes()); // count

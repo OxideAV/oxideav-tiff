@@ -32,7 +32,7 @@
 
 use crate::error::{Result, TiffError as Error};
 
-use oxideav_core::{frame::VideoFrame, time::TimeBase, CodecId, CodecParameters, Frame, Packet};
+use oxideav_core::{CodecId, CodecParameters, Frame, Packet, frame::VideoFrame, time::TimeBase};
 
 /// Result of decoding one JPEG-compressed TIFF segment.
 ///
@@ -484,11 +484,11 @@ pub fn composite_yuv_to_rgb(
         JpegPixelFormat::Gray8 => return Err(Error::invalid("composite_yuv_to_rgb on Gray8")),
         JpegPixelFormat::Rgb24 => return Err(Error::invalid("composite_yuv_to_rgb on Rgb24")),
         JpegPixelFormat::Rgb24Packed => {
-            return Err(Error::invalid("composite_yuv_to_rgb on Rgb24Packed"))
+            return Err(Error::invalid("composite_yuv_to_rgb on Rgb24Packed"));
         }
         JpegPixelFormat::Cmyk8 => return Err(Error::invalid("composite_yuv_to_rgb on Cmyk8")),
         JpegPixelFormat::YCbCr24Packed => {
-            return Err(Error::invalid("composite_yuv_to_rgb on YCbCr24Packed"))
+            return Err(Error::invalid("composite_yuv_to_rgb on YCbCr24Packed"));
         }
         JpegPixelFormat::Yuv444P => (1u32, 1u32),
         JpegPixelFormat::Yuv422P => (2, 1),
@@ -843,7 +843,7 @@ pub fn composite_yuv16_to_rgb48(
         _ => {
             return Err(Error::invalid(
                 "composite_yuv16_to_rgb48 called with a non-YUV segment",
-            ))
+            ));
         }
     };
     if seg.bits <= 8 {

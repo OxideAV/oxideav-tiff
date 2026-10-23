@@ -27,8 +27,8 @@
 //!      combinations are rejected with a precise error.
 
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
-    TiffPixelFormat,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, TiffPixelFormat, decode_page,
+    encode_page,
 };
 
 // ---------------------------------------------------------------------------
@@ -410,15 +410,17 @@ fn rejects_chunky_predictor_and_ccitt() {
     assert!(encode_page(&base(TiffCompression::None, true, false, None)).is_err());
     // Tiled planar subsampled now encodes (TN2-amended §21).
     assert!(encode_page(&base(TiffCompression::None, false, true, Some((16, 16)))).is_ok());
-    assert!(encode_page(&base(
-        TiffCompression::CcittT6 {
-            uncompressed: false
-        },
-        false,
-        false,
-        None
-    ))
-    .is_err());
+    assert!(
+        encode_page(&base(
+            TiffCompression::CcittT6 {
+                uncompressed: false
+            },
+            false,
+            false,
+            None
+        ))
+        .is_err()
+    );
     // Planar *strips* now encode.
     assert!(encode_page(&base(TiffCompression::None, false, true, None)).is_ok());
     // A tile geometry that is not a multiple of the subsampling factors
@@ -548,7 +550,7 @@ fn build_classic_subsampled(width: u32, height: u32, sh: u16, sv: u16, strip: &[
 
     let bps_off = blobs_offset;
     let mut cursor = bps_off + 6;
-    if cursor % 4 != 0 {
+    if !cursor.is_multiple_of(4) {
         cursor += 4 - (cursor % 4);
     }
     let rbw_off = cursor;

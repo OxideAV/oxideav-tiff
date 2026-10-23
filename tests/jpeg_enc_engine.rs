@@ -18,10 +18,10 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use oxideav_tiff::jpeg::{decode_segment, JpegPixelFormat};
+use oxideav_tiff::jpeg::{JpegPixelFormat, decode_segment};
 use oxideav_tiff::jpeg_enc::{
-    encode_frame, gather_stats, scaled_quant_table, HuffSpec, HuffStats, JpegComponent, JpegFrame,
-    JpegProcess, JpegTableSet, QUANT_CHROMINANCE_K2, QUANT_LUMINANCE_K1,
+    HuffSpec, HuffStats, JpegComponent, JpegFrame, JpegProcess, JpegTableSet, QUANT_CHROMINANCE_K2,
+    QUANT_LUMINANCE_K1, encode_frame, gather_stats, scaled_quant_table,
 };
 use oxideav_tiff::types::*;
 
@@ -96,7 +96,9 @@ fn parse_pnm(raw: &[u8]) -> (usize, usize, usize, u32, Vec<u16>) {
     let maxval: u32 = fields[3].parse().unwrap();
     let body = &raw[i..];
     let samples: Vec<u16> = if maxval > 255 {
-        body.chunks_exact(2)
+        body.as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_be_bytes([c[0], c[1]]))
             .collect()
     } else {
@@ -384,7 +386,9 @@ fn extended_12bit_gray_roundtrips() {
     let got: Vec<u16> = (0..h)
         .flat_map(|y| {
             plane.data[y * plane.stride..y * plane.stride + w * 2]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect::<Vec<_>>()
         })
@@ -442,7 +446,9 @@ fn lossless_gray_is_sample_exact_for_every_predictor() {
                 (0..h)
                     .flat_map(|y| {
                         plane.data[y * plane.stride..y * plane.stride + w * 2]
-                            .chunks_exact(2)
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
                             .map(|c| u16::from_le_bytes([c[0], c[1]]))
                             .collect::<Vec<_>>()
                     })
@@ -760,7 +766,9 @@ fn restart_intervals_lossless_are_row_aligned_and_exact() {
         let got: Vec<u16> = (0..h)
             .flat_map(|y| {
                 plane.data[y * plane.stride..y * plane.stride + w * 2]
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                     .collect::<Vec<_>>()
             })

@@ -30,8 +30,8 @@
 
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
-    TiffPixelFormat,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, TiffPixelFormat, decode_page,
+    encode_page,
 };
 
 /// Full-resolution interleaved (Y, Cb, Cr) with chroma constant over
@@ -163,7 +163,7 @@ fn planar_subsampled_ifd_and_verbatim_planes() {
         "uncompressed plane byte counts: full-res Y + reduced chroma"
     );
     // Y plane payload is the input's Y bytes verbatim.
-    let y_want: Vec<u8> = pixels.chunks_exact(3).map(|c| c[0]).collect();
+    let y_want: Vec<u8> = pixels.as_chunks::<3>().0.iter().map(|c| c[0]).collect();
     let y_off = offsets[0] as usize;
     assert_eq!(&file[y_off..y_off + y_want.len()], &y_want[..]);
     // Chroma planes are the per-block values (block-constant input, so
@@ -197,8 +197,8 @@ fn hand_built_two_strip_planar(y: &[u8; 16], cb: &[u8; 4], cr: &[u8; 4]) -> Vec<
     f.extend_from_slice(b"II");
     f.extend_from_slice(&42u16.to_le_bytes());
     f.extend_from_slice(&0u32.to_le_bytes()); // patch later
-                                              // Pixel data: 6 strips. Y rows 0-1, Y rows 2-3, Cb row 0, Cb row 1,
-                                              // Cr row 0, Cr row 1.
+    // Pixel data: 6 strips. Y rows 0-1, Y rows 2-3, Cb row 0, Cb row 1,
+    // Cr row 0, Cr row 1.
     let strips: [&[u8]; 6] = [
         &y[0..8],
         &y[8..16],
@@ -216,7 +216,7 @@ fn hand_built_two_strip_planar(y: &[u8; 16], cb: &[u8; 4], cr: &[u8; 4]) -> Vec<
     }
     // Out-of-line arrays: BitsPerSample (3 SHORTs), StripOffsets (6
     // LONGs), StripByteCounts (6 LONGs).
-    while f.len() % 2 != 0 {
+    while !f.len().is_multiple_of(2) {
         f.push(0);
     }
     let bps_off = f.len() as u32;

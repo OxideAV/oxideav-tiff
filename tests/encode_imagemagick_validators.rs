@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use oxideav_tiff::{
-    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
-    TiffCompression, TiffPixelFormat,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, TiffPixelFormat, decode_all,
+    decode_page, encode_page, encode_pages,
 };
 
 fn binary_available(name: &str) -> bool {

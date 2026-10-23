@@ -36,7 +36,7 @@
 //! offsets, or §15 edge padding would diverge from the strip decode of
 //! the identical image.
 
-use oxideav_tiff::{decode_page, TiffPixelFormat};
+use oxideav_tiff::{TiffPixelFormat, decode_page};
 
 // ---------------------------------------------------------------------
 // Bit-packing helpers

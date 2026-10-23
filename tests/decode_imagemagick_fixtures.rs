@@ -15,7 +15,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use oxideav_tiff::{decode_page, Page, TiffPixelFormat};
+use oxideav_tiff::{Page, TiffPixelFormat, decode_page};
 
 fn convert_available() -> bool {
     Command::new("convert")

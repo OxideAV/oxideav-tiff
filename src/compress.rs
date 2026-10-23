@@ -612,7 +612,7 @@ mod tests {
     fn packbits_mixed() {
         let mut src = vec![0u8; 10];
         src.extend_from_slice(&[1, 2, 3, 4, 5]);
-        src.extend(std::iter::repeat(0xFF).take(20));
+        src.extend(std::iter::repeat_n(0xFF, 20));
         let p = pack_packbits(&src);
         let back = unpack_packbits(&p, src.len()).unwrap();
         assert_eq!(back, src);

@@ -29,8 +29,8 @@
 //! predictor math is transcribed from the §14 floating-point predictor.
 
 use oxideav_tiff::{
-    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
-    TiffCompression, TiffPixelFormat,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, TiffPixelFormat, decode_all,
+    decode_page, encode_page, encode_pages,
 };
 
 // ---------------------------------------------------------------------------

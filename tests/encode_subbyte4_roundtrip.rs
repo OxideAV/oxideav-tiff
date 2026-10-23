@@ -15,8 +15,8 @@
 
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, RgbColor, TiffCompression,
-    TiffPixelFormat,
+    EncodePage, EncodePixelFormat, PageExtras, RgbColor, TiffCompression, TiffPixelFormat,
+    decode_page, encode_page,
 };
 
 /// Deterministic per-pixel nibble values (0..=15).

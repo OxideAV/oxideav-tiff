@@ -26,8 +26,8 @@ use std::process::{Command, Stdio};
 
 use oxideav_tiff::types::*;
 #[cfg(feature = "registry")]
-use oxideav_tiff::{decode_all, Page};
-use oxideav_tiff::{decode_page, TiffError};
+use oxideav_tiff::{Page, decode_all};
+use oxideav_tiff::{TiffError, decode_page};
 
 // ---------------------------------------------------------------------------
 // ImageMagick JPEG fixture generation (black-box; only the
@@ -261,20 +261,8 @@ impl Cfg {
 /// left-justified in the 4-byte value/offset slot per TIFF 6.0 §2.
 fn build_jpeg_tiff(cfg: &Cfg, jpeg: &[u8]) -> Vec<u8> {
     let le = cfg.le;
-    let p16 = |v: u16| -> [u8; 2] {
-        if le {
-            v.to_le_bytes()
-        } else {
-            v.to_be_bytes()
-        }
-    };
-    let p32 = |v: u32| -> [u8; 4] {
-        if le {
-            v.to_le_bytes()
-        } else {
-            v.to_be_bytes()
-        }
-    };
+    let p16 = |v: u16| -> [u8; 2] { if le { v.to_le_bytes() } else { v.to_be_bytes() } };
+    let p32 = |v: u32| -> [u8; 4] { if le { v.to_le_bytes() } else { v.to_be_bytes() } };
     let short_val = |v: u16| -> [u8; 4] {
         let mut b = [0u8; 4];
         b[..2].copy_from_slice(&p16(v));

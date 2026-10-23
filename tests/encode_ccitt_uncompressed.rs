@@ -22,7 +22,7 @@ use std::process::{Command, Stdio};
 
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::types::*;
-use oxideav_tiff::{decode_page, encode_page, EncodePage, EncodePixelFormat, TiffCompression};
+use oxideav_tiff::{EncodePage, EncodePixelFormat, TiffCompression, decode_page, encode_page};
 
 fn bilevel_page(w: u32, h: u32, pixels: &[u8], compression: TiffCompression) -> Vec<u8> {
     let page = EncodePage {

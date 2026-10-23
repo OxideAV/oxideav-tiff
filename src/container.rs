@@ -35,7 +35,7 @@ use oxideav_core::{
     StreamInfo, TimeBase,
 };
 use oxideav_core::{
-    ContainerRegistry, Demuxer, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek, MAX_PROBE_SCORE,
+    ContainerRegistry, Demuxer, MAX_PROBE_SCORE, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek,
 };
 
 use crate::decoder::ifd_chain;
@@ -43,7 +43,7 @@ use crate::ifd::parse_header;
 use crate::image::Metadata;
 use crate::metadata::extract_metadata;
 use crate::options::EncodeOptions;
-use crate::registry::{metadata_to_blobs, page_geometry, RegistryEncodeOptions};
+use crate::registry::{RegistryEncodeOptions, metadata_to_blobs, page_geometry};
 
 pub fn register(reg: &mut ContainerRegistry) {
     reg.register_demuxer("tiff", open_demuxer);

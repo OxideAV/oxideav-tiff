@@ -19,7 +19,7 @@
 //! that one field `None` rather than failing the whole decode.
 //! Descriptive metadata must never gate a pixel decode.
 
-use crate::ifd::{find, ByteOrder, Entry};
+use crate::ifd::{ByteOrder, Entry, find};
 use crate::types::*;
 
 /// Resolution unit stored in tag 296 (ResolutionUnit), TIFF 6.0 §8.
@@ -294,11 +294,7 @@ fn icc_profile(entries: &[Entry]) -> Option<Vec<u8>> {
 /// (lossy-decoded) string is non-empty.
 fn ascii(entries: &[Entry], tag: u16) -> Option<String> {
     let s = find(entries, tag)?.as_ascii().ok()?;
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 /// Gather the descriptive + structural metadata from a parsed IFD.

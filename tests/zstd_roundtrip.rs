@@ -35,8 +35,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use oxideav_tiff::{
-    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
-    RgbColor, TiffCompression,
+    EncodePage, EncodePixelFormat, PageExtras, RgbColor, TiffCompression, decode_all, decode_page,
+    encode_page, encode_pages,
 };
 
 // ---- Source-pixel generators (deterministic, layout-independent) ----

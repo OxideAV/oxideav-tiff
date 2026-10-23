@@ -11,12 +11,12 @@
 //! the TIFF-specific depth entry points ([`decode_page_with`],
 //! [`decode_page_at_with`], [`decode_pages_with`]).
 
-use crate::ccitt::{decode_ccitt, reverse_bits_in_place, CcittVariant, FillOrder};
+use crate::ccitt::{CcittVariant, FillOrder, decode_ccitt, reverse_bits_in_place};
 use crate::compress::{unpack_deflate, unpack_lzw, unpack_packbits, unpack_zstd};
 use crate::error::{Result, TiffError as Error};
-use crate::ifd::{find, parse_header, parse_ifd, ByteOrder, Entry, ParsedHeader};
+use crate::ifd::{ByteOrder, Entry, ParsedHeader, find, parse_header, parse_ifd};
 use crate::image::{ColorInfo, Metadata, Page, Palette, Plane, TiffImage, TiffPixelFormat};
-use crate::metadata::{extract_format_info, extract_metadata, TiffFormatInfo, TiffMetadata};
+use crate::metadata::{TiffFormatInfo, TiffMetadata, extract_format_info, extract_metadata};
 use crate::options::DecodeOptions;
 use crate::types::*;
 
@@ -1183,7 +1183,7 @@ pub(crate) fn decode_ifd(
         (p, s, b) => {
             return Err(Error::invalid(format!(
                 "TIFF: photometric={p} samples_per_pixel={s} bits_per_sample={b} not supported"
-            )))
+            )));
         }
     };
 
@@ -1340,7 +1340,7 @@ fn decode_tiles_planar_ycbcr_subsampled(
     sh: usize,
     sv: usize,
 ) -> Result<Vec<u8>> {
-    if width as usize % sh != 0 || height as usize % sv != 0 {
+    if !(width as usize).is_multiple_of(sh) || !(height as usize).is_multiple_of(sv) {
         return Err(Error::invalid(format!(
             "TIFF: planar subsampled YCbCr requires ImageWidth ({width}) to be a multiple \
              of YCbCrSubsampleHoriz ({sh}) and ImageLength ({height}) a multiple of \
@@ -1363,7 +1363,7 @@ fn decode_tiles_planar_ycbcr_subsampled(
     }
     // §21 (amended): tile dimensions must be integer multiples of the
     // subsampling factors so every tile holds whole chroma samples.
-    if tile_w % sh != 0 || tile_h % sv != 0 {
+    if !tile_w.is_multiple_of(sh) || !tile_h.is_multiple_of(sv) {
         return Err(Error::invalid(format!(
             "TIFF: planar subsampled YCbCr TileWidth/TileLength ({tile_w}x{tile_h}) must \
              be integer multiples of YCbCrSubSampling ({sh},{sv}) — TIFF 6.0 §21 \
@@ -1837,7 +1837,7 @@ fn decode_tiles(
             // reads only `width` pixels per row, ignores).
             let bits_per_dst_origin =
                 (tx as u64) * (tile_w as u64) * (samples_per_pixel as u64) * (bps_first as u64);
-            if bits_per_dst_origin % 8 != 0 {
+            if !bits_per_dst_origin.is_multiple_of(8) {
                 // Cannot occur for `TileWidth` a multiple of 16, but
                 // guard against a non-conformant writer rather than
                 // panic on a misaligned slice.
@@ -1914,7 +1914,7 @@ fn decode_tiles_ycbcr_subsampled(
 
     // §21 page 90: TileWidth / TileLength must be integer multiples of
     // the subsampling factors so a tile is a whole number of data units.
-    if tile_w as usize % sh != 0 || tile_h as usize % sv != 0 {
+    if !(tile_w as usize).is_multiple_of(sh) || !(tile_h as usize).is_multiple_of(sv) {
         return Err(Error::invalid(format!(
             "TIFF: subsampled-YCbCr TileWidth/TileLength ({tile_w}x{tile_h}) must be integer \
              multiples of YCbCrSubSampling ({sh},{sv}) per TIFF 6.0 §21"
@@ -2020,7 +2020,7 @@ fn decode_strips_planar(
             "TIFF: PlanarConfiguration=2 with SamplesPerPixel<2 is meaningless",
         ));
     }
-    if bps_first % 8 != 0 {
+    if !bps_first.is_multiple_of(8) {
         // Sub-byte component planes would need bit-level
         // interleaving in the chunky-rebuild step. None of the
         // photometrics that use planar layout (RGB, YCbCr, CMYK)
@@ -2238,7 +2238,7 @@ fn decode_strips_planar_ycbcr_subsampled(
     // §21 page 90: "ImageWidth and ImageLength are constrained to be
     // integer multiples of YCbCrSubsampleHoriz and YCbCrSubsampleVert
     // respectively."
-    if width as usize % sh != 0 || height as usize % sv != 0 {
+    if !(width as usize).is_multiple_of(sh) || !(height as usize).is_multiple_of(sv) {
         return Err(Error::invalid(format!(
             "TIFF: planar subsampled YCbCr requires ImageWidth ({width}) to be a multiple \
              of YCbCrSubsampleHoriz ({sh}) and ImageLength ({height}) a multiple of \
@@ -2260,7 +2260,7 @@ fn decode_strips_planar_ycbcr_subsampled(
     // §21 page 90: "RowsPerStrip must be an integer multiple of
     // YCbCrSubsampleVert." Without it a strip boundary would split a
     // chroma row between two independently-compressed strips.
-    if rows_per_strip == 0 || rows_per_strip as usize % sv != 0 {
+    if rows_per_strip == 0 || !(rows_per_strip as usize).is_multiple_of(sv) {
         return Err(Error::invalid(format!(
             "TIFF: planar subsampled YCbCr RowsPerStrip ({rows_per_strip}) must be a \
              non-zero integer multiple of YCbCrSubsampleVert ({sv}) — TIFF 6.0 §21 page 90"
@@ -2405,7 +2405,7 @@ fn decode_tiles_planar(
             "TIFF: PlanarConfiguration=2 with SamplesPerPixel<2 is meaningless",
         ));
     }
-    if bps_first % 8 != 0 {
+    if !bps_first.is_multiple_of(8) {
         return Err(Error::invalid(
             "TIFF: planar tiled images at sub-byte bit depths not supported",
         ));
@@ -2813,7 +2813,7 @@ fn apply_horizontal_predictor(
         _ => {
             return Err(Error::invalid(format!(
                 "TIFF: predictor at bits_per_sample={bps} unsupported"
-            )))
+            )));
         }
     }
     Ok(())
@@ -3141,11 +3141,7 @@ fn build_pal8(
                 8 => row[x],
                 4 => {
                     let byte = row[x / 2];
-                    if x & 1 == 0 {
-                        byte >> 4
-                    } else {
-                        byte & 0x0F
-                    }
+                    if x & 1 == 0 { byte >> 4 } else { byte & 0x0F }
                 }
                 _ => 0,
             };
@@ -3282,7 +3278,7 @@ fn build_rgb24_from_cielab(src: &[u8], w: u32, h: u32) -> TiffImage {
     let stride = w as usize * 3;
     let pixels = (w as usize) * (h as usize);
     let mut data = Vec::with_capacity(stride * h as usize);
-    for triple in src.chunks_exact(3).take(pixels) {
+    for triple in src.as_chunks::<3>().0.iter().take(pixels) {
         // L* in 0..255 maps linearly to 0..100 per §23 ("Dividing
         // the 0-100 range of L* into 256 levels").
         let l_byte = triple[0] as f64;
@@ -3713,7 +3709,7 @@ fn decode_ifd_jpeg_planar(
         // §21 (amended): "TileWidth must be an integer multiple of
         // ChromaSubsampleHoriz and TileLength must be an integer
         // multiple of ChromaSubsampleVert."
-        if tile_w as usize % sub_h != 0 || tile_h as usize % sub_v != 0 {
+        if !(tile_w as usize).is_multiple_of(sub_h) || !(tile_h as usize).is_multiple_of(sub_v) {
             return Err(Error::invalid(format!(
                 "TIFF/JPEG: planar tiled YCbCr TileWidth/TileLength ({tile_w}x{tile_h}) \
                  must be integer multiples of YCbCrSubSampling ({sub_h},{sub_v}) — \
@@ -3789,7 +3785,7 @@ fn decode_ifd_jpeg_planar(
         // §21 (amended): "RowsPerStrip is required to be an integer
         // multiple of ChromaSubSampleVert (unless RowsPerStrip >=
         // ImageLength, in which case its exact value is unimportant)."
-        if rows_per_strip < height && rows_per_strip as usize % sub_v != 0 {
+        if rows_per_strip < height && !(rows_per_strip as usize).is_multiple_of(sub_v) {
             return Err(Error::invalid(format!(
                 "TIFF/JPEG: planar YCbCr RowsPerStrip ({rows_per_strip}) must be an \
                  integer multiple of YCbCrSubsampleVert ({sub_v}) — TIFF 6.0 §21 \
@@ -4374,7 +4370,7 @@ fn decode_ifd_jpeg_old_tables_form(
                 strip_offsets.len()
             )));
         }
-        if rows_per_strip < height && rows_per_strip as usize % sub_v != 0 {
+        if rows_per_strip < height && !(rows_per_strip as usize).is_multiple_of(sub_v) {
             return Err(Error::invalid(format!(
                 "TIFF/JPEG(§22): planar YCbCr RowsPerStrip ({rows_per_strip}) must be an \
                  integer multiple of YCbCrSubsampleVert ({sub_v}) — TIFF 6.0 §21"
@@ -4660,7 +4656,8 @@ fn decode_ifd_jpeg_old_tables_form_tiled(
             )));
         }
         if photometric == PHOTO_YCBCR
-            && (tile_w as usize % sub_h != 0 || tile_h as usize % sub_v != 0)
+            && (!(tile_w as usize).is_multiple_of(sub_h)
+                || !(tile_h as usize).is_multiple_of(sub_v))
         {
             return Err(Error::invalid(format!(
                 "TIFF/JPEG(§22): planar tiled YCbCr TileWidth/TileLength ({tile_w}x{tile_h}) \
@@ -5050,10 +5047,10 @@ fn composite_segment(
     photometric: u16,
 ) -> Result<()> {
     use crate::jpeg::{
-        composite_cmyk_packed, composite_gray, composite_gray16, composite_rgb48_packed,
-        composite_rgb48_planar, composite_rgb_packed, composite_rgb_planar,
-        composite_ycbcr48_packed, composite_ycbcr_packed, composite_yuv16_to_rgb48,
-        composite_yuv_to_rgb, JpegPixelFormat,
+        JpegPixelFormat, composite_cmyk_packed, composite_gray, composite_gray16,
+        composite_rgb_packed, composite_rgb_planar, composite_rgb48_packed, composite_rgb48_planar,
+        composite_ycbcr_packed, composite_ycbcr48_packed, composite_yuv_to_rgb,
+        composite_yuv16_to_rgb48,
     };
     let deep = seg.bits > 8;
     match seg.pixel_format {

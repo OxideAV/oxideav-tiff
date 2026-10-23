@@ -19,8 +19,8 @@
 //! independent of any external reference.
 
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, RgbColor, TiffCompression,
-    TiffPixelFormat,
+    EncodePage, EncodePixelFormat, PageExtras, RgbColor, TiffCompression, TiffPixelFormat,
+    decode_page, encode_page,
 };
 
 // ---- Source-pixel generators (deterministic, layout-independent) ----

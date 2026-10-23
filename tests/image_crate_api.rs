@@ -8,11 +8,11 @@
 use std::io::Cursor;
 
 use oxideav_tiff::{
-    decode, decode_all, decode_from, decode_page, decode_rgb8, decode_rgba8, decode_with, encode,
-    encode_all, encode_page, encode_rgb8, encode_rgba8, encode_to, info, probe, ColorInfo,
-    ColorRange, DecodeOptions, EncodeOptions, EncodePage, EncodePixelFormat, Error,
+    ColorInfo, ColorRange, DecodeOptions, EncodeOptions, EncodePage, EncodePixelFormat, Error,
     ExtraSampleKind, Frame, Metadata, PageExtras, Palette, PixelFormat, Plane, TiffCompression,
-    TiffImage,
+    TiffImage, decode, decode_all, decode_from, decode_page, decode_rgb8, decode_rgba8,
+    decode_with, encode, encode_all, encode_page, encode_rgb8, encode_rgba8, encode_to, info,
+    probe,
 };
 
 fn ramp(n: usize, seed: u8) -> Vec<u8> {
@@ -510,11 +510,13 @@ fn encode_refuses_what_tiff_cannot_carry() {
     ));
     // WebP carries 8-bit RGB / RGBA only.
     let g = image(PixelFormat::Gray8, 2, 2);
-    assert!(encode(
-        &g,
-        &EncodeOptions::default().with_compression(TiffCompression::Webp)
-    )
-    .is_err());
+    assert!(
+        encode(
+            &g,
+            &EncodeOptions::default().with_compression(TiffCompression::Webp)
+        )
+        .is_err()
+    );
     // Metadata that is not an Exif TIFF payload is InvalidData.
     let bad = g
         .clone()
@@ -720,8 +722,8 @@ fn error_shape() {
 #[allow(deprecated)]
 fn deprecated_wrappers_keep_the_historical_shapes() {
     use oxideav_tiff::{
-        decode_tiff, decode_tiff_all, decode_tiff_all_pages, decode_tiff_at, encode_tiff,
-        encode_tiff_multi, DecodedTiff, TiffPlane,
+        DecodedTiff, TiffPlane, decode_tiff, decode_tiff_all, decode_tiff_all_pages,
+        decode_tiff_at, encode_tiff, encode_tiff_multi,
     };
     let _plane: TiffPlane = Plane::new(1, vec![0]);
     // Palette pages come back flattened to Rgb24 exactly as before.

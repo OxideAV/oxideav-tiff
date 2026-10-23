@@ -78,7 +78,7 @@ pub(crate) fn unpack_webp(
         // sample to land in at SamplesPerPixel = 3).
         3 => {
             let mut out = Vec::with_capacity(pixels * 3);
-            for px in decoded.rgba.chunks_exact(4) {
+            for px in decoded.rgba.as_chunks::<4>().0 {
                 out.extend_from_slice(&px[..3]);
             }
             Ok(out)
@@ -117,7 +117,7 @@ pub(crate) fn pack_webp(raw: &[u8], width: u32, rows: u32) -> Result<Vec<u8>> {
         // RGBA surface. VP8L stores the constant channel in a handful
         // of bytes, so the padding is free on the wire.
         let mut v = Vec::with_capacity(pixels * 4);
-        for px in raw.chunks_exact(3) {
+        for px in raw.as_chunks::<3>().0 {
             v.extend_from_slice(px);
             v.push(0xFF);
         }

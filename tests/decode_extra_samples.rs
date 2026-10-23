@@ -38,7 +38,7 @@
 //! Tag 338 sorts after every other tag in the fixture so it is always
 //! appended last in tag-order.
 
-use oxideav_tiff::{decode_page, TiffPixelFormat};
+use oxideav_tiff::{TiffPixelFormat, decode_page};
 
 /// IFD entry, SHORT (field-type = 3) with a single inline value.
 fn entry_short(tag: u16, value: u16) -> [u8; 12] {

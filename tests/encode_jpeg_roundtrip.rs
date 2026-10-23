@@ -27,8 +27,8 @@ use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::jpeg::merge_jpeg_segment;
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_page, encode_page, rgb24_to_ycbcr24, EncodePage, EncodePixelFormat, JpegOptions,
-    JpegProcess, JpegTablesLayout, PageExtras, TiffCompression, TiffPixelFormat,
+    EncodePage, EncodePixelFormat, JpegOptions, JpegProcess, JpegTablesLayout, PageExtras,
+    TiffCompression, TiffPixelFormat, decode_page, encode_page, rgb24_to_ycbcr24,
 };
 
 // ---------------------------------------------------------------------------
@@ -99,7 +99,9 @@ fn parse_pnm(raw: &[u8]) -> (usize, usize, usize, u32, Vec<u16>) {
     let maxval: u32 = fields[3].parse().unwrap();
     let body = &raw[i..];
     let samples: Vec<u16> = if maxval > 255 {
-        body.chunks_exact(2)
+        body.as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_be_bytes([c[0], c[1]]))
             .collect()
     } else {
@@ -433,7 +435,9 @@ fn u16_frame(decoded: &oxideav_tiff::Page, spp: usize) -> Vec<u16> {
     (0..decoded.image.height as usize)
         .flat_map(|y| {
             p.data[y * p.stride..y * p.stride + w * spp * 2]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect::<Vec<_>>()
         })
@@ -1076,7 +1080,9 @@ fn cmyk_jpeg_roundtrips_through_own_decoder() {
     let rgb = smooth_rgb(w as usize, h as usize);
     // Simple CMY(K=0) so the decoder's §16 additive mapping inverts.
     let cmyk: Vec<u8> = rgb
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .flat_map(|p| [255 - p[0], 255 - p[1], 255 - p[2], 0])
         .collect();
     for planar in [false, true] {
@@ -1099,13 +1105,11 @@ fn cmyk_jpeg_roundtrips_through_own_decoder() {
             assert!(info.contains("separated"), "{info}");
         }
         let segs = extract_segments(&tiff);
-        if !planar {
-            if let Some((c, dw, dh, _)) = djpeg(&segs[0], &["-pnm"]) {
-                // djpeg emits CMYK as a 4-channel PAM only with -pnm
-                // refusing; accept either a refusal (None) or RGB.
-                assert!(c == 3 || c == 1);
-                assert_eq!((dw, dh), (w as usize, h as usize));
-            }
+        if !planar && let Some((c, dw, dh, _)) = djpeg(&segs[0], &["-pnm"]) {
+            // djpeg emits CMYK as a 4-channel PAM only with -pnm
+            // refusing; accept either a refusal (None) or RGB.
+            assert!(c == 3 || c == 1);
+            assert_eq!((dw, dh), (w as usize, h as usize));
         }
     }
 }
@@ -1480,10 +1484,12 @@ fn jpeg_rejections_are_precise() {
     let comp = jpeg(75, JpegTablesLayout::Shared);
     let mut p = page(w, h, EncodePixelFormat::Gray8 { pixels: &g }, comp);
     p.predictor = true;
-    assert!(encode_page(&p)
-        .unwrap_err()
-        .to_string()
-        .contains("Predictor"));
+    assert!(
+        encode_page(&p)
+            .unwrap_err()
+            .to_string()
+            .contains("Predictor")
+    );
     let bits = vec![0u8; 2 * 16];
     let err = encode_page(&page(
         w,

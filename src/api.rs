@@ -15,11 +15,11 @@ use crate::decoder::{
     resolve_color,
 };
 use crate::encoder::{
-    encode_pages, AuxIfdEntry, EncodePage, EncodePixelFormat, ExtraSampleKind, PageExtras, RgbColor,
+    AuxIfdEntry, EncodePage, EncodePixelFormat, ExtraSampleKind, PageExtras, RgbColor, encode_pages,
 };
 use crate::error::{Result, TiffError as Error};
-use crate::exif::{parse_exif_payload, OwnedEntry};
-use crate::ifd::{find, parse_header, ByteOrder, Entry, TiffVariant};
+use crate::exif::{OwnedEntry, parse_exif_payload};
+use crate::ifd::{ByteOrder, Entry, TiffVariant, find, parse_header};
 use crate::image::{Frame, ImageInfo, Page, PixelFormat, RgbImage, RgbaImage, TiffImage};
 use crate::metadata::{extract_format_info, extract_metadata};
 use crate::options::{DecodeOptions, EncodeOptions};
@@ -165,7 +165,7 @@ pub(crate) fn native_layout(entries: &[Entry], bo: ByteOrder) -> Result<Layout> 
         (p, s, b) => {
             return Err(Error::invalid(format!(
                 "TIFF: photometric={p} samples_per_pixel={s} bits_per_sample={b} not supported"
-            )))
+            )));
         }
     };
     Ok(Layout {
@@ -404,7 +404,9 @@ impl<'i> PreparedPage<'i> {
             };
         let floats = if image.format.is_float() {
             pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect()
         } else {

@@ -21,7 +21,7 @@
 //!     plain chunky encode of the same source.
 
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, decode_page, encode_page,
 };
 
 /// Hand-build a classic-II chunky CMYK TIFF (`PlanarConfiguration = 1`):

@@ -8,8 +8,8 @@
 
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::{
-    decode, decode_page, encode, encode_page, info, EncodeOptions, EncodePage, EncodePixelFormat,
-    Metadata, PageExtras, PixelFormat, Plane, TiffCompression, TiffError, TiffImage,
+    EncodeOptions, EncodePage, EncodePixelFormat, Metadata, PageExtras, PixelFormat, Plane,
+    TiffCompression, TiffError, TiffImage, decode, decode_page, encode, encode_page, info,
 };
 
 /// Two IPTC-IIM datasets: record 2 dataset 5 (ObjectName) and record 2

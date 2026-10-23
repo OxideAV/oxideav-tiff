@@ -37,7 +37,7 @@ fn build_chunky_ycbcr_tiff(width: u32, height: u32, ycbcr_chunky: &[u8]) -> Vec<
 
     let bps_off = blobs_offset; // SHORT[3] = 6
     let mut cursor = bps_off + 6;
-    if cursor % 4 != 0 {
+    if !cursor.is_multiple_of(4) {
         cursor += 4 - (cursor % 4);
     }
     let rbw_off = cursor; // RATIONAL[6] = 48
@@ -70,7 +70,7 @@ fn build_chunky_ycbcr_tiff(width: u32, height: u32, ycbcr_chunky: &[u8]) -> Vec<
     push(&mut buf, 277, 3, 1, short_inline(3)); // SamplesPerPixel
     push(&mut buf, 279, 4, 1, strip_bytes.to_le_bytes()); // StripByteCounts
     push(&mut buf, 284, 3, 1, short_inline(1)); // PlanarConfiguration = chunky
-                                                // 530 YCbCrSubSampling = [1, 1] (two inline SHORTs)
+    // 530 YCbCrSubSampling = [1, 1] (two inline SHORTs)
     let mut ss = [0u8; 4];
     ss[..2].copy_from_slice(&1u16.to_le_bytes());
     ss[2..4].copy_from_slice(&1u16.to_le_bytes());
@@ -128,7 +128,7 @@ fn build_planar_ycbcr_tiff(width: u32, height: u32, ycbcr_chunky: &[u8]) -> Vec<
     let so_off = bps_off + 6; // LONG[3] = 12
     let sbc_off = so_off + 12; // LONG[3] = 12
     let mut cursor = sbc_off + 12;
-    if cursor % 4 != 0 {
+    if !cursor.is_multiple_of(4) {
         cursor += 4 - (cursor % 4);
     }
     let rbw_off = cursor; // RATIONAL[6] = 48

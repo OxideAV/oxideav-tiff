@@ -12,8 +12,8 @@
 
 use oxideav_tiff::ifd::{parse_header, parse_ifd};
 use oxideav_tiff::{
-    decode_page, decode_pages, encode_page, encode_pages, AuxIfdEntry, EncodePage,
-    EncodePixelFormat, PageExtras, TiffCompression,
+    AuxIfdEntry, EncodePage, EncodePixelFormat, PageExtras, TiffCompression, decode_page,
+    decode_pages, encode_page, encode_pages,
 };
 
 /// A structurally valid ICC profile: 128-byte header (big-endian size

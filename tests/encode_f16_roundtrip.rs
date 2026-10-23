@@ -26,8 +26,8 @@
 
 use oxideav_tiff::ifd::{find, parse_header, parse_ifd};
 use oxideav_tiff::{
-    decode_page, encode_page, f16_bits_to_f32, f32_to_f16_bits, EncodePage, EncodePixelFormat,
-    PageExtras, TiffCompression, TiffPixelFormat,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, TiffPixelFormat, decode_page,
+    encode_page, f16_bits_to_f32, f32_to_f16_bits,
 };
 
 // ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@
 //! all driven so the round-trip is independent of the per-tile codec.
 
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, decode_page, encode_page,
 };
 
 /// Pack an MSB-first 1-bit bilevel raster with a deterministic pseudo-random

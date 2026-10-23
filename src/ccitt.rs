@@ -760,7 +760,7 @@ fn expect_eol(bits: &mut BitReader<'_>, byte_aligned: bool) -> Result<()> {
                     "TIFF/CCITT: stray 1-bit after only {zero_run} zeros (expected EOL)"
                 )));
             }
-            if byte_aligned && bits.bit_pos % 8 != 0 {
+            if byte_aligned && !bits.bit_pos.is_multiple_of(8) {
                 return Err(Error::invalid("TIFF/CCITT: byte-aligned EOL not aligned"));
             }
             return Ok(());
@@ -2493,7 +2493,7 @@ mod tests {
         // a0 with a non-white preceding context handled by the loop.
         let mut bw = BitWriter::new();
         bw.write(0b1, 1); // row 0: V(0) — all 8 white
-                          // row 1:
+        // row 1:
         bw.write(0b0000001111, 10); // entrance at a0=0
         bw.write(0b00001, 5); // 4 white + 1 black → pixels 0..4, black@4
         bw.write(0b01, 2); // 1 white + 1 black → pixel 5 white, 6 black

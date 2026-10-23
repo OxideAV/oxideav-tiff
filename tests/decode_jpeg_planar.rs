@@ -26,7 +26,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use oxideav_tiff::types::*;
-use oxideav_tiff::{decode_page, TiffPixelFormat};
+use oxideav_tiff::{TiffPixelFormat, decode_page};
 
 fn rand_suffix() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};

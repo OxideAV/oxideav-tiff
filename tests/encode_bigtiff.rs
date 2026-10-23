@@ -15,8 +15,8 @@
 //! classic TIFF bytes when `bigtiff = true` is requested.
 
 use oxideav_tiff::{
-    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat, PageExtras,
-    RgbColor, TiffCompression, TiffPixelFormat,
+    EncodePage, EncodePixelFormat, PageExtras, RgbColor, TiffCompression, TiffPixelFormat,
+    decode_all, decode_page, encode_page, encode_pages,
 };
 
 fn ramp_gray8(w: u32, h: u32) -> Vec<u8> {
@@ -470,8 +470,8 @@ fn bigtiff_bilevel_ccitt_mh_roundtrip() {
     // StripOffsets/StripByteCounts get written; round-trip through
     // our own decoder.
     let mut pixels = vec![0u8; (24usize.div_ceil(8)) * 8];
-    for (row_idx, chunk) in pixels.chunks_exact_mut(3).enumerate() {
-        if row_idx % 2 == 0 {
+    for (row_idx, chunk) in pixels.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+        if row_idx.is_multiple_of(2) {
             chunk[0] = 0xFF;
             chunk[1] = 0xFF;
             chunk[2] = 0xFF;

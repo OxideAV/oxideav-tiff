@@ -7,7 +7,7 @@
 //! configuration, decode, confirm the reported tags match.
 
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, TiffCompression,
+    EncodePage, EncodePixelFormat, PageExtras, TiffCompression, decode_page, encode_page,
 };
 
 fn base<'a>(w: u32, h: u32, kind: EncodePixelFormat<'a>) -> EncodePage<'a> {

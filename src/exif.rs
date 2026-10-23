@@ -27,7 +27,7 @@
 //! `docs/image/tiff/CIPA-DC-008-*.pdf`).
 
 use crate::error::{Result, TiffError as Error};
-use crate::ifd::{find, parse_header, parse_ifd, ByteOrder, Entry, ParsedHeader};
+use crate::ifd::{ByteOrder, Entry, ParsedHeader, find, parse_header, parse_ifd};
 use crate::types::*;
 
 /// Exif `Interoperability IFD Pointer` (0xA005): a child-IFD offset
@@ -115,11 +115,7 @@ fn child_entries(
         .collect();
     out.sort_by_key(|e| e.tag);
     out.dedup_by_key(|e| e.tag);
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 /// Serialise one classic little-endian IFD at `at` (even), returning

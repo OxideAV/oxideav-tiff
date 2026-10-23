@@ -13,7 +13,7 @@
 
 use oxideav_tiff::ifd::{ByteOrder, Entry};
 use oxideav_tiff::metadata::extract_metadata;
-use oxideav_tiff::{decode_page, ResolutionUnit};
+use oxideav_tiff::{ResolutionUnit, decode_page};
 
 /// Build one raw IFD [`Entry`] for direct extractor unit tests (values
 /// stored little-endian). Used for the tags whose *pixel decoder*

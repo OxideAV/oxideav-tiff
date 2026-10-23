@@ -20,11 +20,11 @@
 
 #![cfg(feature = "registry")]
 
-use oxideav_tiff::ifd::{find, parse_header, parse_ifd, ByteOrder};
+use oxideav_tiff::ifd::{ByteOrder, find, parse_header, parse_ifd};
 use oxideav_tiff::types::*;
 use oxideav_tiff::{
-    decode_page, encode_page, rgb24_to_ycbcr24, EncodePage, EncodePixelFormat, JpegOptions,
-    JpegTablesLayout, PageExtras, TiffCompression, TiffError,
+    EncodePage, EncodePixelFormat, JpegOptions, JpegTablesLayout, PageExtras, TiffCompression,
+    TiffError, decode_page, encode_page, rgb24_to_ycbcr24,
 };
 
 // ---------------------------------------------------------------------------

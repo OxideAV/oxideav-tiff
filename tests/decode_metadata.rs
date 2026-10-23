@@ -16,8 +16,8 @@
 //! Reference") and the resolution / page tags there.
 
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, PageExtras, PageResolution,
-    ResolutionUnit, TiffCompression, TiffMetadata,
+    EncodePage, EncodePixelFormat, PageExtras, PageResolution, ResolutionUnit, TiffCompression,
+    TiffMetadata, decode_page, encode_page,
 };
 
 fn gray8_page<'a>(w: u32, h: u32, pixels: &'a [u8], extras: PageExtras<'a>) -> EncodePage<'a> {

@@ -12,7 +12,7 @@
 //!    `PhotometricInterpretation = 8`. §23: "1 implies L* only, for
 //!    monochrome data". Confirms the dedicated Gray8 render path.
 
-use oxideav_tiff::{decode_page, Page, TiffPixelFormat};
+use oxideav_tiff::{Page, TiffPixelFormat, decode_page};
 
 // ---------------------------------------------------------------------------
 // Hand-built classic TIFF fixture for CIELab
@@ -48,8 +48,8 @@ fn build_classic_tiff(
     };
 
     let num_entries: u16 = 8; // ImageWidth, ImageLength, BitsPerSample,
-                              // Compression, Photometric, StripOffsets,
-                              // SamplesPerPixel, StripByteCounts
+    // Compression, Photometric, StripOffsets,
+    // SamplesPerPixel, StripByteCounts
     let ifd_offset: u32 = 8;
     let ifd_size: u32 = 2 + (num_entries as u32) * 12 + 4;
     let blobs_offset: u32 = ifd_offset + ifd_size;

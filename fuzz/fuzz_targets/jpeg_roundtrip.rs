@@ -23,12 +23,12 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_tiff::jpeg_enc::{
-    encode_frame, scaled_quant_table, HuffSpec, JpegComponent, JpegFrame, JpegTableSet,
-    QUANT_LUMINANCE_K1,
+    HuffSpec, JpegComponent, JpegFrame, JpegTableSet, QUANT_LUMINANCE_K1, encode_frame,
+    scaled_quant_table,
 };
 use oxideav_tiff::{
-    decode_page, encode_page, EncodePage, EncodePixelFormat, JpegOptions, JpegProcess,
-    JpegTablesLayout, PageExtras, TiffCompression, TiffPixelFormat,
+    EncodePage, EncodePixelFormat, JpegOptions, JpegProcess, JpegTablesLayout, PageExtras,
+    TiffCompression, TiffPixelFormat, decode_page, encode_page,
 };
 
 fn byte(data: &[u8], i: usize) -> u8 {
@@ -159,7 +159,9 @@ fuzz_target!(|data: &[u8]| {
                         (5, TiffPixelFormat::Gray16Le) => {
                             for y in 0..h {
                                 let got: Vec<u16> = row(y, w * 2)
-                                    .chunks_exact(2)
+                                    .as_chunks::<2>()
+                                    .0
+                                    .iter()
                                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                                     .collect();
                                 let want: Vec<u16> = g12[y * w..(y + 1) * w]

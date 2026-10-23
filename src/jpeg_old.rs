@@ -53,7 +53,7 @@
 //! fields).
 
 use crate::error::{Result, TiffError as Error};
-use crate::ifd::{find, ByteOrder, Entry};
+use crate::ifd::{ByteOrder, Entry, find};
 use crate::types::*;
 
 /// Parsed TIFF 6.0 §22 old-style JPEG fields (tags 512-521).
@@ -179,11 +179,7 @@ pub fn parse_old_jpeg_fields(
                 .ok_or_else(|| Error::invalid("TIFF/JPEG(§22): empty JPEGInterchangeFormat"))?;
             // "If this Field is zero or not present, a JPEG
             // interchange format bitstream is not present."
-            if off == 0 {
-                None
-            } else {
-                Some(off)
-            }
+            if off == 0 { None } else { Some(off) }
         }
         None => None,
     };

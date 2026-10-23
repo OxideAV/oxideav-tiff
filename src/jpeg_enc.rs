@@ -1015,7 +1015,7 @@ fn code_scan_dct(
         for mx in 0..mcus_x {
             // E.1.3 / E.1.4: after `Ri` MCUs (and more to come) close
             // the interval with RSTm and reset the DC predictions.
-            if ri > 0 && mcus_done > 0 && mcus_done % ri == 0 {
+            if ri > 0 && mcus_done > 0 && mcus_done.is_multiple_of(ri) {
                 sink.restart(rst_m);
                 rst_m = (rst_m + 1) & 7;
                 pred.fill(0);
@@ -1106,7 +1106,7 @@ fn code_scan_lossless(
     };
     let initial = 1i32 << (frame.precision - 1);
     let ri = frame.restart_interval as usize;
-    if ri > 0 && ri % mcus_x != 0 {
+    if ri > 0 && !ri.is_multiple_of(mcus_x) {
         return Err(Error::invalid(format!(
             "JPEG encode: lossless restart interval {ri} is not a multiple of the {mcus_x} \
              MCUs per MCU-row (T.81 H.1.1)"
@@ -1120,7 +1120,7 @@ fn code_scan_lossless(
     let mut interval_first_my = 0usize;
     for my in 0..mcus_y {
         for mx in 0..mcus_x {
-            if ri > 0 && mcus_done > 0 && mcus_done % ri == 0 {
+            if ri > 0 && mcus_done > 0 && mcus_done.is_multiple_of(ri) {
                 sink.restart(rst_m);
                 rst_m = (rst_m + 1) & 7;
                 interval_first_my = my;
@@ -1147,11 +1147,7 @@ fn code_scan_lossless(
                         let cur = sample(x, y);
                         // H.1.2.1 prediction.
                         let px = if first_line {
-                            if x == 0 {
-                                initial
-                            } else {
-                                sample(x - 1, y)
-                            }
+                            if x == 0 { initial } else { sample(x - 1, y) }
                         } else if x == 0 {
                             sample(x, y - 1)
                         } else {

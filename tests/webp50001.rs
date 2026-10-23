@@ -56,8 +56,8 @@
 #![allow(deprecated)]
 
 use oxideav_tiff::{
-    decode_all, decode_page, encode_page, encode_pages, EncodePage, EncodePixelFormat,
-    ExtraSampleKind, Page, PageExtras, TiffCompression, TiffPixelFormat,
+    EncodePage, EncodePixelFormat, ExtraSampleKind, Page, PageExtras, TiffCompression,
+    TiffPixelFormat, decode_all, decode_page, encode_page, encode_pages,
 };
 
 // ---- Deterministic pixel formulas (mirror the fixture generators) ----
@@ -209,7 +209,9 @@ fn fixture_rgb_lossy_vp8_payload() {
     assert_eq!((direct.width, direct.height), (48, 40));
     let direct_rgb: Vec<u8> = direct
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|px| px[..3].to_vec())
         .collect();
     assert_eq!(
@@ -392,7 +394,7 @@ fn roundtrip_rgba_alpha_carried_in_payload() {
     let rgb = pattern_rgb(w, h);
     let alpha = fixture_alpha(w, h);
     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-    for (px, &a) in rgb.chunks_exact(3).zip(alpha.iter()) {
+    for (px, &a) in rgb.as_chunks::<3>().0.iter().zip(alpha.iter()) {
         rgba.extend_from_slice(px);
         rgba.push(a);
     }
