@@ -132,19 +132,19 @@ fn encoder_cielab8_neutral_gradient_matches_handbuilt() {
         .data
         .clone();
 
-    let page = EncodePage {
-        width: 4,
-        height: 1,
-        kind: EncodePixelFormat::CieLab8 {
+    let page = EncodePage::new(
+        4,
+        1,
+        EncodePixelFormat::CieLab8 {
             pixels: &lab_pixels,
         },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     let d = decode_page(&bytes).unwrap();
     assert_eq!((d.image.width, d.image.height), (4, 1));
@@ -170,17 +170,17 @@ fn encoder_cielab8_chromatic_primaries_match_handbuilt() {
             .data
             .clone();
 
-        let page = EncodePage {
-            width: 1,
-            height: 1,
-            kind: EncodePixelFormat::CieLab8 { pixels: &lab },
-            compression: TiffCompression::None,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+        let page = EncodePage::new(
+            1,
+            1,
+            EncodePixelFormat::CieLab8 { pixels: &lab },
+            TiffCompression::None,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        );
         let bytes = encode_page(&page).unwrap();
         let d = decode_page(&bytes).unwrap();
         assert_eq!(d.image.planes[0].data, want, "case {label}");
@@ -202,19 +202,19 @@ fn encoder_cielab8_compressors_lossless() {
         .collect();
 
     let baseline = {
-        let page = EncodePage {
-            width: 16,
-            height: 8,
-            kind: EncodePixelFormat::CieLab8 {
+        let page = EncodePage::new(
+            16,
+            8,
+            EncodePixelFormat::CieLab8 {
                 pixels: &lab_pixels,
             },
-            compression: TiffCompression::None,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+            TiffCompression::None,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        );
         decode_page(&encode_page(&page).unwrap())
             .unwrap()
             .image
@@ -228,19 +228,19 @@ fn encoder_cielab8_compressors_lossless() {
         TiffCompression::Lzw,
         TiffCompression::Deflate,
     ] {
-        let page = EncodePage {
-            width: 16,
-            height: 8,
-            kind: EncodePixelFormat::CieLab8 {
+        let page = EncodePage::new(
+            16,
+            8,
+            EncodePixelFormat::CieLab8 {
                 pixels: &lab_pixels,
             },
-            compression: c,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+            c,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        );
         let d = decode_page(&encode_page(&page).unwrap()).unwrap();
         assert_eq!(d.image.planes[0].data, baseline, "compressor {:?}", c);
     }
@@ -263,19 +263,19 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
         .collect();
 
     let baseline = {
-        let page = EncodePage {
-            width: 32,
-            height: 32,
-            kind: EncodePixelFormat::CieLab8 {
+        let page = EncodePage::new(
+            32,
+            32,
+            EncodePixelFormat::CieLab8 {
                 pixels: &lab_pixels,
             },
-            compression: TiffCompression::Lzw,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+            TiffCompression::Lzw,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        );
         decode_page(&encode_page(&page).unwrap())
             .unwrap()
             .image
@@ -286,95 +286,95 @@ fn encoder_cielab8_predictor_planar_tiled_all_compose() {
 
     // Predictor=2 alone.
     {
-        let page = EncodePage {
-            width: 32,
-            height: 32,
-            kind: EncodePixelFormat::CieLab8 {
+        let page = EncodePage::new(
+            32,
+            32,
+            EncodePixelFormat::CieLab8 {
                 pixels: &lab_pixels,
             },
-            compression: TiffCompression::Lzw,
-            predictor: true,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+            TiffCompression::Lzw,
+            true,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        );
         let d = decode_page(&encode_page(&page).unwrap()).unwrap();
         assert_eq!(d.image.planes[0].data, baseline, "predictor only");
     }
 
     // Planar alone.
     {
-        let page = EncodePage {
-            width: 32,
-            height: 32,
-            kind: EncodePixelFormat::CieLab8 {
+        let page = EncodePage::new(
+            32,
+            32,
+            EncodePixelFormat::CieLab8 {
                 pixels: &lab_pixels,
             },
-            compression: TiffCompression::Lzw,
-            predictor: false,
-            planar: true,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+            TiffCompression::Lzw,
+            false,
+            true,
+            None,
+            false,
+            PageExtras::default(),
+        );
         let d = decode_page(&encode_page(&page).unwrap()).unwrap();
         assert_eq!(d.image.planes[0].data, baseline, "planar only");
     }
 
     // Tiled chunky.
     {
-        let page = EncodePage {
-            width: 32,
-            height: 32,
-            kind: EncodePixelFormat::CieLab8 {
+        let page = EncodePage::new(
+            32,
+            32,
+            EncodePixelFormat::CieLab8 {
                 pixels: &lab_pixels,
             },
-            compression: TiffCompression::Lzw,
-            predictor: false,
-            planar: false,
-            tiling: Some((16, 16)),
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+            TiffCompression::Lzw,
+            false,
+            false,
+            Some((16, 16)),
+            false,
+            PageExtras::default(),
+        );
         let d = decode_page(&encode_page(&page).unwrap()).unwrap();
         assert_eq!(d.image.planes[0].data, baseline, "tiled chunky");
     }
 
     // Tiled + planar (per-plane tile grid, §15 PlanarConfiguration=2).
     {
-        let page = EncodePage {
-            width: 32,
-            height: 32,
-            kind: EncodePixelFormat::CieLab8 {
+        let page = EncodePage::new(
+            32,
+            32,
+            EncodePixelFormat::CieLab8 {
                 pixels: &lab_pixels,
             },
-            compression: TiffCompression::Lzw,
-            predictor: false,
-            planar: true,
-            tiling: Some((16, 16)),
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+            TiffCompression::Lzw,
+            false,
+            true,
+            Some((16, 16)),
+            false,
+            PageExtras::default(),
+        );
         let d = decode_page(&encode_page(&page).unwrap()).unwrap();
         assert_eq!(d.image.planes[0].data, baseline, "tiled planar");
     }
 
     // Predictor + planar + tiled all combined.
     {
-        let page = EncodePage {
-            width: 32,
-            height: 32,
-            kind: EncodePixelFormat::CieLab8 {
+        let page = EncodePage::new(
+            32,
+            32,
+            EncodePixelFormat::CieLab8 {
                 pixels: &lab_pixels,
             },
-            compression: TiffCompression::Deflate,
-            predictor: true,
-            planar: true,
-            tiling: Some((16, 16)),
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+            TiffCompression::Deflate,
+            true,
+            true,
+            Some((16, 16)),
+            false,
+            PageExtras::default(),
+        );
         let d = decode_page(&encode_page(&page).unwrap()).unwrap();
         assert_eq!(d.image.planes[0].data, baseline, "predictor+planar+tiled");
     }
@@ -397,17 +397,17 @@ fn encoder_cielab_l8_neutral_ramp_matches_handbuilt() {
         .data
         .clone();
 
-    let page = EncodePage {
-        width: 4,
-        height: 1,
-        kind: EncodePixelFormat::CieLabL8 { pixels: &l_bytes },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        4,
+        1,
+        EncodePixelFormat::CieLabL8 { pixels: &l_bytes },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     let d = decode_page(&bytes).unwrap();
     assert_eq!((d.image.width, d.image.height), (4, 1));
@@ -422,17 +422,17 @@ fn encoder_cielab_l8_predictor_and_compressors() {
     let l_bytes: Vec<u8> = (0..(20 * 12)).map(|i| (i & 0xFF) as u8).collect();
 
     let baseline = {
-        let page = EncodePage {
-            width: 20,
-            height: 12,
-            kind: EncodePixelFormat::CieLabL8 { pixels: &l_bytes },
-            compression: TiffCompression::None,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+        let page = EncodePage::new(
+            20,
+            12,
+            EncodePixelFormat::CieLabL8 { pixels: &l_bytes },
+            TiffCompression::None,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        );
         decode_page(&encode_page(&page).unwrap())
             .unwrap()
             .image
@@ -448,17 +448,17 @@ fn encoder_cielab_l8_predictor_and_compressors() {
         (TiffCompression::Deflate, false),
         (TiffCompression::Deflate, true),
     ] {
-        let page = EncodePage {
-            width: 20,
-            height: 12,
-            kind: EncodePixelFormat::CieLabL8 { pixels: &l_bytes },
-            compression: c,
-            predictor: pred,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+        let page = EncodePage::new(
+            20,
+            12,
+            EncodePixelFormat::CieLabL8 { pixels: &l_bytes },
+            c,
+            pred,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        );
         let d = decode_page(&encode_page(&page).unwrap()).unwrap();
         assert_eq!(
             d.image.planes[0].data, baseline,
@@ -475,17 +475,17 @@ fn encoder_cielab_l8_tiled_composes() {
     let l_bytes: Vec<u8> = (0..(32 * 32)).map(|i| (i & 0xFF) as u8).collect();
 
     let strip = {
-        let page = EncodePage {
-            width: 32,
-            height: 32,
-            kind: EncodePixelFormat::CieLabL8 { pixels: &l_bytes },
-            compression: TiffCompression::Lzw,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+        let page = EncodePage::new(
+            32,
+            32,
+            EncodePixelFormat::CieLabL8 { pixels: &l_bytes },
+            TiffCompression::Lzw,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        );
         decode_page(&encode_page(&page).unwrap())
             .unwrap()
             .image
@@ -494,17 +494,17 @@ fn encoder_cielab_l8_tiled_composes() {
             .clone()
     };
     let tiled = {
-        let page = EncodePage {
-            width: 32,
-            height: 32,
-            kind: EncodePixelFormat::CieLabL8 { pixels: &l_bytes },
-            compression: TiffCompression::Lzw,
-            predictor: false,
-            planar: false,
-            tiling: Some((16, 16)),
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+        let page = EncodePage::new(
+            32,
+            32,
+            EncodePixelFormat::CieLabL8 { pixels: &l_bytes },
+            TiffCompression::Lzw,
+            false,
+            false,
+            Some((16, 16)),
+            false,
+            PageExtras::default(),
+        );
         decode_page(&encode_page(&page).unwrap())
             .unwrap()
             .image
@@ -536,34 +536,34 @@ fn read_ifd_entry_value_short(bytes: &[u8], tag: u16) -> Option<u16> {
 fn encoder_cielab_writes_photometric_and_samples() {
     // 3-sample.
     let lab: Vec<u8> = pack_lab(50.0, 0, 0).to_vec();
-    let p3 = EncodePage {
-        width: 1,
-        height: 1,
-        kind: EncodePixelFormat::CieLab8 { pixels: &lab },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let p3 = EncodePage::new(
+        1,
+        1,
+        EncodePixelFormat::CieLab8 { pixels: &lab },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let b3 = encode_page(&p3).unwrap();
     assert_eq!(read_ifd_entry_value_short(&b3, 262), Some(8));
     assert_eq!(read_ifd_entry_value_short(&b3, 277), Some(3));
 
     // 1-sample L*-only.
     let l = vec![127u8];
-    let p1 = EncodePage {
-        width: 1,
-        height: 1,
-        kind: EncodePixelFormat::CieLabL8 { pixels: &l },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let p1 = EncodePage::new(
+        1,
+        1,
+        EncodePixelFormat::CieLabL8 { pixels: &l },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let b1 = encode_page(&p1).unwrap();
     assert_eq!(read_ifd_entry_value_short(&b1, 262), Some(8));
     assert_eq!(read_ifd_entry_value_short(&b1, 277), Some(1));
@@ -578,39 +578,39 @@ fn encoder_cielab_multi_page_chain() {
     let gray = vec![10u8, 20, 30, 40];
     let l_only = vec![80u8, 90, 100, 110];
     let pages = vec![
-        EncodePage {
-            width: 1,
-            height: 1,
-            kind: EncodePixelFormat::CieLab8 { pixels: &lab },
-            compression: TiffCompression::None,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        },
-        EncodePage {
-            width: 4,
-            height: 1,
-            kind: EncodePixelFormat::Gray8 { pixels: &gray },
-            compression: TiffCompression::PackBits,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        },
-        EncodePage {
-            width: 4,
-            height: 1,
-            kind: EncodePixelFormat::CieLabL8 { pixels: &l_only },
-            compression: TiffCompression::Deflate,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        },
+        EncodePage::new(
+            1,
+            1,
+            EncodePixelFormat::CieLab8 { pixels: &lab },
+            TiffCompression::None,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        ),
+        EncodePage::new(
+            4,
+            1,
+            EncodePixelFormat::Gray8 { pixels: &gray },
+            TiffCompression::PackBits,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        ),
+        EncodePage::new(
+            4,
+            1,
+            EncodePixelFormat::CieLabL8 { pixels: &l_only },
+            TiffCompression::Deflate,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        ),
     ];
     let bytes = encode_pages(&pages).unwrap();
     let imgs = oxideav_tiff::decode_all(&bytes).unwrap();

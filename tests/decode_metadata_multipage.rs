@@ -14,17 +14,17 @@ use oxideav_tiff::{
 };
 
 fn page<'a>(w: u32, h: u32, pixels: &'a [u8], extras: PageExtras<'a>) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Gray8 { pixels },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Gray8 { pixels },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
         extras,
-    }
+    )
 }
 
 #[test]
@@ -35,40 +35,30 @@ fn three_page_chain_carries_distinct_per_page_metadata() {
             2,
             2,
             &px,
-            PageExtras {
-                description: Some("first"),
-                page_number: Some((0, 3)),
-                multi_page: true,
-                ..Default::default()
-            },
+            PageExtras::default()
+                .with_description(Some("first"))
+                .with_page_number(Some((0, 3)))
+                .with_multi_page(true),
         ),
         page(
             2,
             2,
             &px,
-            PageExtras {
-                description: Some("second"),
-                page_number: Some((1, 3)),
-                multi_page: true,
-                software: Some("oxideav"),
-                ..Default::default()
-            },
+            PageExtras::default()
+                .with_description(Some("second"))
+                .with_page_number(Some((1, 3)))
+                .with_multi_page(true)
+                .with_software(Some("oxideav")),
         ),
         page(
             2,
             2,
             &px,
-            PageExtras {
-                description: Some("third"),
-                page_number: Some((2, 3)),
-                multi_page: true,
-                resolution: Some(PageResolution {
-                    x: (72, 1),
-                    y: (72, 1),
-                    unit: 2,
-                }),
-                ..Default::default()
-            },
+            PageExtras::default()
+                .with_description(Some("third"))
+                .with_page_number(Some((2, 3)))
+                .with_multi_page(true)
+                .with_resolution(Some(PageResolution::new((72, 1), (72, 1), 2))),
         ),
     ];
     let tiff = encode_pages(&pages).expect("encode multi");

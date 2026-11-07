@@ -153,17 +153,17 @@ fn encode_gray_f16_matrix_decodes_to_display_map() {
         for predictor in [false, true] {
             for tiling in [None, Some((16u32, 16u32))] {
                 for bigtiff in [false, true] {
-                    let page = EncodePage {
-                        width: w,
-                        height: h,
-                        kind: EncodePixelFormat::GrayF16 { pixels: &bits },
+                    let page = EncodePage::new(
+                        w,
+                        h,
+                        EncodePixelFormat::GrayF16 { pixels: &bits },
                         compression,
                         predictor,
-                        planar: false,
+                        false,
                         tiling,
                         bigtiff,
-                        extras: PageExtras::default(),
-                    };
+                        PageExtras::default(),
+                    );
                     let file = encode_page(&page).expect("encode GrayF16");
                     let img = decode_page(&file).expect("decode GrayF16");
                     assert_eq!(img.image.format, TiffPixelFormat::GrayF32Le);
@@ -189,17 +189,17 @@ fn encode_rgb_f16_matrix_decodes_to_display_map() {
         for predictor in [false, true] {
             for planar in [false, true] {
                 for tiling in [None, Some((16u32, 16u32))] {
-                    let page = EncodePage {
-                        width: w,
-                        height: h,
-                        kind: EncodePixelFormat::RgbF16 { pixels: &bits },
+                    let page = EncodePage::new(
+                        w,
+                        h,
+                        EncodePixelFormat::RgbF16 { pixels: &bits },
                         compression,
                         predictor,
                         planar,
                         tiling,
-                        bigtiff: false,
-                        extras: PageExtras::default(),
-                    };
+                        false,
+                        PageExtras::default(),
+                    );
                     let file = encode_page(&page).expect("encode RgbF16");
                     let img = decode_page(&file).expect("decode RgbF16");
                     assert_eq!(img.image.format, TiffPixelFormat::RgbF32Le);
@@ -236,17 +236,17 @@ fn encode_f16_nonfinite_samples_render_at_display_floor() {
         &f32::INFINITY.to_le_bytes(),
         "+Inf kept natively"
     );
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::GrayF16 { pixels: &bits },
-        compression: TiffCompression::Deflate,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::GrayF16 { pixels: &bits },
+        TiffCompression::Deflate,
+        true,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let img = decode_page(&encode_page(&page).unwrap()).unwrap();
     assert_eq!(img.image.planes[0].data, want);
     // The 8-bit view renders the non-finite samples at the floor and
@@ -268,17 +268,17 @@ fn encode_f16_nonfinite_samples_render_at_display_floor() {
 fn encode_f16_ifd_fields_and_verbatim_strip() {
     let (w, h) = (7u32, 5u32);
     let bits = gray_bits(w, h);
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::GrayF16 { pixels: &bits },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::GrayF16 { pixels: &bits },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let file = encode_page(&page).unwrap();
     let hdr = parse_header(&file).unwrap();
     let (entries, next) = parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset)
@@ -305,9 +305,10 @@ fn encode_f16_ifd_fields_and_verbatim_strip() {
     assert_eq!(&file[off..off + len], &want[..], "verbatim f16 payload");
 
     // With predictor on, tag 317 must carry 3 (the §14 float predictor).
-    let page_p = EncodePage {
-        predictor: true,
-        ..page
+    let page_p = {
+        let mut encode_page = page;
+        encode_page.predictor = true;
+        encode_page
     };
     let file_p = encode_page(&page_p).unwrap();
     let hdr_p = parse_header(&file_p).unwrap();
@@ -325,34 +326,34 @@ fn encode_f16_ifd_fields_and_verbatim_strip() {
 #[test]
 fn encode_f16_rejects_ccitt() {
     let bits = gray_bits(8, 8);
-    let page = EncodePage {
-        width: 8,
-        height: 8,
-        kind: EncodePixelFormat::GrayF16 { pixels: &bits },
-        compression: TiffCompression::CcittRle,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        8,
+        8,
+        EncodePixelFormat::GrayF16 { pixels: &bits },
+        TiffCompression::CcittRle,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     assert!(encode_page(&page).is_err(), "CCITT is bilevel-only");
 }
 
 #[test]
 fn encode_gray_f16_rejects_planar() {
     let bits = gray_bits(8, 8);
-    let page = EncodePage {
-        width: 8,
-        height: 8,
-        kind: EncodePixelFormat::GrayF16 { pixels: &bits },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: true,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        8,
+        8,
+        EncodePixelFormat::GrayF16 { pixels: &bits },
+        TiffCompression::None,
+        false,
+        true,
+        None,
+        false,
+        PageExtras::default(),
+    );
     assert!(
         encode_page(&page).is_err(),
         "PlanarConfiguration=2 is irrelevant at SamplesPerPixel=1"
@@ -362,16 +363,16 @@ fn encode_gray_f16_rejects_planar() {
 #[test]
 fn encode_f16_wrong_buffer_length_rejected() {
     let bits = vec![0u16; 10];
-    let page = EncodePage {
-        width: 4,
-        height: 4,
-        kind: EncodePixelFormat::GrayF16 { pixels: &bits },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        4,
+        4,
+        EncodePixelFormat::GrayF16 { pixels: &bits },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     assert!(encode_page(&page).is_err());
 }

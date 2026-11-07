@@ -26,20 +26,17 @@ fn page<'a>(
     planar: bool,
     rows_per_strip: Option<u32>,
 ) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
+    EncodePage::new(
+        w,
+        h,
         kind,
         compression,
         predictor,
         planar,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras {
-            rows_per_strip,
-            ..Default::default()
-        },
-    }
+        None,
+        false,
+        PageExtras::default().with_rows_per_strip(rows_per_strip),
+    )
 }
 
 fn gray(w: u32, h: u32) -> Vec<u8> {

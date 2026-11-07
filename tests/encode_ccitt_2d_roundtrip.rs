@@ -65,17 +65,17 @@ fn expand_to_gray8(packed: &[u8], w: u32, h: u32) -> Vec<u8> {
 }
 
 fn build_page<'a>(w: u32, h: u32, bytes: &'a [u8], compression: TiffCompression) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Bilevel { pixels: bytes },
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Bilevel { pixels: bytes },
         compression,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    }
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    )
 }
 
 fn roundtrip_assert(w: u32, h: u32, bytes: &[u8], compression: TiffCompression) {
@@ -295,37 +295,37 @@ fn t6_wide_pattern_128x4() {
 fn t4_2d_rejects_non_bilevel_input() {
     // EncodePixelFormat::Gray8 is not a permissible bilevel input
     // and must error rather than silently corrupt the stream.
-    let page = EncodePage {
-        width: 4,
-        height: 4,
-        kind: EncodePixelFormat::Gray8 { pixels: &[0u8; 16] },
-        compression: TiffCompression::CcittT4TwoD {
+    let page = EncodePage::new(
+        4,
+        4,
+        EncodePixelFormat::Gray8 { pixels: &[0u8; 16] },
+        TiffCompression::CcittT4TwoD {
             eol_byte_aligned: false,
             uncompressed: false,
         },
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     assert!(encode_page(&page).is_err());
 }
 
 #[test]
 fn t6_rejects_non_bilevel_input() {
-    let page = EncodePage {
-        width: 4,
-        height: 4,
-        kind: EncodePixelFormat::Gray8 { pixels: &[0u8; 16] },
-        compression: TiffCompression::CcittT6 {
+    let page = EncodePage::new(
+        4,
+        4,
+        EncodePixelFormat::Gray8 { pixels: &[0u8; 16] },
+        TiffCompression::CcittT6 {
             uncompressed: false,
         },
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     assert!(encode_page(&page).is_err());
 }

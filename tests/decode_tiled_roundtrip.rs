@@ -120,17 +120,17 @@ fn gray8_page<'a>(
     pred: bool,
     tiling: Option<(u32, u32)>,
 ) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Gray8 { pixels: px },
-        compression: comp,
-        predictor: pred,
-        planar: false,
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Gray8 { pixels: px },
+        comp,
+        pred,
+        false,
         tiling,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    }
+        false,
+        PageExtras::default(),
+    )
 }
 
 // ---- Gray8 ----
@@ -199,22 +199,23 @@ fn tiled_gray8_all_compressions_match_strip() {
 #[test]
 fn tiled_gray16le_partial_edges_match_strip() {
     let px = ramp_gray16le(50, 30);
-    let page_t = EncodePage {
-        width: 50,
-        height: 30,
-        kind: EncodePixelFormat::Gray16Le { pixels: &px },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: false,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
-    let page_s = EncodePage {
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-        ..page_t.clone()
+    let page_t = EncodePage::new(
+        50,
+        30,
+        EncodePixelFormat::Gray16Le { pixels: &px },
+        TiffCompression::Lzw,
+        false,
+        false,
+        Some((16, 16)),
+        false,
+        PageExtras::default(),
+    );
+    let page_s = {
+        let mut encode_page = page_t.clone();
+        encode_page.tiling = None;
+        encode_page.bigtiff = false;
+        encode_page.extras = PageExtras::default();
+        encode_page
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
     assert_eq!(t, s, "tiled gray16 != strip gray16");
@@ -225,22 +226,23 @@ fn tiled_gray16le_predictor_match_strip() {
     // 16-bit + Predictor=2: the decoder reverses the §14 horizontal
     // differencing per tile-row using 16-bit sample arithmetic.
     let px = ramp_gray16le(48, 32);
-    let page_t = EncodePage {
-        width: 48,
-        height: 32,
-        kind: EncodePixelFormat::Gray16Le { pixels: &px },
-        compression: TiffCompression::Deflate,
-        predictor: true,
-        planar: false,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
-    let page_s = EncodePage {
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-        ..page_t.clone()
+    let page_t = EncodePage::new(
+        48,
+        32,
+        EncodePixelFormat::Gray16Le { pixels: &px },
+        TiffCompression::Deflate,
+        true,
+        false,
+        Some((16, 16)),
+        false,
+        PageExtras::default(),
+    );
+    let page_s = {
+        let mut encode_page = page_t.clone();
+        encode_page.tiling = None;
+        encode_page.bigtiff = false;
+        encode_page.extras = PageExtras::default();
+        encode_page
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
     assert_eq!(t, s, "tiled gray16 predictor != strip");
@@ -251,22 +253,23 @@ fn tiled_gray16le_predictor_match_strip() {
 #[test]
 fn tiled_rgb24_partial_edges_match_strip() {
     let px = pattern_rgb(50, 30);
-    let page_t = EncodePage {
-        width: 50,
-        height: 30,
-        kind: EncodePixelFormat::Rgb24 { pixels: &px },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: false,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
-    let page_s = EncodePage {
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-        ..page_t.clone()
+    let page_t = EncodePage::new(
+        50,
+        30,
+        EncodePixelFormat::Rgb24 { pixels: &px },
+        TiffCompression::Lzw,
+        false,
+        false,
+        Some((16, 16)),
+        false,
+        PageExtras::default(),
+    );
+    let page_s = {
+        let mut encode_page = page_t.clone();
+        encode_page.tiling = None;
+        encode_page.bigtiff = false;
+        encode_page.extras = PageExtras::default();
+        encode_page
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
     assert_eq!(t, s, "tiled rgb24 != strip rgb24");
@@ -278,22 +281,23 @@ fn tiled_rgb24_predictor_match_strip() {
     // RGB + Predictor=2 reverses the per-component (stride-3) §14
     // differencing within every tile row.
     let px = pattern_rgb(48, 32);
-    let page_t = EncodePage {
-        width: 48,
-        height: 32,
-        kind: EncodePixelFormat::Rgb24 { pixels: &px },
-        compression: TiffCompression::Deflate,
-        predictor: true,
-        planar: false,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
-    let page_s = EncodePage {
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-        ..page_t.clone()
+    let page_t = EncodePage::new(
+        48,
+        32,
+        EncodePixelFormat::Rgb24 { pixels: &px },
+        TiffCompression::Deflate,
+        true,
+        false,
+        Some((16, 16)),
+        false,
+        PageExtras::default(),
+    );
+    let page_s = {
+        let mut encode_page = page_t.clone();
+        encode_page.tiling = None;
+        encode_page.bigtiff = false;
+        encode_page.extras = PageExtras::default();
+        encode_page
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
     assert_eq!(t, s, "tiled rgb24 predictor != strip");
@@ -305,22 +309,23 @@ fn tiled_rgb24_nonsquare_tiles_match_strip() {
     // 32x16 (non-square) tiles over a 50x30 image: width and height
     // crops differ, exercising independent x/y boundary handling.
     let px = pattern_rgb(50, 30);
-    let page_t = EncodePage {
-        width: 50,
-        height: 30,
-        kind: EncodePixelFormat::Rgb24 { pixels: &px },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: Some((32, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
-    let page_s = EncodePage {
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-        ..page_t.clone()
+    let page_t = EncodePage::new(
+        50,
+        30,
+        EncodePixelFormat::Rgb24 { pixels: &px },
+        TiffCompression::None,
+        false,
+        false,
+        Some((32, 16)),
+        false,
+        PageExtras::default(),
+    );
+    let page_s = {
+        let mut encode_page = page_t.clone();
+        encode_page.tiling = None;
+        encode_page.bigtiff = false;
+        encode_page.extras = PageExtras::default();
+        encode_page
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
     assert_eq!(t, s);
@@ -336,25 +341,26 @@ fn tiled_palette8_match_strip() {
     // decode expands both layouts to Rgb24, so they must match.
     let idx = palette_indices(50, 30);
     let pal = full_palette();
-    let page_t = EncodePage {
-        width: 50,
-        height: 30,
-        kind: EncodePixelFormat::Palette8 {
+    let page_t = EncodePage::new(
+        50,
+        30,
+        EncodePixelFormat::Palette8 {
             indices: &idx,
             palette: &pal,
         },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: false,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
-    let page_s = EncodePage {
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-        ..page_t.clone()
+        TiffCompression::Lzw,
+        false,
+        false,
+        Some((16, 16)),
+        false,
+        PageExtras::default(),
+    );
+    let page_s = {
+        let mut encode_page = page_t.clone();
+        encode_page.tiling = None;
+        encode_page.bigtiff = false;
+        encode_page.extras = PageExtras::default();
+        encode_page
     };
     let (t, s) = tiled_vs_strip(&page_t, &page_s);
     assert_eq!(t, s, "tiled palette8 != strip palette8");
@@ -386,17 +392,17 @@ fn rgb_planar_tiled_page<'a>(
     pred: bool,
     tile: (u32, u32),
 ) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Rgb24 { pixels: px },
-        compression: comp,
-        predictor: pred,
-        planar: true,
-        tiling: Some(tile),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    }
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Rgb24 { pixels: px },
+        comp,
+        pred,
+        true,
+        Some(tile),
+        false,
+        PageExtras::default(),
+    )
 }
 
 #[test]
@@ -432,9 +438,10 @@ fn tiled_planar_rgb24_matches_chunky_tiled_all_compressions() {
     ] {
         let planar = encode_page(&rgb_planar_tiled_page(50, 30, &px, comp, false, (16, 16)))
             .expect("encode planar tiled");
-        let chunky = encode_page(&EncodePage {
-            planar: false,
-            ..rgb_planar_tiled_page(50, 30, &px, comp, false, (16, 16))
+        let chunky = encode_page(&{
+            let mut encode_page = rgb_planar_tiled_page(50, 30, &px, comp, false, (16, 16));
+            encode_page.planar = false;
+            encode_page
         })
         .expect("encode chunky tiled");
         let dp = decode_page(&planar).expect("decode planar tiled");
@@ -522,17 +529,17 @@ fn tiled_planar_rejected_on_single_sample_formats() {
     // irrelevant"); combining it with tiling must still be rejected by
     // the same single-sample guard, not silently produce a planar grid.
     let px = ramp_gray8(32, 32);
-    let r = encode_page(&EncodePage {
-        width: 32,
-        height: 32,
-        kind: EncodePixelFormat::Gray8 { pixels: &px },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: true,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    });
+    let r = encode_page(&EncodePage::new(
+        32,
+        32,
+        EncodePixelFormat::Gray8 { pixels: &px },
+        TiffCompression::None,
+        false,
+        true,
+        Some((16, 16)),
+        false,
+        PageExtras::default(),
+    ));
     assert!(r.is_err(), "planar tiling on Gray8 must be rejected");
 }
 

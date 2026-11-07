@@ -178,21 +178,19 @@ fn info_counts_pages_and_sees_metadata() {
     assert!(i.has_icc && i.has_xmp && i.has_exif);
     // Multi-page through the depth API.
     let px = ramp(16, 1);
-    let page = EncodePage {
-        width: 4,
-        height: 4,
-        kind: EncodePixelFormat::Gray8 { pixels: &px },
-        compression: TiffCompression::Lzw,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: true,
-        extras: PageExtras {
-            page_number: Some((0, 2)),
-            multi_page: true,
-            ..PageExtras::default()
-        },
-    };
+    let page = EncodePage::new(
+        4,
+        4,
+        EncodePixelFormat::Gray8 { pixels: &px },
+        TiffCompression::Lzw,
+        true,
+        false,
+        None,
+        true,
+        PageExtras::default()
+            .with_page_number(Some((0, 2)))
+            .with_multi_page(true),
+    );
     let two = oxideav_tiff::encode_pages(&[page.clone(), page]).unwrap();
     let i = info(&two).unwrap();
     assert_eq!(i.frames, 2);
@@ -756,17 +754,17 @@ fn deprecated_wrappers_keep_the_historical_shapes() {
     assert_eq!(d.frame.planes[0].data, cmyk.to_rgb8());
     // The encode wrappers are the depth functions under their old names.
     let px = ramp(4, 0);
-    let page = EncodePage {
-        width: 2,
-        height: 2,
-        kind: EncodePixelFormat::Gray8 { pixels: &px },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        2,
+        2,
+        EncodePixelFormat::Gray8 { pixels: &px },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     assert_eq!(encode_tiff(&page).unwrap(), encode_page(&page).unwrap());
     assert_eq!(
         encode_tiff_multi(std::slice::from_ref(&page)).unwrap(),
@@ -780,20 +778,20 @@ fn deprecated_wrappers_keep_the_historical_shapes() {
         ExtraSampleKind::Unspecified,
         ExtraSampleKind::AssociatedAlpha,
     ] {
-        let p = EncodePage {
-            width: 2,
-            height: 2,
-            kind: EncodePixelFormat::Rgba32 {
+        let p = EncodePage::new(
+            2,
+            2,
+            EncodePixelFormat::Rgba32 {
                 pixels: &rgba_px,
                 kind,
             },
-            compression: TiffCompression::None,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+            TiffCompression::None,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        );
         let img = decode(&encode_page(&p).unwrap()).unwrap();
         assert_eq!(img.format, PixelFormat::Rgb24, "{kind:?}");
     }

@@ -58,20 +58,20 @@ fn planar_page<'a>(
     compression: TiffCompression,
     predictor: bool,
 ) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::YCbCrSubsampled24 {
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::YCbCrSubsampled24 {
             pixels,
             subsampling,
         },
         compression,
         predictor,
-        planar: true,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    }
+        true,
+        None,
+        false,
+        PageExtras::default(),
+    )
 }
 
 const COMPRESSORS: [TiffCompression; 5] = [
@@ -87,9 +87,11 @@ fn planar_subsampled_matches_chunky_subsampled_decode() {
     for (sh, sv) in [(2u16, 1u16), (2, 2), (4, 1), (4, 2)] {
         let (w, h) = (16u32, 8u32);
         let pixels = block_constant_ycbcr(w, h, sh as u32, sv as u32);
-        let chunky = EncodePage {
-            planar: false,
-            ..planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false)
+        let chunky = {
+            let mut encode_page =
+                planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false);
+            encode_page.planar = false;
+            encode_page
         };
         let planar = planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false);
         let want = decode_page(&encode_page(&chunky).unwrap()).unwrap();
@@ -332,11 +334,13 @@ fn tiled_planar_subsampled_roundtrips() {
             TiffCompression::Zstd,
         ] {
             for predictor in [false, true] {
-                let tiled = EncodePage {
-                    tiling: Some((16, 16)),
-                    compression,
-                    predictor,
-                    ..planar_page(&pixels, w, h, (sh, sv), compression, predictor)
+                let tiled = {
+                    let mut encode_page =
+                        planar_page(&pixels, w, h, (sh, sv), compression, predictor);
+                    encode_page.tiling = Some((16, 16));
+                    encode_page.compression = compression;
+                    encode_page.predictor = predictor;
+                    encode_page
                 };
                 let got = decode_page(&encode_page(&tiled).unwrap()).unwrap();
                 assert_eq!(got.image.format, TiffPixelFormat::Rgb24);
@@ -360,9 +364,10 @@ fn tiled_planar_subsampled_partial_edge_tiles() {
     let pixels = block_constant_ycbcr(w, h, 2, 2);
     let strip = planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false);
     let want = decode_page(&encode_page(&strip).unwrap()).unwrap();
-    let tiled = EncodePage {
-        tiling: Some((16, 16)),
-        ..planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false)
+    let tiled = {
+        let mut encode_page = planar_page(&pixels, w, h, (sh, sv), TiffCompression::None, false);
+        encode_page.tiling = Some((16, 16));
+        encode_page
     };
     let got = decode_page(&encode_page(&tiled).unwrap()).unwrap();
     assert_eq!(got.image.planes[0].data, want.image.planes[0].data);
@@ -371,9 +376,10 @@ fn tiled_planar_subsampled_partial_edge_tiles() {
 #[test]
 fn chunky_subsampled_predictor_encode_still_rejected() {
     let pixels = block_constant_ycbcr(8, 8, 2, 2);
-    let page = EncodePage {
-        planar: false,
-        ..planar_page(&pixels, 8, 8, (2, 2), TiffCompression::Lzw, true)
+    let page = {
+        let mut encode_page = planar_page(&pixels, 8, 8, (2, 2), TiffCompression::Lzw, true);
+        encode_page.planar = false;
+        encode_page
     };
     let err = encode_page(&page).unwrap_err().to_string();
     assert!(

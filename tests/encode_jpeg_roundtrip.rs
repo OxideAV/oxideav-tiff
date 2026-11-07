@@ -449,11 +449,11 @@ fn to_u16(v: &[u8]) -> Vec<u16> {
 }
 
 fn jpeg(quality: u8, tables: JpegTablesLayout) -> TiffCompression {
-    TiffCompression::Jpeg(JpegOptions {
-        quality,
-        tables,
-        ..JpegOptions::default()
-    })
+    TiffCompression::Jpeg(
+        JpegOptions::default()
+            .with_quality(quality)
+            .with_tables(tables),
+    )
 }
 
 fn page<'a>(
@@ -462,17 +462,17 @@ fn page<'a>(
     kind: EncodePixelFormat<'a>,
     compression: TiffCompression,
 ) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
+    EncodePage::new(
+        w,
+        h,
         kind,
         compression,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    }
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    )
 }
 
 /// Shared black-box battery for an 8-bit page: our decode vs source
@@ -765,10 +765,9 @@ fn rows_per_strip_must_be_mcu_aligned_for_dct() {
     let err = encode_page(&p).unwrap_err().to_string();
     assert!(err.contains("multiple of the MCU height"), "{err}");
     // Lossless is exempt.
-    p.compression = TiffCompression::Jpeg(JpegOptions {
-        process: JpegProcess::Lossless { predictor: 1 },
-        ..JpegOptions::default()
-    });
+    p.compression = TiffCompression::Jpeg(
+        JpegOptions::default().with_process(JpegProcess::Lossless { predictor: 1 }),
+    );
     let tiff = encode_page(&p).unwrap();
     let dec = decode_page(&tiff).unwrap();
     assert_eq!(gray_frame_bytes(&dec), src);
@@ -1213,15 +1212,15 @@ fn lossless_sof3_is_sample_exact_at_8_12_and_16_bits() {
     let g16 = smooth_u16(w as usize, h as usize, 16, 5);
     let g16le: Vec<u8> = g16.iter().flat_map(|v| v.to_le_bytes()).collect();
     for predictor in [1u8, 4, 7] {
-        let comp = TiffCompression::Jpeg(JpegOptions {
-            process: JpegProcess::Lossless { predictor },
-            tables: if predictor == 4 {
-                JpegTablesLayout::PerSegment
-            } else {
-                JpegTablesLayout::Shared
-            },
-            ..JpegOptions::default()
-        });
+        let comp = TiffCompression::Jpeg(
+            JpegOptions::default()
+                .with_process(JpegProcess::Lossless { predictor })
+                .with_tables(if predictor == 4 {
+                    JpegTablesLayout::PerSegment
+                } else {
+                    JpegTablesLayout::Shared
+                }),
+        );
         // 8-bit.
         let tiff =
             encode_page(&page(w, h, EncodePixelFormat::Gray8 { pixels: &g8 }, comp)).unwrap();
@@ -1289,10 +1288,9 @@ fn lossless_sof3_is_sample_exact_at_8_12_and_16_bits() {
         }
     }
     let want: Vec<u16> = (0..r.len()).flat_map(|i| [r[i], g[i], b[i]]).collect();
-    let comp = TiffCompression::Jpeg(JpegOptions {
-        process: JpegProcess::Lossless { predictor: 6 },
-        ..JpegOptions::default()
-    });
+    let comp = TiffCompression::Jpeg(
+        JpegOptions::default().with_process(JpegProcess::Lossless { predictor: 6 }),
+    );
     for (planar, tiling) in [
         (false, None),
         (true, None),
@@ -1343,11 +1341,11 @@ fn lossless_ycbcr_444_composites_packed_segments() {
             w,
             h,
             EncodePixelFormat::YCbCr24 { pixels: &ycc },
-            TiffCompression::Jpeg(JpegOptions {
-                process: JpegProcess::Lossless { predictor: 6 },
-                tables: JpegTablesLayout::PerSegment,
-                ..JpegOptions::default()
-            }),
+            TiffCompression::Jpeg(
+                JpegOptions::default()
+                    .with_process(JpegProcess::Lossless { predictor: 6 })
+                    .with_tables(JpegTablesLayout::PerSegment),
+            ),
         );
         p.planar = planar;
         let tiff = encode_page(&p).unwrap();
@@ -1371,11 +1369,9 @@ fn restart_intervals_compose_with_strips_tiles_and_lossless() {
     }
     let (w, h) = (48u32, 40u32);
     let gray = smooth_gray(w as usize, h as usize, 8);
-    let opts = JpegOptions {
-        quality: 90,
-        restart_interval: 4,
-        ..JpegOptions::default()
-    };
+    let opts = JpegOptions::default()
+        .with_quality(90)
+        .with_restart_interval(4);
     let mut p = page(
         w,
         h,
@@ -1401,10 +1397,7 @@ fn restart_intervals_compose_with_strips_tiles_and_lossless() {
             pixels: &ycc,
             subsampling: (2, 2),
         },
-        TiffCompression::Jpeg(JpegOptions {
-            restart_interval: 1,
-            ..opts
-        }),
+        TiffCompression::Jpeg(opts.with_restart_interval(1)),
     );
     p.tiling = Some((32, 32));
     let tiff = encode_page(&p).unwrap();
@@ -1431,11 +1424,11 @@ fn restart_intervals_compose_with_strips_tiles_and_lossless() {
         w,
         h,
         EncodePixelFormat::Gray8 { pixels: &gray },
-        TiffCompression::Jpeg(JpegOptions {
-            process: JpegProcess::Lossless { predictor: 2 },
-            restart_interval: 5,
-            ..JpegOptions::default()
-        }),
+        TiffCompression::Jpeg(
+            JpegOptions::default()
+                .with_process(JpegProcess::Lossless { predictor: 2 })
+                .with_restart_interval(5),
+        ),
     ))
     .unwrap_err();
     assert!(
@@ -1527,10 +1520,9 @@ fn jpeg_rejections_are_precise() {
     .unwrap_err()
     .to_string();
     assert!(err.contains("quality"), "{err}");
-    let bad = TiffCompression::Jpeg(JpegOptions {
-        process: JpegProcess::Lossless { predictor: 8 },
-        ..JpegOptions::default()
-    });
+    let bad = TiffCompression::Jpeg(
+        JpegOptions::default().with_process(JpegProcess::Lossless { predictor: 8 }),
+    );
     let err = encode_page(&page(w, h, EncodePixelFormat::Gray8 { pixels: &g }, bad))
         .unwrap_err()
         .to_string();
@@ -1543,10 +1535,9 @@ fn jpeg_rejections_are_precise() {
             pixels: &ycc,
             subsampling: (2, 2),
         },
-        TiffCompression::Jpeg(JpegOptions {
-            process: JpegProcess::Lossless { predictor: 1 },
-            ..JpegOptions::default()
-        }),
+        TiffCompression::Jpeg(
+            JpegOptions::default().with_process(JpegProcess::Lossless { predictor: 1 }),
+        ),
     ))
     .unwrap_err()
     .to_string();

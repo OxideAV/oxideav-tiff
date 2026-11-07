@@ -53,31 +53,31 @@ fn expected_i16(px: &[i16]) -> Vec<u8> {
 }
 
 fn page_i8<'a>(w: u32, h: u32, pixels: &'a [i8], compression: TiffCompression) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::GrayI8 { pixels },
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::GrayI8 { pixels },
         compression,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    }
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    )
 }
 
 fn page_i16<'a>(w: u32, h: u32, pixels: &'a [i16], compression: TiffCompression) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::GrayI16 { pixels },
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::GrayI16 { pixels },
         compression,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    }
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    )
 }
 
 fn decode_plane(tiff: &[u8], expect_pf: TiffPixelFormat, bytes_per_pixel: usize) -> Vec<u8> {
@@ -109,9 +109,10 @@ fn gray_i8_strip_roundtrip() {
     let want = expected_i8(&px);
     for compression in COMPRESSORS {
         for predictor in [false, true] {
-            let p = EncodePage {
-                predictor,
-                ..page_i8(w, h, &px, compression)
+            let p = {
+                let mut encode_page = page_i8(w, h, &px, compression);
+                encode_page.predictor = predictor;
+                encode_page
             };
             let tiff = encode_page(&p).expect("encode failed");
             assert_eq!(
@@ -132,9 +133,10 @@ fn gray_i16_strip_roundtrip() {
     let want = expected_i16(&px);
     for compression in COMPRESSORS {
         for predictor in [false, true] {
-            let p = EncodePage {
-                predictor,
-                ..page_i16(w, h, &px, compression)
+            let p = {
+                let mut encode_page = page_i16(w, h, &px, compression);
+                encode_page.predictor = predictor;
+                encode_page
             };
             let tiff = encode_page(&p).expect("encode failed");
             assert_eq!(
@@ -153,10 +155,11 @@ fn gray_signed_tiled_roundtrip() {
     let px8 = pixels_i8(w, h);
     let px16 = pixels_i16(w, h);
     for predictor in [false, true] {
-        let p = EncodePage {
-            tiling: Some((16, 16)),
-            predictor,
-            ..page_i8(w, h, &px8, TiffCompression::Lzw)
+        let p = {
+            let mut encode_page = page_i8(w, h, &px8, TiffCompression::Lzw);
+            encode_page.tiling = Some((16, 16));
+            encode_page.predictor = predictor;
+            encode_page
         };
         let tiff = encode_page(&p).expect("i8 tiled encode failed");
         assert_eq!(
@@ -164,10 +167,11 @@ fn gray_signed_tiled_roundtrip() {
             expected_i8(&px8),
             "i8 tiled predictor={predictor}"
         );
-        let p = EncodePage {
-            tiling: Some((16, 16)),
-            predictor,
-            ..page_i16(w, h, &px16, TiffCompression::Deflate)
+        let p = {
+            let mut encode_page = page_i16(w, h, &px16, TiffCompression::Deflate);
+            encode_page.tiling = Some((16, 16));
+            encode_page.predictor = predictor;
+            encode_page
         };
         let tiff = encode_page(&p).expect("i16 tiled encode failed");
         assert_eq!(
@@ -183,11 +187,12 @@ fn gray_signed_tiled_roundtrip() {
 fn gray_signed_bigtiff_roundtrip() {
     let (w, h) = (23u32, 11u32);
     let px = pixels_i16(w, h);
-    let p = EncodePage {
-        bigtiff: true,
-        extras: PageExtras::default(),
-        predictor: true,
-        ..page_i16(w, h, &px, TiffCompression::Zstd)
+    let p = {
+        let mut encode_page = page_i16(w, h, &px, TiffCompression::Zstd);
+        encode_page.bigtiff = true;
+        encode_page.extras = PageExtras::default();
+        encode_page.predictor = true;
+        encode_page
     };
     let tiff = encode_page(&p).expect("encode failed");
     assert_eq!(
@@ -204,17 +209,17 @@ fn gray_signed_multipage_chain() {
     let unsigned: Vec<u8> = (0..w * h).map(|i| (i % 256) as u8).collect();
     let pages = [
         page_i8(w, h, &px, TiffCompression::Lzw),
-        EncodePage {
-            width: w,
-            height: h,
-            kind: EncodePixelFormat::Gray8 { pixels: &unsigned },
-            compression: TiffCompression::None,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        },
+        EncodePage::new(
+            w,
+            h,
+            EncodePixelFormat::Gray8 { pixels: &unsigned },
+            TiffCompression::None,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        ),
     ];
     let tiff = encode_pages(&pages).expect("multi-page encode failed");
     let decoded = decode_all(&tiff).expect("multi-page decode failed");
@@ -259,9 +264,10 @@ fn gray_signed_rejections() {
     assert!(format!("{e:?}").contains("GrayI8"), "{e:?}");
     let e = encode_page(&page_i8(8, 4, &px, TiffCompression::CcittRle)).unwrap_err();
     assert!(format!("{e:?}").contains("Bilevel"), "{e:?}");
-    let p = EncodePage {
-        planar: true,
-        ..page_i8(8, 4, &px, TiffCompression::None)
+    let p = {
+        let mut encode_page = page_i8(8, 4, &px, TiffCompression::None);
+        encode_page.planar = true;
+        encode_page
     };
     let e = encode_page(&p).unwrap_err();
     assert!(format!("{e:?}").contains("PlanarConfiguration"), "{e:?}");

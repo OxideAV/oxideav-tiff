@@ -58,6 +58,7 @@ use crate::types::*;
 /// Where the JPEG quantisation / Huffman tables live (TN2 "JPEGTables
 /// field").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum JpegTablesLayout {
     /// One `JPEGTables` field (tag 347) carries every table as an
     /// "abbreviated table specification" datastream and each strip /
@@ -73,6 +74,7 @@ pub enum JpegTablesLayout {
 
 /// JPEG-in-TIFF writer options ([`crate::TiffCompression::Jpeg`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct JpegOptions {
     /// Quantiser quality knob, 1..=100 (T.81 Annex K.1 tables scaled
     /// as documented on [`crate::jpeg_enc::scaled_quant_table`]);
@@ -99,6 +101,43 @@ pub struct JpegOptions {
     /// so lossless + restart is a precise `Unsupported` at the TIFF
     /// level until it does.
     pub restart_interval: u16,
+}
+
+impl JpegOptions {
+    /// Set `quality`.
+    #[must_use]
+    pub fn with_quality(mut self, quality: u8) -> Self {
+        self.quality = quality;
+        self
+    }
+
+    /// Set `tables`.
+    #[must_use]
+    pub fn with_tables(mut self, tables: JpegTablesLayout) -> Self {
+        self.tables = tables;
+        self
+    }
+
+    /// Set `process`.
+    #[must_use]
+    pub fn with_process(mut self, process: JpegProcess) -> Self {
+        self.process = process;
+        self
+    }
+
+    /// Set `optimize_huffman`.
+    #[must_use]
+    pub fn with_optimize_huffman(mut self, optimize_huffman: bool) -> Self {
+        self.optimize_huffman = optimize_huffman;
+        self
+    }
+
+    /// Set `restart_interval`.
+    #[must_use]
+    pub fn with_restart_interval(mut self, restart_interval: u16) -> Self {
+        self.restart_interval = restart_interval;
+        self
+    }
 }
 
 impl Default for JpegOptions {

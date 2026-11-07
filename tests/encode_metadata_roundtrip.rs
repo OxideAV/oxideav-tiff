@@ -10,35 +10,33 @@ use oxideav_tiff::{
 };
 
 fn page<'a>(w: u32, h: u32, pixels: &'a [u8], extras: PageExtras<'a>) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Gray8 { pixels },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Gray8 { pixels },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
         extras,
-    }
+    )
 }
 
 #[test]
 fn all_ten_ascii_fields_round_trip() {
     let px: Vec<u8> = (0..16u32).map(|i| i as u8).collect();
-    let extras = PageExtras {
-        document_name: Some("Contract"),
-        description: Some("Signature page"),
-        make: Some("AcmeScan"),
-        model: Some("QuadScan 9000"),
-        page_name: Some("Cover"),
-        software: Some("oxideav-tiff 0.0"),
-        date_time: Some("2026:07:10 09:15:00"),
-        artist: Some("Karpeles Lab"),
-        host_computer: Some("build-host-01"),
-        copyright: Some("(c) 2026 Karpeles Lab"),
-        ..Default::default()
-    };
+    let extras = PageExtras::default()
+        .with_document_name(Some("Contract"))
+        .with_description(Some("Signature page"))
+        .with_make(Some("AcmeScan"))
+        .with_model(Some("QuadScan 9000"))
+        .with_page_name(Some("Cover"))
+        .with_software(Some("oxideav-tiff 0.0"))
+        .with_date_time(Some("2026:07:10 09:15:00"))
+        .with_artist(Some("Karpeles Lab"))
+        .with_host_computer(Some("build-host-01"))
+        .with_copyright(Some("(c) 2026 Karpeles Lab"));
     let tiff = encode_page(&page(4, 4, &px, extras)).expect("encode");
     let m = decode_page(&tiff).expect("decode").metadata;
     assert_eq!(m.document_name.as_deref(), Some("Contract"));
@@ -56,19 +54,17 @@ fn all_ten_ascii_fields_round_trip() {
 #[test]
 fn ifd_tags_stay_in_ascending_order_with_all_metadata() {
     let px: Vec<u8> = (0..16u32).map(|i| i as u8).collect();
-    let extras = PageExtras {
-        document_name: Some("D"),
-        description: Some("Desc"),
-        make: Some("MakeCo"),
-        model: Some("ModelX"),
-        page_name: Some("P1"),
-        software: Some("SW"),
-        artist: Some("Art"),
-        host_computer: Some("Host"),
-        copyright: Some("Copy"),
-        page_number: Some((0, 1)),
-        ..Default::default()
-    };
+    let extras = PageExtras::default()
+        .with_document_name(Some("D"))
+        .with_description(Some("Desc"))
+        .with_make(Some("MakeCo"))
+        .with_model(Some("ModelX"))
+        .with_page_name(Some("P1"))
+        .with_software(Some("SW"))
+        .with_artist(Some("Art"))
+        .with_host_computer(Some("Host"))
+        .with_copyright(Some("Copy"))
+        .with_page_number(Some((0, 1)));
     let tiff = encode_page(&page(4, 4, &px, extras)).expect("encode");
     let hdr = parse_header(&tiff).expect("header");
     let (entries, _next) =

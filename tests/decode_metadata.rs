@@ -21,30 +21,28 @@ use oxideav_tiff::{
 };
 
 fn gray8_page<'a>(w: u32, h: u32, pixels: &'a [u8], extras: PageExtras<'a>) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Gray8 { pixels },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Gray8 { pixels },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
         extras,
-    }
+    )
 }
 
 #[test]
 fn ascii_section8_fields_round_trip() {
     let px: Vec<u8> = (0..16u32).map(|i| i as u8).collect();
-    let extras = PageExtras {
-        description: Some("A test raster"),
-        software: Some("oxideav-tiff"),
-        date_time: Some("2026:07:10 12:34:56"),
-        artist: Some("Karpeles Lab"),
-        copyright: Some("(c) 2026"),
-        ..Default::default()
-    };
+    let extras = PageExtras::default()
+        .with_description(Some("A test raster"))
+        .with_software(Some("oxideav-tiff"))
+        .with_date_time(Some("2026:07:10 12:34:56"))
+        .with_artist(Some("Karpeles Lab"))
+        .with_copyright(Some("(c) 2026"));
     let tiff = encode_page(&gray8_page(4, 4, &px, extras)).expect("encode");
     let d = decode_page(&tiff).expect("decode");
     let m = &d.metadata;
@@ -62,14 +60,8 @@ fn ascii_section8_fields_round_trip() {
 #[test]
 fn resolution_triple_round_trips_as_raw_rationals() {
     let px: Vec<u8> = vec![0x11; 4];
-    let extras = PageExtras {
-        resolution: Some(PageResolution {
-            x: (300, 1),
-            y: (150, 2),
-            unit: 3, // centimetre
-        }),
-        ..Default::default()
-    };
+    let extras =
+        PageExtras::default().with_resolution(Some(PageResolution::new((300, 1), (150, 2), 3)));
     let tiff = encode_page(&gray8_page(2, 2, &px, extras)).expect("encode");
     let m = decode_page(&tiff).expect("decode").metadata;
     assert_eq!(m.x_resolution, Some((300, 1)));
@@ -82,10 +74,7 @@ fn orientation_tag_preserved_alongside_applied_transform() {
     let px: Vec<u8> = (0..12u32).map(|i| i as u8).collect();
     // Orientation 6 = top-left rotated; the decoder applies the pixel
     // transform, but the metadata must still report the original tag.
-    let extras = PageExtras {
-        orientation: Some(6),
-        ..Default::default()
-    };
+    let extras = PageExtras::default().with_orientation(Some(6));
     let tiff = encode_page(&gray8_page(4, 3, &px, extras)).expect("encode");
     let m = decode_page(&tiff).expect("decode").metadata;
     assert_eq!(m.orientation, Some(6));
@@ -94,12 +83,10 @@ fn orientation_tag_preserved_alongside_applied_transform() {
 #[test]
 fn page_number_and_subfile_bits_round_trip() {
     let px: Vec<u8> = vec![0x22; 4];
-    let extras = PageExtras {
-        page_number: Some((2, 5)),
-        multi_page: true,         // NewSubfileType bit 1
-        reduced_resolution: true, // NewSubfileType bit 0
-        ..Default::default()
-    };
+    let extras = PageExtras::default()
+        .with_page_number(Some((2, 5)))
+        .with_multi_page(true)
+        .with_reduced_resolution(true);
     let tiff = encode_page(&gray8_page(2, 2, &px, extras)).expect("encode");
     let m = decode_page(&tiff).expect("decode").metadata;
     assert_eq!(m.page_number, Some((2, 5)));
@@ -117,13 +104,7 @@ fn no_metadata_tags_yields_empty_default() {
     // not descriptive metadata); the reader reports it faithfully. Every
     // descriptive / resolution field stays `None`, and the resolution
     // default is not synthesised by the reader.
-    assert_eq!(
-        m,
-        TiffMetadata {
-            new_subfile_type: Some(0),
-            ..Default::default()
-        }
-    );
+    assert_eq!(m, TiffMetadata::default().with_new_subfile_type(Some(0)));
 }
 
 // --------------------------------------------------------------------

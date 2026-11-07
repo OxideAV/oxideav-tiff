@@ -73,17 +73,17 @@ fn expand_mask_to_gray8(packed: &[u8], w: u32, h: u32) -> Vec<u8> {
 }
 
 fn encode_mask(w: u32, h: u32, bytes: &[u8], compression: TiffCompression) -> Vec<u8> {
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::TransparencyMask { pixels: bytes },
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::TransparencyMask { pixels: bytes },
         compression,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     encode_page(&page).expect("encode_page TransparencyMask")
 }
 
@@ -226,30 +226,30 @@ fn multipage_main_image_plus_mask() {
         }
     }
     let pages = [
-        EncodePage {
-            width: w,
-            height: h,
-            kind: EncodePixelFormat::Gray8 { pixels: &gray },
-            compression: TiffCompression::None,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        },
-        EncodePage {
-            width: w,
-            height: h,
-            kind: EncodePixelFormat::TransparencyMask {
+        EncodePage::new(
+            w,
+            h,
+            EncodePixelFormat::Gray8 { pixels: &gray },
+            TiffCompression::None,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        ),
+        EncodePage::new(
+            w,
+            h,
+            EncodePixelFormat::TransparencyMask {
                 pixels: &packed_mask,
             },
-            compression: TiffCompression::PackBits,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        },
+            TiffCompression::PackBits,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        ),
     ];
     let buf = encode_pages(&pages).expect("multipage encode");
     let images = decode_all(&buf).expect("multipage decode");
@@ -322,17 +322,17 @@ fn gray8_page_does_not_set_mask_bit() {
     let w = 8u32;
     let h = 4u32;
     let gray = vec![0u8; (w * h) as usize];
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Gray8 { pixels: &gray },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Gray8 { pixels: &gray },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let buf = encode_page(&page).expect("encode Gray8");
     let header = parse_header(&buf).expect("parse_header");
     let (entries, _next) = parse_ifd(
@@ -361,20 +361,21 @@ fn gray8_page_does_not_set_mask_bit() {
 #[test]
 fn transparency_mask_tiled_matches_strip() {
     let (w, h, packed) = mask_diagonal_24x4();
-    let strip = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::TransparencyMask { pixels: &packed },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
-    let tiled = EncodePage {
-        tiling: Some((16, 16)),
-        ..strip.clone()
+    let strip = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::TransparencyMask { pixels: &packed },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
+    let tiled = {
+        let mut encode_page = strip.clone();
+        encode_page.tiling = Some((16, 16));
+        encode_page
     };
     let ds = decode_page(&encode_page(&strip).expect("encode strip mask")).expect("decode strip");
     let dt = decode_page(&encode_page(&tiled).expect("encode tiled mask")).expect("decode tiled");
@@ -388,17 +389,17 @@ fn transparency_mask_tiled_matches_strip() {
 #[test]
 fn transparency_mask_planar_rejected() {
     let (w, h, packed) = (16u32, 8u32, vec![0u8; 2 * 8]);
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::TransparencyMask { pixels: &packed },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: true,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::TransparencyMask { pixels: &packed },
+        TiffCompression::None,
+        false,
+        true,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let err = encode_page(&page).expect_err("planar TransparencyMask must fail");
     let msg = format!("{err}");
     assert!(
@@ -412,17 +413,17 @@ fn transparency_mask_planar_rejected() {
 #[test]
 fn transparency_mask_predictor_rejected() {
     let (w, h, packed) = (16u32, 8u32, vec![0u8; 2 * 8]);
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::TransparencyMask { pixels: &packed },
-        compression: TiffCompression::Lzw,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::TransparencyMask { pixels: &packed },
+        TiffCompression::Lzw,
+        true,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let err = encode_page(&page).expect_err("predictor + TransparencyMask must fail");
     let msg = format!("{err}");
     assert!(
@@ -435,19 +436,17 @@ fn transparency_mask_predictor_rejected() {
 /// `pixels.len()` that doesn't match `ceil(width/8) * height`.
 #[test]
 fn transparency_mask_wrong_buffer_size_rejected() {
-    let page = EncodePage {
-        width: 16,
-        height: 8,
-        // Expected 16 bytes (2 per row × 8 rows); we deliberately
-        // pass 10 bytes.
-        kind: EncodePixelFormat::TransparencyMask { pixels: &[0u8; 10] },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        16,
+        8,
+        EncodePixelFormat::TransparencyMask { pixels: &[0u8; 10] },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let err = encode_page(&page).expect_err("size-mismatch TransparencyMask must fail");
     let msg = format!("{err}");
     assert!(

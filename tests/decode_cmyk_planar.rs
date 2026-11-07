@@ -216,17 +216,17 @@ fn encoder_cmyk32_planar_predictor_roundtrips_against_chunky() {
     let (w, h) = (16u32, 16u32);
     let pixels = cmyk_pattern(w, h);
     let oracle = {
-        let page = EncodePage {
-            width: w,
-            height: h,
-            kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
-            compression: TiffCompression::None,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+        let page = EncodePage::new(
+            w,
+            h,
+            EncodePixelFormat::Cmyk32 { pixels: &pixels },
+            TiffCompression::None,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        );
         decode_page(&encode_page(&page).unwrap())
             .unwrap()
             .image
@@ -243,17 +243,17 @@ fn encoder_cmyk32_planar_predictor_roundtrips_against_chunky() {
     ] {
         for predictor in [false, true] {
             for tiling in [None, Some((16u32, 16u32))] {
-                let page = EncodePage {
-                    width: w,
-                    height: h,
-                    kind: EncodePixelFormat::Cmyk32 { pixels: &pixels },
-                    compression: comp,
+                let page = EncodePage::new(
+                    w,
+                    h,
+                    EncodePixelFormat::Cmyk32 { pixels: &pixels },
+                    comp,
                     predictor,
-                    planar: true,
+                    true,
                     tiling,
-                    bigtiff: false,
-                    extras: PageExtras::default(),
-                };
+                    false,
+                    PageExtras::default(),
+                );
                 let d = decode_page(&encode_page(&page).unwrap()).unwrap();
                 assert_eq!(
                     d.image.planes[0].data, oracle,

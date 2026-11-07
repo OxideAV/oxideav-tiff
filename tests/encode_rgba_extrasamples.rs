@@ -49,17 +49,17 @@ fn page<'a>(
     kind: ExtraSampleKind,
     compression: TiffCompression,
 ) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Rgba32 { pixels, kind },
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Rgba32 { pixels, kind },
         compression,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    }
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    )
 }
 
 /// The display render of a decoded RGB(+extra) page: `Rgb24` pages
@@ -114,9 +114,10 @@ fn rgba_strip_roundtrip() {
     for kind in KINDS {
         for compression in COMPRESSORS {
             for predictor in [false, true] {
-                let p = EncodePage {
-                    predictor,
-                    ..page(w, h, &rgba, kind, compression)
+                let p = {
+                    let mut encode_page = page(w, h, &rgba, kind, compression);
+                    encode_page.predictor = predictor;
+                    encode_page
                 };
                 let tiff = encode_page(&p).expect("encode failed");
                 assert_eq!(
@@ -144,32 +145,34 @@ fn rgba_tiled_and_planar_roundtrip() {
     let rgba = pixels_rgba(w, h);
     let want = rgb_of(&rgba);
     for predictor in [false, true] {
-        let p = EncodePage {
-            tiling: Some((16, 16)),
-            predictor,
-            ..page(
+        let p = {
+            let mut encode_page = page(
                 w,
                 h,
                 &rgba,
                 ExtraSampleKind::UnassociatedAlpha,
                 TiffCompression::Lzw,
-            )
+            );
+            encode_page.tiling = Some((16, 16));
+            encode_page.predictor = predictor;
+            encode_page
         };
         assert_eq!(
             decode_rgb(&encode_page(&p).expect("tiled encode")),
             want,
             "tiled predictor={predictor}"
         );
-        let p = EncodePage {
-            planar: true,
-            predictor,
-            ..page(
+        let p = {
+            let mut encode_page = page(
                 w,
                 h,
                 &rgba,
                 ExtraSampleKind::UnassociatedAlpha,
                 TiffCompression::Deflate,
-            )
+            );
+            encode_page.planar = true;
+            encode_page.predictor = predictor;
+            encode_page
         };
         assert_eq!(
             decode_rgb(&encode_page(&p).expect("planar encode")),
@@ -185,16 +188,17 @@ fn rgba_tiled_and_planar_roundtrip() {
 fn rgba_bigtiff_roundtrip() {
     let (w, h) = (23u32, 11u32);
     let rgba = pixels_rgba(w, h);
-    let p = EncodePage {
-        bigtiff: true,
-        extras: PageExtras::default(),
-        ..page(
+    let p = {
+        let mut encode_page = page(
             w,
             h,
             &rgba,
             ExtraSampleKind::AssociatedAlpha,
             TiffCompression::Zstd,
-        )
+        );
+        encode_page.bigtiff = true;
+        encode_page.extras = PageExtras::default();
+        encode_page
     };
     assert_eq!(decode_rgb(&encode_page(&p).expect("encode")), rgb_of(&rgba));
 }
@@ -294,15 +298,16 @@ fn rgba_imagemagick_reads_our_output() {
     }
     let (w, h) = (23u32, 11u32);
     let rgba = pixels_rgba(w, h);
-    let p = EncodePage {
-        predictor: true,
-        ..page(
+    let p = {
+        let mut encode_page = page(
             w,
             h,
             &rgba,
             ExtraSampleKind::UnassociatedAlpha,
             TiffCompression::Lzw,
-        )
+        );
+        encode_page.predictor = true;
+        encode_page
     };
     let tiff = encode_page(&p).expect("encode failed");
 

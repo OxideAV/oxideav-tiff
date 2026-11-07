@@ -106,23 +106,24 @@ fuzz_target!(|data: &[u8]| {
     if rows_per_strip != 0 && !tiled {
         extras.rows_per_strip = Some(rows_per_strip as u32);
     }
-    let page = EncodePage {
+    let page = EncodePage::new(
         width,
         height,
         kind,
-        compression: TiffCompression::Jpeg(JpegOptions {
-            quality,
-            tables,
-            process,
-            optimize_huffman,
-            restart_interval: (byte(data, 7) >> 4) as u16,
-        }),
-        predictor: false,
+        TiffCompression::Jpeg(
+            JpegOptions::default()
+                .with_quality(quality)
+                .with_tables(tables)
+                .with_process(process)
+                .with_optimize_huffman(optimize_huffman)
+                .with_restart_interval((byte(data, 7) >> 4) as u16),
+        ),
+        false,
         planar,
-        tiling: if tiled { Some((16, 16)) } else { None },
-        bigtiff: flags & 0x40 != 0 && kind_sel == 0,
+        if tiled { Some((16, 16)) } else { None },
+        flags & 0x40 != 0 && kind_sel == 0,
         extras,
-    };
+    );
 
     // (1) + (2): encode, then the file must decode.
     if let Ok(tiff) = encode_page(&page) {

@@ -267,28 +267,22 @@ fn pages_keep_their_blobs_and_descriptive_tags_through_the_merge() {
     // A foreign single-page packet with §8 strings and a resolution
     // (what a remuxed file from another writer could carry).
     let px: Vec<u8> = (0..36u32).map(|i| i as u8).collect();
-    let foreign = encode_page(&EncodePage {
-        width: 6,
-        height: 6,
-        kind: EncodePixelFormat::Gray8 { pixels: &px },
-        compression: TiffCompression::PackBits,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras {
-            software: Some("elsewhere 1.0"),
-            artist: Some("Karpeles Lab"),
-            description: Some("page from another writer"),
-            resolution: Some(PageResolution {
-                x: (300, 1),
-                y: (300, 1),
-                unit: 2,
-            }),
-            iptc: Some(&[0x1C, 0x02, 0x05, 0x00, 0x01, b'z']),
-            ..PageExtras::default()
-        },
-    })
+    let foreign = encode_page(&EncodePage::new(
+        6,
+        6,
+        EncodePixelFormat::Gray8 { pixels: &px },
+        TiffCompression::PackBits,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default()
+            .with_software(Some("elsewhere 1.0"))
+            .with_artist(Some("Karpeles Lab"))
+            .with_description(Some("page from another writer"))
+            .with_resolution(Some(PageResolution::new((300, 1), (300, 1), 2)))
+            .with_iptc(Some(&[0x1C, 0x02, 0x05, 0x00, 0x01, b'z'])),
+    ))
     .unwrap();
     let mut p0 = Packet::new(0, TimeBase::MILLIS, foreign);
     p0.pts = Some(0);

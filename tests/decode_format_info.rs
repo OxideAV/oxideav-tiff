@@ -11,17 +11,17 @@ use oxideav_tiff::{
 };
 
 fn base<'a>(w: u32, h: u32, kind: EncodePixelFormat<'a>) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
+    EncodePage::new(
+        w,
+        h,
         kind,
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    }
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    )
 }
 
 #[test]

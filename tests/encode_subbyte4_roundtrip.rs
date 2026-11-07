@@ -57,17 +57,17 @@ fn expected_gray(nibs: &[u8]) -> Vec<u8> {
 }
 
 fn gray_page<'a>(w: u32, h: u32, packed: &'a [u8], compression: TiffCompression) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Gray4 { pixels: packed },
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Gray4 { pixels: packed },
         compression,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    }
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    )
 }
 
 fn decode_plane(tiff: &[u8], expect_pf: TiffPixelFormat, bytes_per_pixel: usize) -> Vec<u8> {
@@ -100,9 +100,10 @@ fn gray4_strip_roundtrip() {
     let want = expected_gray(&nibs);
     for compression in COMPRESSORS {
         for predictor in [false, true] {
-            let p = EncodePage {
-                predictor,
-                ..gray_page(w, h, &packed, compression)
+            let p = {
+                let mut encode_page = gray_page(w, h, &packed, compression);
+                encode_page.predictor = predictor;
+                encode_page
             };
             let tiff = encode_page(&p).expect("encode failed");
             let got = decode_plane(&tiff, TiffPixelFormat::Gray8, 1);
@@ -127,14 +128,16 @@ fn gray4_tiled_matches_strip() {
         TiffCompression::Zstd,
     ] {
         for predictor in [false, true] {
-            let tiled = EncodePage {
-                tiling: Some((16, 16)),
-                predictor,
-                ..gray_page(w, h, &packed, compression)
+            let tiled = {
+                let mut encode_page = gray_page(w, h, &packed, compression);
+                encode_page.tiling = Some((16, 16));
+                encode_page.predictor = predictor;
+                encode_page
             };
-            let strip = EncodePage {
-                predictor,
-                ..gray_page(w, h, &packed, compression)
+            let strip = {
+                let mut encode_page = gray_page(w, h, &packed, compression);
+                encode_page.predictor = predictor;
+                encode_page
             };
             let t = decode_plane(
                 &encode_page(&tiled).expect("tiled encode"),
@@ -162,9 +165,10 @@ fn gray4_oversized_single_tile() {
     let (w, h) = (10u32, 6u32);
     let nibs = nibbles(w, h);
     let packed = pack4(&nibs, w, h);
-    let p = EncodePage {
-        tiling: Some((16, 16)),
-        ..gray_page(w, h, &packed, TiffCompression::PackBits)
+    let p = {
+        let mut encode_page = gray_page(w, h, &packed, TiffCompression::PackBits);
+        encode_page.tiling = Some((16, 16));
+        encode_page
     };
     let tiff = encode_page(&p).expect("encode failed");
     assert_eq!(
@@ -179,11 +183,12 @@ fn gray4_bigtiff_roundtrip() {
     let (w, h) = (21u32, 9u32);
     let nibs = nibbles(w, h);
     let packed = pack4(&nibs, w, h);
-    let p = EncodePage {
-        bigtiff: true,
-        extras: PageExtras::default(),
-        predictor: true,
-        ..gray_page(w, h, &packed, TiffCompression::Deflate)
+    let p = {
+        let mut encode_page = gray_page(w, h, &packed, TiffCompression::Deflate);
+        encode_page.bigtiff = true;
+        encode_page.extras = PageExtras::default();
+        encode_page.predictor = true;
+        encode_page
     };
     let tiff = encode_page(&p).expect("encode failed");
     assert_eq!(
@@ -207,20 +212,20 @@ fn palette4_roundtrip() {
     let want: Vec<u8> = nibs.iter().flat_map(|&n| palette[n as usize]).collect();
     for compression in COMPRESSORS {
         for tiling in [None, Some((16u32, 16u32))] {
-            let p = EncodePage {
-                width: w,
-                height: h,
-                kind: EncodePixelFormat::Palette4 {
+            let p = EncodePage::new(
+                w,
+                h,
+                EncodePixelFormat::Palette4 {
                     indices: &packed,
                     palette: &palette,
                 },
                 compression,
-                predictor: false,
-                planar: false,
+                false,
+                false,
                 tiling,
-                bigtiff: false,
-                extras: PageExtras::default(),
-            };
+                false,
+                PageExtras::default(),
+            );
             let tiff = encode_page(&p).expect("encode failed");
             let got = decode_plane(&tiff, TiffPixelFormat::Pal8, 1);
             assert_eq!(
@@ -252,20 +257,20 @@ fn subbyte4_ifd_tags() {
     let nibs = nibbles(w, h);
     let packed = pack4(&nibs, w, h);
     let palette: Vec<RgbColor> = (0..4u8).map(|i| [i * 60, i * 40, i * 20]).collect();
-    let p = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Palette4 {
+    let p = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Palette4 {
             indices: &packed,
             palette: &palette,
         },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let tiff = encode_page(&p).expect("encode failed");
     let hd = parse_header(&tiff).unwrap();
     let (entries, _) = parse_ifd(&tiff, hd.byte_order, hd.variant, hd.first_ifd_offset).unwrap();
@@ -294,29 +299,30 @@ fn subbyte4_rejections() {
     assert!(format!("{e:?}").contains("Gray4"), "{e:?}");
     // Palette with 17 entries.
     let palette: Vec<RgbColor> = (0..17u8).map(|i| [i, i, i]).collect();
-    let p = EncodePage {
-        width: 8,
-        height: 4,
-        kind: EncodePixelFormat::Palette4 {
+    let p = EncodePage::new(
+        8,
+        4,
+        EncodePixelFormat::Palette4 {
             indices: &packed,
             palette: &palette,
         },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let e = encode_page(&p).unwrap_err();
     assert!(format!("{e:?}").contains("1..=16"), "{e:?}");
     // CCITT requires Bilevel / TransparencyMask input.
     let e = encode_page(&gray_page(8, 4, &packed, TiffCompression::CcittRle)).unwrap_err();
     assert!(format!("{e:?}").contains("Bilevel"), "{e:?}");
     // Planar is irrelevant at SamplesPerPixel = 1.
-    let p = EncodePage {
-        planar: true,
-        ..gray_page(8, 4, &packed, TiffCompression::None)
+    let p = {
+        let mut encode_page = gray_page(8, 4, &packed, TiffCompression::None);
+        encode_page.planar = true;
+        encode_page
     };
     let e = encode_page(&p).unwrap_err();
     assert!(format!("{e:?}").contains("PlanarConfiguration"), "{e:?}");
@@ -344,10 +350,11 @@ fn gray4_imagemagick_reads_our_output() {
     let (w, h) = (41u32, 25u32);
     let nibs = nibbles(w, h);
     let packed = pack4(&nibs, w, h);
-    let p = EncodePage {
-        tiling: Some((16, 16)),
-        predictor: true,
-        ..gray_page(w, h, &packed, TiffCompression::Lzw)
+    let p = {
+        let mut encode_page = gray_page(w, h, &packed, TiffCompression::Lzw);
+        encode_page.tiling = Some((16, 16));
+        encode_page.predictor = true;
+        encode_page
     };
     let tiff = encode_page(&p).expect("encode failed");
 

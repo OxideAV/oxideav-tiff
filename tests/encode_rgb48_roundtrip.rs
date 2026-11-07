@@ -40,17 +40,17 @@ fn pixels_rgb48(w: u32, h: u32) -> Vec<u8> {
 }
 
 fn page<'a>(w: u32, h: u32, pixels: &'a [u8], compression: TiffCompression) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Rgb48 { pixels },
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Rgb48 { pixels },
         compression,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    }
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    )
 }
 
 /// Encode one page, decode it, assert the format is `Rgb48Le` and
@@ -87,9 +87,10 @@ fn rgb48_strip_roundtrip_all_compressors() {
     let pixels = pixels_rgb48(w, h);
     for compression in COMPRESSORS {
         for predictor in [false, true] {
-            let p = EncodePage {
-                predictor,
-                ..page(w, h, &pixels, compression)
+            let p = {
+                let mut encode_page = page(w, h, &pixels, compression);
+                encode_page.predictor = predictor;
+                encode_page
             };
             assert_eq!(
                 roundtrip(&p),
@@ -109,10 +110,11 @@ fn rgb48_planar_roundtrip() {
     let pixels = pixels_rgb48(w, h);
     for compression in COMPRESSORS {
         for predictor in [false, true] {
-            let p = EncodePage {
-                planar: true,
-                predictor,
-                ..page(w, h, &pixels, compression)
+            let p = {
+                let mut encode_page = page(w, h, &pixels, compression);
+                encode_page.planar = true;
+                encode_page.predictor = predictor;
+                encode_page
             };
             assert_eq!(
                 roundtrip(&p),
@@ -137,10 +139,11 @@ fn rgb48_tiled_roundtrip_partial_edges() {
         TiffCompression::Zstd,
     ] {
         for predictor in [false, true] {
-            let p = EncodePage {
-                tiling: Some((16, 16)),
-                predictor,
-                ..page(w, h, &pixels, compression)
+            let p = {
+                let mut encode_page = page(w, h, &pixels, compression);
+                encode_page.tiling = Some((16, 16));
+                encode_page.predictor = predictor;
+                encode_page
             };
             assert_eq!(
                 roundtrip(&p),
@@ -158,11 +161,12 @@ fn rgb48_planar_tiled_roundtrip() {
     let (w, h) = (40u32, 24u32);
     let pixels = pixels_rgb48(w, h);
     for predictor in [false, true] {
-        let p = EncodePage {
-            tiling: Some((16, 16)),
-            planar: true,
-            predictor,
-            ..page(w, h, &pixels, TiffCompression::Lzw)
+        let p = {
+            let mut encode_page = page(w, h, &pixels, TiffCompression::Lzw);
+            encode_page.tiling = Some((16, 16));
+            encode_page.planar = true;
+            encode_page.predictor = predictor;
+            encode_page
         };
         assert_eq!(roundtrip(&p), pixels, "planar-tiled predictor={predictor}");
     }
@@ -175,12 +179,13 @@ fn rgb48_bigtiff_roundtrip() {
     let (w, h) = (23u32, 11u32);
     let pixels = pixels_rgb48(w, h);
     for tiling in [None, Some((16u32, 16u32))] {
-        let p = EncodePage {
-            bigtiff: true,
-            extras: PageExtras::default(),
-            tiling,
-            predictor: true,
-            ..page(w, h, &pixels, TiffCompression::Deflate)
+        let p = {
+            let mut encode_page = page(w, h, &pixels, TiffCompression::Deflate);
+            encode_page.bigtiff = true;
+            encode_page.extras = PageExtras::default();
+            encode_page.tiling = tiling;
+            encode_page.predictor = true;
+            encode_page
         };
         assert_eq!(roundtrip(&p), pixels, "bigtiff tiling={tiling:?}");
     }
@@ -195,21 +200,22 @@ fn rgb48_multipage_chain() {
         .flat_map(|i| ((i * 257 % 65536) as u16).to_le_bytes())
         .collect();
     let pages = [
-        EncodePage {
-            predictor: true,
-            ..page(w, h, &rgb, TiffCompression::Lzw)
+        {
+            let mut encode_page = page(w, h, &rgb, TiffCompression::Lzw);
+            encode_page.predictor = true;
+            encode_page
         },
-        EncodePage {
-            width: w,
-            height: h,
-            kind: EncodePixelFormat::Gray16Le { pixels: &gray },
-            compression: TiffCompression::Deflate,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        },
+        EncodePage::new(
+            w,
+            h,
+            EncodePixelFormat::Gray16Le { pixels: &gray },
+            TiffCompression::Deflate,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        ),
     ];
     let tiff = encode_pages(&pages).expect("multi-page encode failed");
     let decoded = decode_all(&tiff).expect("multi-page decode failed");
@@ -291,9 +297,10 @@ fn rgb48_imagemagick_reads_our_output() {
     }
     let (w, h) = (23u32, 11u32);
     let pixels = pixels_rgb48(w, h);
-    let p = EncodePage {
-        predictor: true,
-        ..page(w, h, &pixels, TiffCompression::Lzw)
+    let p = {
+        let mut encode_page = page(w, h, &pixels, TiffCompression::Lzw);
+        encode_page.predictor = true;
+        encode_page
     };
     let tiff = encode_page(&p).expect("encode failed");
 

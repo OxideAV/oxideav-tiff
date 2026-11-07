@@ -243,17 +243,17 @@ fn page<'a>(
     bigtiff: bool,
     extras: PageExtras<'a>,
 ) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
+    EncodePage::new(
+        w,
+        h,
         kind,
         compression,
-        predictor: false,
-        planar: false,
+        false,
+        false,
         tiling,
         bigtiff,
         extras,
-    }
+    )
 }
 
 /// Encode the same pixels as Compression=50001 and Compression=1,
@@ -322,10 +322,7 @@ fn roundtrip_rgb_single_strip() {
 fn roundtrip_rgb_multi_strip() {
     let px = pattern_rgb(64, 41); // 41 rows at RowsPerStrip=16 → 16/16/9
     let kind = || EncodePixelFormat::Rgb24 { pixels: &px };
-    let extras = || PageExtras {
-        rows_per_strip: Some(16),
-        ..PageExtras::default()
-    };
+    let extras = || PageExtras::default().with_rows_per_strip(Some(16));
     webp_vs_none(
         &page(64, 41, kind(), TiffCompression::Webp, None, false, extras()),
         &page(64, 41, kind(), TiffCompression::None, None, false, extras()),

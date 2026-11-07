@@ -29,26 +29,24 @@ fn demuxer_exposes_metadata_and_attachments() {
     let px: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
     let xmp = b"<?xpacket begin=\"\"?><x:xmpmeta/><?xpacket end=\"w\"?>".to_vec();
     let icc = minimal_icc(180);
-    let extras = PageExtras {
-        software: Some("oxideav-tiff test"),
-        artist: Some("Karpeles Lab"),
-        description: Some("demuxer surface"),
-        date_time: Some("2026:07:10 12:00:00"),
-        xmp: Some(&xmp),
-        icc_profile: Some(&icc),
-        ..Default::default()
-    };
-    let tiff = encode_page(&EncodePage {
-        width: 8,
-        height: 8,
-        kind: EncodePixelFormat::Gray8 { pixels: &px },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
+    let extras = PageExtras::default()
+        .with_software(Some("oxideav-tiff test"))
+        .with_artist(Some("Karpeles Lab"))
+        .with_description(Some("demuxer surface"))
+        .with_date_time(Some("2026:07:10 12:00:00"))
+        .with_xmp(Some(&xmp))
+        .with_icc_profile(Some(&icc));
+    let tiff = encode_page(&EncodePage::new(
+        8,
+        8,
+        EncodePixelFormat::Gray8 { pixels: &px },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
         extras,
-    })
+    ))
     .expect("encode");
 
     let codecs = CodecRegistry::new();
@@ -81,17 +79,17 @@ fn demuxer_exposes_metadata_and_attachments() {
 #[test]
 fn demuxer_without_payloads_has_empty_surfaces() {
     let px: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
-    let tiff = encode_page(&EncodePage {
-        width: 8,
-        height: 8,
-        kind: EncodePixelFormat::Gray8 { pixels: &px },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    })
+    let tiff = encode_page(&EncodePage::new(
+        8,
+        8,
+        EncodePixelFormat::Gray8 { pixels: &px },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    ))
     .expect("encode");
     let codecs = CodecRegistry::new();
     let dmx = open_demuxer(Box::new(Cursor::new(tiff)), &codecs).expect("open demuxer");

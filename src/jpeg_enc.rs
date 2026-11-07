@@ -550,6 +550,7 @@ pub struct JpegComponent<'a> {
 
 /// The coding process of a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JpegProcess {
     /// Sequential DCT, Huffman: `SOF0` at 8 bits, `SOF1` at 12 bits.
     Dct,

@@ -326,21 +326,21 @@ fn c7_page<'a>(
     tile: (u32, u32),
     planar: bool,
 ) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
+    EncodePage::new(
+        w,
+        h,
         kind,
-        compression: TiffCompression::Jpeg(JpegOptions {
-            quality: 88,
-            tables: JpegTablesLayout::PerSegment,
-            ..JpegOptions::default()
-        }),
-        predictor: false,
+        TiffCompression::Jpeg(
+            JpegOptions::default()
+                .with_quality(88)
+                .with_tables(JpegTablesLayout::PerSegment),
+        ),
+        false,
         planar,
-        tiling: Some(tile),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    }
+        Some(tile),
+        false,
+        PageExtras::default(),
+    )
 }
 
 /// Convert the reference file into the §22 tiled tables-form layout

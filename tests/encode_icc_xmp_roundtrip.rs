@@ -43,17 +43,17 @@ fn xmp_packet(marker: &str) -> Vec<u8> {
 }
 
 fn gray_page<'a>(pixels: &'a [u8], w: u32, h: u32, extras: PageExtras<'a>) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Gray8 { pixels },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Gray8 { pixels },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
         extras,
-    }
+    )
 }
 
 fn assert_both(tiff: &[u8], xmp: &[u8], icc: &[u8]) {
@@ -67,11 +67,9 @@ fn classic_single_strip_round_trip() {
     let px: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
     let xmp = xmp_packet("classic");
     let icc = minimal_icc(300);
-    let extras = PageExtras {
-        xmp: Some(&xmp),
-        icc_profile: Some(&icc),
-        ..Default::default()
-    };
+    let extras = PageExtras::default()
+        .with_xmp(Some(&xmp))
+        .with_icc_profile(Some(&icc));
     let tiff = encode_page(&gray_page(&px, 8, 8, extras)).expect("encode");
     assert_both(&tiff, &xmp, &icc);
 }
@@ -81,11 +79,9 @@ fn bigtiff_round_trip() {
     let px: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
     let xmp = xmp_packet("bigtiff");
     let icc = minimal_icc(512);
-    let extras = PageExtras {
-        xmp: Some(&xmp),
-        icc_profile: Some(&icc),
-        ..Default::default()
-    };
+    let extras = PageExtras::default()
+        .with_xmp(Some(&xmp))
+        .with_icc_profile(Some(&icc));
     let mut page = gray_page(&px, 8, 8, extras);
     page.bigtiff = true;
     let tiff = encode_page(&page).expect("encode");
@@ -97,12 +93,10 @@ fn multi_strip_round_trip() {
     let px: Vec<u8> = (0..256u32).map(|i| i as u8).collect();
     let xmp = xmp_packet("strips");
     let icc = minimal_icc(200);
-    let extras = PageExtras {
-        xmp: Some(&xmp),
-        icc_profile: Some(&icc),
-        rows_per_strip: Some(3),
-        ..Default::default()
-    };
+    let extras = PageExtras::default()
+        .with_xmp(Some(&xmp))
+        .with_icc_profile(Some(&icc))
+        .with_rows_per_strip(Some(3));
     let mut page = gray_page(&px, 16, 16, extras);
     page.compression = TiffCompression::Lzw;
     let tiff = encode_page(&page).expect("encode");
@@ -114,22 +108,20 @@ fn tiled_round_trip() {
     let px: Vec<u8> = (0..(48 * 48 * 3) as u32).map(|i| i as u8).collect();
     let xmp = xmp_packet("tiled");
     let icc = minimal_icc(400);
-    let extras = PageExtras {
-        xmp: Some(&xmp),
-        icc_profile: Some(&icc),
-        ..Default::default()
-    };
-    let page = EncodePage {
-        width: 48,
-        height: 48,
-        kind: EncodePixelFormat::Rgb24 { pixels: &px },
-        compression: TiffCompression::Deflate,
-        predictor: true,
-        planar: false,
-        tiling: Some((16, 16)),
-        bigtiff: false,
+    let extras = PageExtras::default()
+        .with_xmp(Some(&xmp))
+        .with_icc_profile(Some(&icc));
+    let page = EncodePage::new(
+        48,
+        48,
+        EncodePixelFormat::Rgb24 { pixels: &px },
+        TiffCompression::Deflate,
+        true,
+        false,
+        Some((16, 16)),
+        false,
         extras,
-    };
+    );
     let tiff = encode_page(&page).expect("encode");
     assert_both(&tiff, &xmp, &icc);
 }
@@ -139,22 +131,20 @@ fn planar_round_trip() {
     let px: Vec<u8> = (0..(8 * 8 * 3) as u32).map(|i| (i * 3) as u8).collect();
     let xmp = xmp_packet("planar");
     let icc = minimal_icc(256);
-    let extras = PageExtras {
-        xmp: Some(&xmp),
-        icc_profile: Some(&icc),
-        ..Default::default()
-    };
-    let page = EncodePage {
-        width: 8,
-        height: 8,
-        kind: EncodePixelFormat::Rgb24 { pixels: &px },
-        compression: TiffCompression::PackBits,
-        predictor: false,
-        planar: true,
-        tiling: None,
-        bigtiff: false,
+    let extras = PageExtras::default()
+        .with_xmp(Some(&xmp))
+        .with_icc_profile(Some(&icc));
+    let page = EncodePage::new(
+        8,
+        8,
+        EncodePixelFormat::Rgb24 { pixels: &px },
+        TiffCompression::PackBits,
+        false,
+        true,
+        None,
+        false,
         extras,
-    };
+    );
     let tiff = encode_page(&page).expect("encode");
     assert_both(&tiff, &xmp, &icc);
 }
@@ -170,19 +160,11 @@ fn multi_page_distinct_payloads_per_page() {
     let xmp1 = xmp_packet("page-one-with-longer-marker-text");
     let icc2 = minimal_icc(224);
     for bigtiff in [false, true] {
-        let e0 = PageExtras {
-            xmp: Some(&xmp0),
-            icc_profile: Some(&icc0),
-            ..Default::default()
-        };
-        let e1 = PageExtras {
-            xmp: Some(&xmp1),
-            ..Default::default()
-        };
-        let e2 = PageExtras {
-            icc_profile: Some(&icc2),
-            ..Default::default()
-        };
+        let e0 = PageExtras::default()
+            .with_xmp(Some(&xmp0))
+            .with_icc_profile(Some(&icc0));
+        let e1 = PageExtras::default().with_xmp(Some(&xmp1));
+        let e2 = PageExtras::default().with_icc_profile(Some(&icc2));
         let mut pages = vec![
             gray_page(&px, 4, 4, e0),
             gray_page(&px, 4, 4, e1),
@@ -217,20 +199,16 @@ fn re_encode_preserves_decoded_payloads() {
     let px: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
     let xmp = xmp_packet("re-encode");
     let icc = minimal_icc(344);
-    let extras = PageExtras {
-        xmp: Some(&xmp),
-        icc_profile: Some(&icc),
-        ..Default::default()
-    };
+    let extras = PageExtras::default()
+        .with_xmp(Some(&xmp))
+        .with_icc_profile(Some(&icc));
     let first = encode_page(&gray_page(&px, 8, 8, extras)).expect("encode 1");
     let d1 = decode_page(&first).expect("decode 1");
     let xmp_back = d1.metadata.xmp.clone().expect("xmp survived hop 1");
     let icc_back = d1.metadata.icc_profile.clone().expect("icc survived hop 1");
-    let extras2 = PageExtras {
-        xmp: Some(&xmp_back),
-        icc_profile: Some(&icc_back),
-        ..Default::default()
-    };
+    let extras2 = PageExtras::default()
+        .with_xmp(Some(&xmp_back))
+        .with_icc_profile(Some(&icc_back));
     let second = encode_page(&gray_page(&px, 8, 8, extras2)).expect("encode 2");
     let d2 = decode_page(&second).expect("decode 2");
     assert_eq!(d2.metadata.xmp.as_deref(), Some(xmp.as_slice()));
@@ -247,31 +225,19 @@ fn ifd_tags_stay_ascending_with_full_extras() {
     let px: Vec<u8> = (0..16u32).map(|i| i as u8).collect();
     let xmp = xmp_packet("ordering");
     let icc = minimal_icc(148);
-    let exif = [AuxIfdEntry {
-        tag: 33434, // ExposureTime slot in the child IFD (opaque here)
-        field_type: 5,
-        count: 1,
-        value: &[1, 0, 0, 0, 250, 0, 0, 0],
-    }];
-    let gps = [AuxIfdEntry {
-        tag: 0,
-        field_type: 1,
-        count: 4,
-        value: &[2, 3, 0, 0],
-    }];
-    let extras = PageExtras {
-        page_number: Some((0, 1)),
-        orientation: Some(1),
-        description: Some("d"),
-        software: Some("s"),
-        artist: Some("a"),
-        copyright: Some("c"),
-        exif_ifd: Some(&exif),
-        gps_ifd: Some(&gps),
-        xmp: Some(&xmp),
-        icc_profile: Some(&icc),
-        ..Default::default()
-    };
+    let exif = [AuxIfdEntry::new(33434, 5, 1, &[1, 0, 0, 0, 250, 0, 0, 0])];
+    let gps = [AuxIfdEntry::new(0, 1, 4, &[2, 3, 0, 0])];
+    let extras = PageExtras::default()
+        .with_page_number(Some((0, 1)))
+        .with_orientation(Some(1))
+        .with_description(Some("d"))
+        .with_software(Some("s"))
+        .with_artist(Some("a"))
+        .with_copyright(Some("c"))
+        .with_exif_ifd(Some(&exif))
+        .with_gps_ifd(Some(&gps))
+        .with_xmp(Some(&xmp))
+        .with_icc_profile(Some(&icc));
     let tiff = encode_page(&gray_page(&px, 4, 4, extras)).expect("encode");
     let h = parse_header(&tiff).expect("header");
     let (entries, _next) =
@@ -298,11 +264,9 @@ fn written_entry_types_match_the_registered_defaults() {
     let px: Vec<u8> = (0..16u32).map(|i| i as u8).collect();
     let xmp = xmp_packet("types");
     let icc = minimal_icc(132);
-    let extras = PageExtras {
-        xmp: Some(&xmp),
-        icc_profile: Some(&icc),
-        ..Default::default()
-    };
+    let extras = PageExtras::default()
+        .with_xmp(Some(&xmp))
+        .with_icc_profile(Some(&icc));
     let tiff = encode_page(&gray_page(&px, 4, 4, extras)).expect("encode");
     let h = parse_header(&tiff).expect("header");
     let (entries, _) = parse_ifd(&tiff, h.byte_order, h.variant, h.first_ifd_offset).expect("ifd");
@@ -336,20 +300,14 @@ fn icc_rejections_are_precise() {
     let px: Vec<u8> = (0..16u32).map(|i| i as u8).collect();
     // Shorter than the 128-byte header.
     let short = vec![0u8; 64];
-    let extras = PageExtras {
-        icc_profile: Some(&short),
-        ..Default::default()
-    };
+    let extras = PageExtras::default().with_icc_profile(Some(&short));
     let err = encode_page(&gray_page(&px, 4, 4, extras)).unwrap_err();
     let msg = format!("{err:?}");
     assert!(msg.contains("128-byte ICC header"), "{msg}");
     // Size-field mismatch.
     let mut lying = minimal_icc(200);
     lying[0..4].copy_from_slice(&100u32.to_be_bytes());
-    let extras = PageExtras {
-        icc_profile: Some(&lying),
-        ..Default::default()
-    };
+    let extras = PageExtras::default().with_icc_profile(Some(&lying));
     let err = encode_page(&gray_page(&px, 4, 4, extras)).unwrap_err();
     let msg = format!("{err:?}");
     assert!(msg.contains("authoritative"), "{msg}");
@@ -358,20 +316,14 @@ fn icc_rejections_are_precise() {
     let mut swapped = minimal_icc(200);
     let le = 200u32.to_le_bytes();
     swapped[0..4].copy_from_slice(&le);
-    let extras = PageExtras {
-        icc_profile: Some(&swapped),
-        ..Default::default()
-    };
+    let extras = PageExtras::default().with_icc_profile(Some(&swapped));
     assert!(encode_page(&gray_page(&px, 4, 4, extras)).is_err());
 }
 
 #[test]
 fn empty_xmp_rejected() {
     let px: Vec<u8> = (0..16u32).map(|i| i as u8).collect();
-    let extras = PageExtras {
-        xmp: Some(&[]),
-        ..Default::default()
-    };
+    let extras = PageExtras::default().with_xmp(Some(&[]));
     let err = encode_page(&gray_page(&px, 4, 4, extras)).unwrap_err();
     let msg = format!("{err:?}");
     assert!(msg.contains("non-empty"), "{msg}");
@@ -383,10 +335,7 @@ fn xmp_payload_is_opaque_bytes() {
     // arbitrary (non-ASCII, NUL-carrying) bytes transport verbatim.
     let px: Vec<u8> = (0..16u32).map(|i| i as u8).collect();
     let payload: Vec<u8> = vec![0xEF, 0xBB, 0xBF, 0x00, 0xFF, 0x80, 0x01];
-    let extras = PageExtras {
-        xmp: Some(&payload),
-        ..Default::default()
-    };
+    let extras = PageExtras::default().with_xmp(Some(&payload));
     let tiff = encode_page(&gray_page(&px, 4, 4, extras)).expect("encode");
     let d = decode_page(&tiff).expect("decode");
     assert_eq!(d.metadata.xmp.as_deref(), Some(payload.as_slice()));
@@ -400,24 +349,22 @@ fn payloads_compose_with_ccitt_bilevel_page() {
     let px: Vec<u8> = row.iter().cycle().take(8).copied().collect();
     let xmp = xmp_packet("ccitt");
     let icc = minimal_icc(132);
-    let extras = PageExtras {
-        xmp: Some(&xmp),
-        icc_profile: Some(&icc),
-        ..Default::default()
-    };
-    let page = EncodePage {
-        width: 8,
-        height: 8,
-        kind: EncodePixelFormat::Bilevel { pixels: &px },
-        compression: TiffCompression::CcittT6 {
+    let extras = PageExtras::default()
+        .with_xmp(Some(&xmp))
+        .with_icc_profile(Some(&icc));
+    let page = EncodePage::new(
+        8,
+        8,
+        EncodePixelFormat::Bilevel { pixels: &px },
+        TiffCompression::CcittT6 {
             uncompressed: false,
         },
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
+        false,
+        false,
+        None,
+        false,
         extras,
-    };
+    );
     let tiff = encode_page(&page).expect("encode");
     assert_both(&tiff, &xmp, &icc);
 }

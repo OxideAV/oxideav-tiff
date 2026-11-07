@@ -64,23 +64,21 @@ fn embed_iptc_false_drops_the_tag() {
 fn tag_is_undefined_typed_and_in_ascending_order() {
     let records = iptc_records();
     let px: Vec<u8> = (0..16u32).map(|i| i as u8).collect();
-    let extras = PageExtras {
-        copyright: Some("(c) 2026"),
-        iptc: Some(&records),
-        xmp: Some(b"<x:xmpmeta/>"),
-        ..PageExtras::default()
-    };
-    let bytes = encode_page(&EncodePage {
-        width: 4,
-        height: 4,
-        kind: EncodePixelFormat::Gray8 { pixels: &px },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
+    let extras = PageExtras::default()
+        .with_copyright(Some("(c) 2026"))
+        .with_iptc(Some(&records))
+        .with_xmp(Some(b"<x:xmpmeta/>"));
+    let bytes = encode_page(&EncodePage::new(
+        4,
+        4,
+        EncodePixelFormat::Gray8 { pixels: &px },
+        TiffCompression::Lzw,
+        false,
+        false,
+        None,
+        false,
         extras,
-    })
+    ))
     .unwrap();
     let hdr = parse_header(&bytes).unwrap();
     let (entries, _) =

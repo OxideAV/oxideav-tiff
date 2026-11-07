@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `new(..)` (every field, in declaration order) on `AuxIfdEntry` (a `const fn`, so entry tables can stay `static`), `PageResolution` and `EncodePage`; `with_<field>` setters on `PageExtras`, `JpegOptions` and `TiffMetadata`.
+
+### Changed
+
+- `#[non_exhaustive]` on the growable enums `EncodePixelFormat`, `TiffCompression`, `JpegProcess`, `JpegTablesLayout`, and on the records `AuxIfdEntry`, `PageResolution`, `PageExtras`, `EncodePage`, `JpegOptions`, `TiffMetadata`, `TiffFormatInfo`. `ExtraSampleKind` and `ResolutionUnit` (TIFF 6.0 closed code sets) stay exhaustive; the deprecated `DecodedTiff` is left as it is.
+
+### Added
+
 - IPTC-IIM record stream carriage (tag 33723): `Metadata::iptc` /
   `with_iptc`, `TiffMetadata::iptc`, `PageExtras::iptc`,
   `EncodeOptions::embed_iptc` / `with_embed_iptc`, `ImageInfo::has_iptc`,

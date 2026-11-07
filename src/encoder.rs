@@ -94,6 +94,7 @@ impl ExtraSampleKind {
 /// interpreted — the caller owns the meaning of the child IFD's
 /// entries; the crate owns only the §2 IFD structure.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AuxIfdEntry<'a> {
     pub tag: u16,
     pub field_type: u16,
@@ -101,10 +102,23 @@ pub struct AuxIfdEntry<'a> {
     pub value: &'a [u8],
 }
 
+impl<'a> AuxIfdEntry<'a> {
+    /// Build `AuxIfdEntry` from every field, in declaration order.
+    pub const fn new(tag: u16, field_type: u16, count: u64, value: &'a [u8]) -> Self {
+        Self {
+            tag,
+            field_type,
+            count,
+            value,
+        }
+    }
+}
+
 /// Physical-resolution metadata for one page (TIFF 6.0 §"Physical
 /// Dimensions": XResolution tag 282, YResolution tag 283 — RATIONALs
 /// in pixels per `unit` — and ResolutionUnit tag 296).
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct PageResolution {
     /// XResolution numerator / denominator ("The number of pixels per
     /// ResolutionUnit in the ImageWidth direction").
@@ -117,10 +131,18 @@ pub struct PageResolution {
     pub unit: u16,
 }
 
+impl PageResolution {
+    /// Build `PageResolution` from every field, in declaration order.
+    pub fn new(x: (u32, u32), y: (u32, u32), unit: u16) -> Self {
+        Self { x, y, unit }
+    }
+}
+
 /// Optional per-page additions beyond the raster itself. All fields
 /// default to "absent" — `EncodePage { extras: PageExtras::default(),
 /// .. }` writes exactly the field set previous rounds wrote.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct PageExtras<'a> {
     /// Write the `PageNumber` field (tag 297, TIFF 6.0 §"PageNumber",
     /// SHORT × 2) as `(page, total)`: "`PageNumber[0]` is the page
@@ -254,6 +276,162 @@ pub struct PageExtras<'a> {
     pub sub_ifds: &'a [EncodePage<'a>],
 }
 
+impl<'a> PageExtras<'a> {
+    /// Set `page_number`.
+    #[must_use]
+    pub fn with_page_number(mut self, page_number: Option<(u16, u16)>) -> Self {
+        self.page_number = page_number;
+        self
+    }
+
+    /// Set `reduced_resolution`.
+    #[must_use]
+    pub fn with_reduced_resolution(mut self, reduced_resolution: bool) -> Self {
+        self.reduced_resolution = reduced_resolution;
+        self
+    }
+
+    /// Set `multi_page`.
+    #[must_use]
+    pub fn with_multi_page(mut self, multi_page: bool) -> Self {
+        self.multi_page = multi_page;
+        self
+    }
+
+    /// Set `exif_ifd`.
+    #[must_use]
+    pub fn with_exif_ifd(mut self, exif_ifd: Option<&'a [AuxIfdEntry<'a>]>) -> Self {
+        self.exif_ifd = exif_ifd;
+        self
+    }
+
+    /// Set `gps_ifd`.
+    #[must_use]
+    pub fn with_gps_ifd(mut self, gps_ifd: Option<&'a [AuxIfdEntry<'a>]>) -> Self {
+        self.gps_ifd = gps_ifd;
+        self
+    }
+
+    /// Set `orientation`.
+    #[must_use]
+    pub fn with_orientation(mut self, orientation: Option<u16>) -> Self {
+        self.orientation = orientation;
+        self
+    }
+
+    /// Set `resolution`.
+    #[must_use]
+    pub fn with_resolution(mut self, resolution: Option<PageResolution>) -> Self {
+        self.resolution = resolution;
+        self
+    }
+
+    /// Set `description`.
+    #[must_use]
+    pub fn with_description(mut self, description: Option<&'a str>) -> Self {
+        self.description = description;
+        self
+    }
+
+    /// Set `software`.
+    #[must_use]
+    pub fn with_software(mut self, software: Option<&'a str>) -> Self {
+        self.software = software;
+        self
+    }
+
+    /// Set `date_time`.
+    #[must_use]
+    pub fn with_date_time(mut self, date_time: Option<&'a str>) -> Self {
+        self.date_time = date_time;
+        self
+    }
+
+    /// Set `artist`.
+    #[must_use]
+    pub fn with_artist(mut self, artist: Option<&'a str>) -> Self {
+        self.artist = artist;
+        self
+    }
+
+    /// Set `copyright`.
+    #[must_use]
+    pub fn with_copyright(mut self, copyright: Option<&'a str>) -> Self {
+        self.copyright = copyright;
+        self
+    }
+
+    /// Set `document_name`.
+    #[must_use]
+    pub fn with_document_name(mut self, document_name: Option<&'a str>) -> Self {
+        self.document_name = document_name;
+        self
+    }
+
+    /// Set `make`.
+    #[must_use]
+    pub fn with_make(mut self, make: Option<&'a str>) -> Self {
+        self.make = make;
+        self
+    }
+
+    /// Set `model`.
+    #[must_use]
+    pub fn with_model(mut self, model: Option<&'a str>) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// Set `page_name`.
+    #[must_use]
+    pub fn with_page_name(mut self, page_name: Option<&'a str>) -> Self {
+        self.page_name = page_name;
+        self
+    }
+
+    /// Set `host_computer`.
+    #[must_use]
+    pub fn with_host_computer(mut self, host_computer: Option<&'a str>) -> Self {
+        self.host_computer = host_computer;
+        self
+    }
+
+    /// Set `xmp`.
+    #[must_use]
+    pub fn with_xmp(mut self, xmp: Option<&'a [u8]>) -> Self {
+        self.xmp = xmp;
+        self
+    }
+
+    /// Set `icc_profile`.
+    #[must_use]
+    pub fn with_icc_profile(mut self, icc_profile: Option<&'a [u8]>) -> Self {
+        self.icc_profile = icc_profile;
+        self
+    }
+
+    /// Set `iptc`.
+    #[must_use]
+    pub fn with_iptc(mut self, iptc: Option<&'a [u8]>) -> Self {
+        self.iptc = iptc;
+        self
+    }
+
+    /// Set `rows_per_strip`.
+    #[must_use]
+    pub fn with_rows_per_strip(mut self, rows_per_strip: Option<u32>) -> Self {
+        self.rows_per_strip = rows_per_strip;
+        self
+    }
+
+    /// Set `sub_ifds`.
+    #[must_use]
+    pub fn with_sub_ifds(mut self, sub_ifds: &'a [EncodePage<'a>]) -> Self {
+        self.sub_ifds = sub_ifds;
+        self
+    }
+}
+
 /// Description of one image page being written.
 ///
 /// `pixels` is row-major, packed (no padding between rows). For
@@ -261,6 +439,7 @@ pub struct PageExtras<'a> {
 /// regardless of the stored byte order — the encoder writes II
 /// files and the input bytes are consumed verbatim.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EncodePage<'a> {
     pub width: u32,
     pub height: u32,
@@ -356,8 +535,37 @@ pub struct EncodePage<'a> {
     pub extras: PageExtras<'a>,
 }
 
+impl<'a> EncodePage<'a> {
+    /// Build `EncodePage` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        width: u32,
+        height: u32,
+        kind: EncodePixelFormat<'a>,
+        compression: TiffCompression,
+        predictor: bool,
+        planar: bool,
+        tiling: Option<(u32, u32)>,
+        bigtiff: bool,
+        extras: PageExtras<'a>,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            kind,
+            compression,
+            predictor,
+            planar,
+            tiling,
+            bigtiff,
+            extras,
+        }
+    }
+}
+
 /// Pixel layouts the encoder knows how to write.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum EncodePixelFormat<'a> {
     /// 1-bit bilevel (1 sample per pixel, MSB-first byte packing).
     /// `pixels` must contain `ceil(width / 8) * height` bytes. The
@@ -783,6 +991,7 @@ pub enum EncodePixelFormat<'a> {
 
 /// Compression scheme for an [`EncodePage`].
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum TiffCompression {
     None,
     PackBits,

@@ -137,17 +137,17 @@ fn grayf32_predictor_roundtrip_matches_unpredicted() {
         TiffCompression::Zstd,
     ] {
         for predictor in [false, true] {
-            let page = EncodePage {
-                width: w,
-                height: h,
-                kind: EncodePixelFormat::GrayF32 { pixels: &fpix },
-                compression: comp,
+            let page = EncodePage::new(
+                w,
+                h,
+                EncodePixelFormat::GrayF32 { pixels: &fpix },
+                comp,
                 predictor,
-                planar: false,
-                tiling: None,
-                bigtiff: false,
-                extras: PageExtras::default(),
-            };
+                false,
+                None,
+                false,
+                PageExtras::default(),
+            );
             let bytes = encode_page(&page).expect("encode GrayF32");
             let dec = decode_page(&bytes).expect("decode GrayF32");
             assert_eq!(dec.image.format, TiffPixelFormat::GrayF32Le);
@@ -164,17 +164,17 @@ fn grayf32_emits_sampleformat_and_predictor_tags() {
     let (w, h, fpix) = gray_samples_f32();
 
     // No predictor: SampleFormat=3 present, Predictor tag absent.
-    let p1 = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::GrayF32 { pixels: &fpix },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let p1 = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::GrayF32 { pixels: &fpix },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let t1 = encode_page(&p1).unwrap();
     let (sf_type, sf_count, sf_val) = find_tag(&t1, 339).expect("SampleFormat tag present");
     assert_eq!(sf_type, 3, "SampleFormat field type SHORT");
@@ -183,9 +183,10 @@ fn grayf32_emits_sampleformat_and_predictor_tags() {
     assert!(find_tag(&t1, 317).is_none(), "no Predictor tag when off");
 
     // With predictor: Predictor = 3.
-    let p2 = EncodePage {
-        predictor: true,
-        ..p1.clone()
+    let p2 = {
+        let mut encode_page = p1.clone();
+        encode_page.predictor = true;
+        encode_page
     };
     let t2 = encode_page(&p2).unwrap();
     let (_, _, pv) = find_tag(&t2, 317).expect("Predictor tag present");
@@ -199,17 +200,17 @@ fn grayf32_raw_predictor_reverses_to_input() {
     for s in &fpix {
         input_bytes.extend_from_slice(&s.to_le_bytes());
     }
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::GrayF32 { pixels: &fpix },
-        compression: TiffCompression::None,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::GrayF32 { pixels: &fpix },
+        TiffCompression::None,
+        true,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let tiff = encode_page(&page).unwrap();
     let mut strip = single_strip(&tiff);
     reverse_float_predictor(&mut strip, w as usize, h as usize, 4);
@@ -227,17 +228,17 @@ fn grayf64_predictor_roundtrip_matches_unpredicted() {
     let want = display_map(&fpix);
     for comp in [TiffCompression::None, TiffCompression::Deflate] {
         for predictor in [false, true] {
-            let page = EncodePage {
-                width: w,
-                height: h,
-                kind: EncodePixelFormat::GrayF64 { pixels: &fpix },
-                compression: comp,
+            let page = EncodePage::new(
+                w,
+                h,
+                EncodePixelFormat::GrayF64 { pixels: &fpix },
+                comp,
                 predictor,
-                planar: false,
-                tiling: None,
-                bigtiff: false,
-                extras: PageExtras::default(),
-            };
+                false,
+                None,
+                false,
+                PageExtras::default(),
+            );
             let bytes = encode_page(&page).unwrap();
             let dec = decode_page(&bytes).unwrap();
             assert_eq!(
@@ -274,17 +275,17 @@ fn rgbf32_predictor_roundtrip_matches_unpredicted() {
         TiffCompression::Zstd,
     ] {
         for predictor in [false, true] {
-            let page = EncodePage {
-                width: w,
-                height: h,
-                kind: EncodePixelFormat::RgbF32 { pixels: &fpix },
-                compression: comp,
+            let page = EncodePage::new(
+                w,
+                h,
+                EncodePixelFormat::RgbF32 { pixels: &fpix },
+                comp,
                 predictor,
-                planar: false,
-                tiling: None,
-                bigtiff: false,
-                extras: PageExtras::default(),
-            };
+                false,
+                None,
+                false,
+                PageExtras::default(),
+            );
             let bytes = encode_page(&page).unwrap();
             let dec = decode_page(&bytes).unwrap();
             assert_eq!(dec.image.format, TiffPixelFormat::RgbF32Le);
@@ -299,17 +300,17 @@ fn rgbf32_predictor_roundtrip_matches_unpredicted() {
 #[test]
 fn rgbf32_sampleformat_is_three_values() {
     let (w, h, fpix) = rgb_samples_f32();
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::RgbF32 { pixels: &fpix },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::RgbF32 { pixels: &fpix },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let tiff = encode_page(&page).unwrap();
     let (sf_type, sf_count, _off) = find_tag(&tiff, 339).expect("SampleFormat present");
     assert_eq!(sf_type, 3);
@@ -329,17 +330,17 @@ fn rgbf32_raw_predictor_reverses_to_input() {
     for s in &fpix {
         input_bytes.extend_from_slice(&s.to_le_bytes());
     }
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::RgbF32 { pixels: &fpix },
-        compression: TiffCompression::None,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::RgbF32 { pixels: &fpix },
+        TiffCompression::None,
+        true,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let tiff = encode_page(&page).unwrap();
     let mut strip = single_strip(&tiff);
     // Width in samples = image width * 3 components.
@@ -353,17 +354,17 @@ fn rgbf64_predictor_roundtrip_matches_unpredicted() {
     let fpix: Vec<f64> = f32pix.iter().map(|&x| x as f64).collect();
     let want = display_map(&fpix);
     for predictor in [false, true] {
-        let page = EncodePage {
-            width: w,
-            height: h,
-            kind: EncodePixelFormat::RgbF64 { pixels: &fpix },
-            compression: TiffCompression::Deflate,
+        let page = EncodePage::new(
+            w,
+            h,
+            EncodePixelFormat::RgbF64 { pixels: &fpix },
+            TiffCompression::Deflate,
             predictor,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        );
         let bytes = encode_page(&page).unwrap();
         let dec = decode_page(&bytes).unwrap();
         assert_eq!(dec.image.planes[0].data, want, "RgbF64 pred={predictor}");
@@ -383,17 +384,17 @@ fn grayf32_tiled_matches_strip() {
     let want = display_map(&samples64);
 
     for predictor in [false, true] {
-        let page = EncodePage {
-            width: w,
-            height: h,
-            kind: EncodePixelFormat::GrayF32 { pixels: &fpix },
-            compression: TiffCompression::Lzw,
+        let page = EncodePage::new(
+            w,
+            h,
+            EncodePixelFormat::GrayF32 { pixels: &fpix },
+            TiffCompression::Lzw,
             predictor,
-            planar: false,
-            tiling: Some((16, 16)),
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+            false,
+            Some((16, 16)),
+            false,
+            PageExtras::default(),
+        );
         let bytes = encode_page(&page).unwrap();
         let dec = decode_page(&bytes).unwrap();
         assert_eq!(
@@ -408,17 +409,17 @@ fn rgbf32_bigtiff_roundtrip() {
     let (w, h, fpix) = rgb_samples_f32();
     let samples64: Vec<f64> = fpix.iter().map(|&x| x as f64).collect();
     let want = display_map(&samples64);
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::RgbF32 { pixels: &fpix },
-        compression: TiffCompression::Deflate,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: true,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::RgbF32 { pixels: &fpix },
+        TiffCompression::Deflate,
+        true,
+        false,
+        None,
+        true,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     assert_eq!(&bytes[0..2], b"II");
     assert_eq!(
@@ -449,17 +450,17 @@ fn rgbf32_planar_matches_chunky() {
     ] {
         for predictor in [false, true] {
             for tiling in [None, Some((16u32, 16u32))] {
-                let page = EncodePage {
-                    width: w,
-                    height: h,
-                    kind: EncodePixelFormat::RgbF32 { pixels: &fpix },
-                    compression: comp,
+                let page = EncodePage::new(
+                    w,
+                    h,
+                    EncodePixelFormat::RgbF32 { pixels: &fpix },
+                    comp,
                     predictor,
-                    planar: true,
+                    true,
                     tiling,
-                    bigtiff: false,
-                    extras: PageExtras::default(),
-                };
+                    false,
+                    PageExtras::default(),
+                );
                 let bytes = encode_page(&page).unwrap();
                 let dec = decode_page(&bytes).unwrap();
                 assert_eq!(
@@ -477,17 +478,17 @@ fn rgbf64_planar_predictor_matches_chunky() {
     let (w, h, f32pix) = rgb_samples_f32();
     let fpix: Vec<f64> = f32pix.iter().map(|&x| x as f64).collect();
     let want = display_map(&fpix);
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::RgbF64 { pixels: &fpix },
-        compression: TiffCompression::Deflate,
-        predictor: true,
-        planar: true,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::RgbF64 { pixels: &fpix },
+        TiffCompression::Deflate,
+        true,
+        true,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     let dec = decode_page(&bytes).unwrap();
     assert_eq!(dec.image.planes[0].data, want);
@@ -497,34 +498,34 @@ fn rgbf64_planar_predictor_matches_chunky() {
 fn float_rejects_grayscale_planar_and_ccitt() {
     let (w, h, fpix) = gray_samples_f32();
     // PlanarConfiguration=2 is irrelevant for a single sample -> rejected.
-    let planar = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::GrayF32 { pixels: &fpix },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: true,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let planar = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::GrayF32 { pixels: &fpix },
+        TiffCompression::None,
+        false,
+        true,
+        None,
+        false,
+        PageExtras::default(),
+    );
     assert!(
         encode_page(&planar).is_err(),
         "single-sample float planar must be rejected (PlanarConfiguration irrelevant)"
     );
 
     // CCITT with float is rejected (bilevel-only).
-    let ccitt = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::GrayF32 { pixels: &fpix },
-        compression: TiffCompression::CcittRle,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let ccitt = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::GrayF32 { pixels: &fpix },
+        TiffCompression::CcittRle,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     assert!(encode_page(&ccitt).is_err(), "CCITT float must be rejected");
 }
 
@@ -545,39 +546,39 @@ fn float_multipage_chain_roundtrips() {
     let twant = display_map(&tpix);
 
     let pages = vec![
-        EncodePage {
-            width: gw,
-            height: gh,
-            kind: EncodePixelFormat::GrayF32 { pixels: &gpix },
-            compression: TiffCompression::Lzw,
-            predictor: true,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        },
-        EncodePage {
-            width: rw,
-            height: rh,
-            kind: EncodePixelFormat::RgbF64 { pixels: &rpix },
-            compression: TiffCompression::Deflate,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        },
-        EncodePage {
-            width: tw,
-            height: th,
-            kind: EncodePixelFormat::GrayF64 { pixels: &tpix },
-            compression: TiffCompression::Zstd,
-            predictor: true,
-            planar: false,
-            tiling: Some((16, 16)),
-            bigtiff: false,
-            extras: PageExtras::default(),
-        },
+        EncodePage::new(
+            gw,
+            gh,
+            EncodePixelFormat::GrayF32 { pixels: &gpix },
+            TiffCompression::Lzw,
+            true,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        ),
+        EncodePage::new(
+            rw,
+            rh,
+            EncodePixelFormat::RgbF64 { pixels: &rpix },
+            TiffCompression::Deflate,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        ),
+        EncodePage::new(
+            tw,
+            th,
+            EncodePixelFormat::GrayF64 { pixels: &tpix },
+            TiffCompression::Zstd,
+            true,
+            false,
+            Some((16, 16)),
+            false,
+            PageExtras::default(),
+        ),
     ];
     let bytes = encode_pages(&pages).unwrap();
     let frames = decode_all(&bytes).unwrap();
@@ -593,16 +594,16 @@ fn float_multipage_chain_roundtrips() {
 #[test]
 fn float_wrong_buffer_size_rejected() {
     let fpix = [1.0f32, 2.0, 3.0];
-    let page = EncodePage {
-        width: 2,
-        height: 2, // expects 4 samples, got 3
-        kind: EncodePixelFormat::GrayF32 { pixels: &fpix },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        2,
+        2,
+        EncodePixelFormat::GrayF32 { pixels: &fpix },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     assert!(encode_page(&page).is_err());
 }

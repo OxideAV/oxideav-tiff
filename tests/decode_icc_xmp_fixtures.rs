@@ -160,22 +160,20 @@ fn fixture_payloads_re_encode_and_survive() {
     let icc = d.metadata.icc_profile.expect("icc");
     let xmp = d.metadata.xmp.expect("xmp");
     let px: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
-    let extras = PageExtras {
-        xmp: Some(&xmp),
-        icc_profile: Some(&icc),
-        ..Default::default()
-    };
-    let ours = encode_page(&EncodePage {
-        width: 8,
-        height: 8,
-        kind: EncodePixelFormat::Gray8 { pixels: &px },
-        compression: TiffCompression::Deflate,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
+    let extras = PageExtras::default()
+        .with_xmp(Some(&xmp))
+        .with_icc_profile(Some(&icc));
+    let ours = encode_page(&EncodePage::new(
+        8,
+        8,
+        EncodePixelFormat::Gray8 { pixels: &px },
+        TiffCompression::Deflate,
+        false,
+        false,
+        None,
+        false,
         extras,
-    })
+    ))
     .expect("re-encode");
     let d2 = decode_page(&ours).expect("decode re-encoded");
     assert_eq!(sha256_hex(&d2.metadata.icc_profile.unwrap()), ICC_SHA);

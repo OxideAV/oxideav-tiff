@@ -44,17 +44,17 @@ fn encode_bilevel(
     comp: TiffCompression,
     tiling: Option<(u32, u32)>,
 ) -> Vec<u8> {
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Bilevel { pixels },
-        compression: comp,
-        predictor: false,
-        planar: false,
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Bilevel { pixels },
+        comp,
+        false,
+        false,
         tiling,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        false,
+        PageExtras::default(),
+    );
     encode_page(&page).expect("encode bilevel")
 }
 
@@ -65,17 +65,17 @@ fn encode_mask(
     comp: TiffCompression,
     tiling: Option<(u32, u32)>,
 ) -> Vec<u8> {
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::TransparencyMask { pixels },
-        compression: comp,
-        predictor: false,
-        planar: false,
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::TransparencyMask { pixels },
+        comp,
+        false,
+        false,
         tiling,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        false,
+        PageExtras::default(),
+    );
     encode_page(&page).expect("encode mask")
 }
 
@@ -178,20 +178,21 @@ fn bigtiff_tiled_bilevel_matches_strip() {
     // BigTIFF composes with the sub-byte tile writer unchanged.
     let (w, h, tile) = (48u32, 40u32, (16u32, 16u32));
     let pixels = bilevel_pattern(w, h);
-    let page_strip = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Bilevel { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: true,
-        extras: PageExtras::default(),
-    };
-    let page_tiled = EncodePage {
-        tiling: Some(tile),
-        ..page_strip.clone()
+    let page_strip = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Bilevel { pixels: &pixels },
+        TiffCompression::Lzw,
+        false,
+        false,
+        None,
+        true,
+        PageExtras::default(),
+    );
+    let page_tiled = {
+        let mut encode_page = page_strip.clone();
+        encode_page.tiling = Some(tile);
+        encode_page
     };
     let strip = encode_page(&page_strip).expect("encode strip bigtiff");
     let tiled = encode_page(&page_tiled).expect("encode tiled bigtiff");
@@ -204,17 +205,17 @@ fn bigtiff_tiled_bilevel_matches_strip() {
 fn tile_dims_must_be_multiple_of_16() {
     // §15 TileWidth / TileLength must be non-zero multiples of 16.
     let pixels = bilevel_pattern(32, 32);
-    let page = EncodePage {
-        width: 32,
-        height: 32,
-        kind: EncodePixelFormat::Bilevel { pixels: &pixels },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: Some((8, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        32,
+        32,
+        EncodePixelFormat::Bilevel { pixels: &pixels },
+        TiffCompression::None,
+        false,
+        false,
+        Some((8, 16)),
+        false,
+        PageExtras::default(),
+    );
     assert!(encode_page(&page).is_err(), "tile_w=8 must be rejected");
 }
 
@@ -222,17 +223,17 @@ fn tile_dims_must_be_multiple_of_16() {
 fn ccitt_tiling_still_rejected() {
     // CCITT remains strip-oriented on the encode side.
     let pixels = bilevel_pattern(32, 32);
-    let page = EncodePage {
-        width: 32,
-        height: 32,
-        kind: EncodePixelFormat::Bilevel { pixels: &pixels },
-        compression: TiffCompression::CcittRle,
-        predictor: false,
-        planar: false,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        32,
+        32,
+        EncodePixelFormat::Bilevel { pixels: &pixels },
+        TiffCompression::CcittRle,
+        false,
+        false,
+        Some((16, 16)),
+        false,
+        PageExtras::default(),
+    );
     assert!(
         encode_page(&page).is_err(),
         "CCITT + tiling must be rejected"

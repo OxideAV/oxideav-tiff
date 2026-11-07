@@ -101,20 +101,20 @@ fn encoded_strip_matches_reference_data_unit_order() {
     let pixels = block_uniform_chroma(w, h, sh, sv);
     let want_strip = reference_pack(&pixels, w, h, sh, sv);
 
-    let page = EncodePage {
-        width: w as u32,
-        height: h as u32,
-        kind: EncodePixelFormat::YCbCrSubsampled24 {
+    let page = EncodePage::new(
+        w as u32,
+        h as u32,
+        EncodePixelFormat::YCbCrSubsampled24 {
             pixels: &pixels,
             subsampling: (sh as u16, sv as u16),
         },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
 
     // Find StripOffsets (273) + StripByteCounts (279) via a byte walker
@@ -152,20 +152,20 @@ fn block_uniform_chroma_roundtrips_all_pairs_and_compressors() {
         // reusing it as the oracle for the compressors.
         let mut oracle: Option<Vec<u8>> = None;
         for comp in comps {
-            let page = EncodePage {
-                width: w as u32,
-                height: h as u32,
-                kind: EncodePixelFormat::YCbCrSubsampled24 {
+            let page = EncodePage::new(
+                w as u32,
+                h as u32,
+                EncodePixelFormat::YCbCrSubsampled24 {
                     pixels: &pixels,
                     subsampling: (sh, sv),
                 },
-                compression: comp,
-                predictor: false,
-                planar: false,
-                tiling: None,
-                bigtiff: false,
-                extras: PageExtras::default(),
-            };
+                comp,
+                false,
+                false,
+                None,
+                false,
+                PageExtras::default(),
+            );
             let bytes = encode_page(&page).unwrap();
             let d = decode_page(&bytes).unwrap();
             assert_eq!(
@@ -193,31 +193,31 @@ fn subsampled_roundtrip_equals_full_resolution_splat() {
     let (w, h, sh, sv) = (4usize, 4usize, 2usize, 2usize);
     let pixels = block_uniform_chroma(w, h, sh, sv);
 
-    let sub = EncodePage {
-        width: w as u32,
-        height: h as u32,
-        kind: EncodePixelFormat::YCbCrSubsampled24 {
+    let sub = EncodePage::new(
+        w as u32,
+        h as u32,
+        EncodePixelFormat::YCbCrSubsampled24 {
             pixels: &pixels,
             subsampling: (sh as u16, sv as u16),
         },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
-    let full = EncodePage {
-        width: w as u32,
-        height: h as u32,
-        kind: EncodePixelFormat::YCbCr24 { pixels: &pixels },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
+    let full = EncodePage::new(
+        w as u32,
+        h as u32,
+        EncodePixelFormat::YCbCr24 { pixels: &pixels },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let dsub = decode_page(&encode_page(&sub).unwrap()).unwrap();
     let dfull = decode_page(&encode_page(&full).unwrap()).unwrap();
     assert_eq!(dsub.image.planes[0].data, dfull.image.planes[0].data);
@@ -227,20 +227,20 @@ fn subsampled_roundtrip_equals_full_resolution_splat() {
 fn bigtiff_subsampled_roundtrips() {
     let (w, h, sh, sv) = (8usize, 4usize, 2usize, 2usize);
     let pixels = block_uniform_chroma(w, h, sh, sv);
-    let page = EncodePage {
-        width: w as u32,
-        height: h as u32,
-        kind: EncodePixelFormat::YCbCrSubsampled24 {
+    let page = EncodePage::new(
+        w as u32,
+        h as u32,
+        EncodePixelFormat::YCbCrSubsampled24 {
             pixels: &pixels,
             subsampling: (sh as u16, sv as u16),
         },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: true,
-        extras: PageExtras::default(),
-    };
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        true,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     // BigTIFF magic 43.
     assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 43);
@@ -258,20 +258,20 @@ fn writes_actual_subsampling_factors_in_tag_530() {
     for (sh, sv) in [(2u16, 1u16), (2, 2), (4, 1), (4, 2)] {
         let (w, h) = (8usize, 2usize);
         let pixels = block_uniform_chroma(w, h, sh as usize, sv as usize);
-        let page = EncodePage {
-            width: w as u32,
-            height: h as u32,
-            kind: EncodePixelFormat::YCbCrSubsampled24 {
+        let page = EncodePage::new(
+            w as u32,
+            h as u32,
+            EncodePixelFormat::YCbCrSubsampled24 {
                 pixels: &pixels,
                 subsampling: (sh, sv),
             },
-            compression: TiffCompression::None,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
+            TiffCompression::None,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        );
         let bytes = encode_page(&page).unwrap();
         assert_eq!(read_short(&bytes, 262), Some(6), "photometric YCbCr");
         assert_eq!(read_short(&bytes, 277), Some(3), "SamplesPerPixel");
@@ -299,20 +299,20 @@ fn decoder_reads_handbuilt_subsampled_strip() {
     assert_eq!(d.image.format, TiffPixelFormat::Rgb24);
 
     // Cross-check: encoder output decodes to the same RGB.
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::YCbCrSubsampled24 {
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::YCbCrSubsampled24 {
             pixels: &pixels,
             subsampling: (sh as u16, sv as u16),
         },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let enc = decode_page(&encode_page(&page).unwrap()).unwrap();
     assert_eq!(d.image.planes[0].data, enc.image.planes[0].data);
 }
@@ -325,20 +325,20 @@ fn decoder_reads_handbuilt_subsampled_strip() {
 fn rejects_illegal_subsampling_pair() {
     // (1, 2) violates §21 page 90 (YCbCrSubsampleVert <= Horiz).
     let pixels = vec![0u8; 2 * 2 * 3];
-    let page = EncodePage {
-        width: 2,
-        height: 2,
-        kind: EncodePixelFormat::YCbCrSubsampled24 {
+    let page = EncodePage::new(
+        2,
+        2,
+        EncodePixelFormat::YCbCrSubsampled24 {
             pixels: &pixels,
             subsampling: (1, 2),
         },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     assert!(encode_page(&page).is_err());
 }
 
@@ -346,40 +346,40 @@ fn rejects_illegal_subsampling_pair() {
 fn rejects_non_multiple_dimensions() {
     // width 3 is not a multiple of ChromaSubsampleHoriz 2.
     let pixels = vec![0u8; 3 * 2 * 3];
-    let page = EncodePage {
-        width: 3,
-        height: 2,
-        kind: EncodePixelFormat::YCbCrSubsampled24 {
+    let page = EncodePage::new(
+        3,
+        2,
+        EncodePixelFormat::YCbCrSubsampled24 {
             pixels: &pixels,
             subsampling: (2, 2),
         },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     assert!(encode_page(&page).is_err());
 }
 
 #[test]
 fn rejects_wrong_buffer_length() {
     let pixels = vec![0u8; 10]; // not width*height*3
-    let page = EncodePage {
-        width: 4,
-        height: 2,
-        kind: EncodePixelFormat::YCbCrSubsampled24 {
+    let page = EncodePage::new(
+        4,
+        2,
+        EncodePixelFormat::YCbCrSubsampled24 {
             pixels: &pixels,
             subsampling: (2, 2),
         },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     assert!(encode_page(&page).is_err());
 }
 
@@ -393,19 +393,21 @@ fn rejects_chunky_predictor_and_ccitt() {
     // layout encodes per the TN2-amended §21 geometry.
     let (w, h) = (8usize, 4usize);
     let pixels = block_uniform_chroma(w, h, 2, 2);
-    let base = |comp, predictor, planar, tiling| EncodePage {
-        width: w as u32,
-        height: h as u32,
-        kind: EncodePixelFormat::YCbCrSubsampled24 {
-            pixels: &pixels,
-            subsampling: (2, 2),
-        },
-        compression: comp,
-        predictor,
-        planar,
-        tiling,
-        bigtiff: false,
-        extras: PageExtras::default(),
+    let base = |comp, predictor, planar, tiling| {
+        EncodePage::new(
+            w as u32,
+            h as u32,
+            EncodePixelFormat::YCbCrSubsampled24 {
+                pixels: &pixels,
+                subsampling: (2, 2),
+            },
+            comp,
+            predictor,
+            planar,
+            tiling,
+            false,
+            PageExtras::default(),
+        )
     };
     assert!(encode_page(&base(TiffCompression::None, true, false, None)).is_err());
     // Tiled planar subsampled now encodes (TN2-amended §21).
@@ -461,23 +463,24 @@ fn subsampled_tiled_matches_strip() {
             }
             let pixels = block_uniform_chroma(w as usize, h as usize, sh as usize, sv as usize);
             for comp in comps {
-                let strip = EncodePage {
-                    width: w,
-                    height: h,
-                    kind: EncodePixelFormat::YCbCrSubsampled24 {
+                let strip = EncodePage::new(
+                    w,
+                    h,
+                    EncodePixelFormat::YCbCrSubsampled24 {
                         pixels: &pixels,
                         subsampling: (sh, sv),
                     },
-                    compression: comp,
-                    predictor: false,
-                    planar: false,
-                    tiling: None,
-                    bigtiff: false,
-                    extras: PageExtras::default(),
-                };
-                let tiled = EncodePage {
-                    tiling: Some(tile),
-                    ..strip.clone()
+                    comp,
+                    false,
+                    false,
+                    None,
+                    false,
+                    PageExtras::default(),
+                );
+                let tiled = {
+                    let mut encode_page = strip.clone();
+                    encode_page.tiling = Some(tile);
+                    encode_page
                 };
                 let ds = decode_page(&encode_page(&strip).unwrap()).unwrap();
                 let dt = decode_page(&encode_page(&tiled).unwrap()).unwrap();

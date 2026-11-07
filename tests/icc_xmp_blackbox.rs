@@ -121,22 +121,18 @@ fn write_file(path: &Path, bytes: &[u8]) {
 
 fn encode_gray_with(xmp: Option<&[u8]>, icc: Option<&[u8]>, bigtiff: bool) -> Vec<u8> {
     let px: Vec<u8> = (0..64u32).map(|i| (i * 4) as u8).collect();
-    let extras = PageExtras {
-        xmp,
-        icc_profile: icc,
-        ..Default::default()
-    };
-    encode_page(&EncodePage {
-        width: 8,
-        height: 8,
-        kind: EncodePixelFormat::Gray8 { pixels: &px },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
+    let extras = PageExtras::default().with_xmp(xmp).with_icc_profile(icc);
+    encode_page(&EncodePage::new(
+        8,
+        8,
+        EncodePixelFormat::Gray8 { pixels: &px },
+        TiffCompression::None,
+        false,
+        false,
+        None,
         bigtiff,
         extras,
-    })
+    ))
     .expect("encode")
 }
 

@@ -146,17 +146,17 @@ fn page<'a>(
     tiling: Option<(u32, u32)>,
     bigtiff: bool,
 ) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
+    EncodePage::new(
+        w,
+        h,
         kind,
         compression,
         predictor,
         planar,
         tiling,
         bigtiff,
-        extras: PageExtras::default(),
-    }
+        PageExtras::default(),
+    )
 }
 
 #[test]

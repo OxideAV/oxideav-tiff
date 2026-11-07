@@ -24,17 +24,17 @@ use oxideav_tiff::{
 };
 
 fn gray_page<'a>(pixels: &'a [u8], w: u32, h: u32, extras: PageExtras<'a>) -> EncodePage<'a> {
-    EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Gray8 { pixels },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
+    EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Gray8 { pixels },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
         extras,
-    }
+    )
 }
 
 fn ramp(w: u32, h: u32) -> Vec<u8> {
@@ -52,12 +52,10 @@ fn read_child(file: &[u8], offset: u64) -> (Vec<Entry>, u64, ByteOrder, TiffVari
 #[test]
 fn page_number_and_subfile_bits_roundtrip() {
     let px = ramp(8, 8);
-    let extras = PageExtras {
-        page_number: Some((2, 9)),
-        multi_page: true,
-        reduced_resolution: true,
-        ..Default::default()
-    };
+    let extras = PageExtras::default()
+        .with_page_number(Some((2, 9)))
+        .with_multi_page(true)
+        .with_reduced_resolution(true);
     let file = encode_page(&gray_page(&px, 8, 8, extras)).unwrap();
     let hdr = parse_header(&file).unwrap();
     let (entries, _) = parse_ifd(&file, hdr.byte_order, hdr.variant, hdr.first_ifd_offset).unwrap();
@@ -106,50 +104,25 @@ fn aux_exif_and_gps_ifds_roundtrip_verbatim() {
         })
         .collect();
     let undef = [0xDEu8, 0xAD, 0xBE, 0xEF, 0x01];
+    let colour_space = 1u16.to_le_bytes();
     let exif_entries = [
-        AuxIfdEntry {
-            tag: 40961,
-            field_type: 3, // SHORT
-            count: 1,
-            value: &1u16.to_le_bytes(),
-        },
-        AuxIfdEntry {
-            tag: 36864,
-            field_type: 7, // UNDEFINED
-            count: 4,
-            value: b"0232",
-        },
-        AuxIfdEntry {
-            tag: 37500,
-            field_type: 7,
-            count: undef.len() as u64,
-            value: &undef,
-        },
+        AuxIfdEntry::new(40961, 3, 1, &colour_space),
+        AuxIfdEntry::new(36864, 7, 4, b"0232"),
+        AuxIfdEntry::new(37500, 7, undef.len() as u64, &undef),
     ];
     let gps_entries = [
-        AuxIfdEntry {
-            tag: 2,
-            field_type: 5, // RATIONAL × 3
-            count: 3,
-            value: &rats,
-        },
-        AuxIfdEntry {
-            tag: 1,
-            field_type: 2, // ASCII
-            count: ascii.len() as u64,
-            value: ascii,
-        },
+        AuxIfdEntry::new(2, 5, 3, &rats),
+        AuxIfdEntry::new(1, 2, ascii.len() as u64, ascii),
     ];
     let px = ramp(16, 8);
-    let extras = PageExtras {
-        exif_ifd: Some(&exif_entries),
-        gps_ifd: Some(&gps_entries),
-        ..Default::default()
-    };
+    let extras = PageExtras::default()
+        .with_exif_ifd(Some(&exif_entries))
+        .with_gps_ifd(Some(&gps_entries));
     for bigtiff in [false, true] {
-        let page = EncodePage {
-            bigtiff,
-            ..gray_page(&px, 16, 8, extras.clone())
+        let page = {
+            let mut encode_page = gray_page(&px, 16, 8, extras.clone());
+            encode_page.bigtiff = bigtiff;
+            encode_page
         };
         let file = encode_page(&page).unwrap();
         // The image still decodes.
@@ -204,52 +177,26 @@ fn aux_exif_and_gps_ifds_roundtrip_verbatim() {
 #[test]
 fn aux_ifd_validation_rejects_bad_entries() {
     let px = ramp(4, 4);
-    let mk = |entries: &'static [AuxIfdEntry<'static>]| PageExtras {
-        exif_ifd: Some(entries),
-        ..Default::default()
+    let mk = |entries: &'static [AuxIfdEntry<'static>]| {
+        PageExtras::default().with_exif_ifd(Some(entries))
     };
     // Size mismatch: SHORT count 2 needs 4 bytes.
-    static BAD_SIZE: [AuxIfdEntry<'static>; 1] = [AuxIfdEntry {
-        tag: 1,
-        field_type: 3,
-        count: 2,
-        value: &[0, 0],
-    }];
+    static BAD_SIZE: [AuxIfdEntry<'static>; 1] = [AuxIfdEntry::new(1, 3, 2, &[0, 0])];
     assert!(encode_page(&gray_page(&px, 4, 4, mk(&BAD_SIZE))).is_err());
     // Unknown field type.
-    static BAD_TYPE: [AuxIfdEntry<'static>; 1] = [AuxIfdEntry {
-        tag: 1,
-        field_type: 99,
-        count: 1,
-        value: &[0],
-    }];
+    static BAD_TYPE: [AuxIfdEntry<'static>; 1] = [AuxIfdEntry::new(1, 99, 1, &[0])];
     assert!(encode_page(&gray_page(&px, 4, 4, mk(&BAD_TYPE))).is_err());
     // Duplicate tags.
     static DUP: [AuxIfdEntry<'static>; 2] = [
-        AuxIfdEntry {
-            tag: 7,
-            field_type: 3,
-            count: 1,
-            value: &[1, 0],
-        },
-        AuxIfdEntry {
-            tag: 7,
-            field_type: 3,
-            count: 1,
-            value: &[2, 0],
-        },
+        AuxIfdEntry::new(7, 3, 1, &[1, 0]),
+        AuxIfdEntry::new(7, 3, 1, &[2, 0]),
     ];
     assert!(encode_page(&gray_page(&px, 4, 4, mk(&DUP))).is_err());
     // Empty child IFD.
     static EMPTY: [AuxIfdEntry<'static>; 0] = [];
     assert!(encode_page(&gray_page(&px, 4, 4, mk(&EMPTY))).is_err());
     // BigTIFF-only type on a classic page.
-    static LONG8: [AuxIfdEntry<'static>; 1] = [AuxIfdEntry {
-        tag: 1,
-        field_type: 16,
-        count: 1,
-        value: &[0; 8],
-    }];
+    static LONG8: [AuxIfdEntry<'static>; 1] = [AuxIfdEntry::new(1, 16, 1, &[0; 8])];
     assert!(encode_page(&gray_page(&px, 4, 4, mk(&LONG8))).is_err());
 }
 
@@ -263,40 +210,32 @@ fn sub_ifds_tree_roundtrips_and_decodes() {
     let thumb_px = ramp(8, 8);
     let micro_px = ramp(4, 4);
 
-    let micro = EncodePage {
-        extras: PageExtras {
-            reduced_resolution: true,
-            ..Default::default()
-        },
-        ..gray_page(&micro_px, 4, 4, PageExtras::default())
+    let micro = {
+        let mut encode_page = gray_page(&micro_px, 4, 4, PageExtras::default());
+        encode_page.extras = PageExtras::default().with_reduced_resolution(true);
+        encode_page
     };
     let nested_children = [micro];
-    let thumb_a = EncodePage {
-        compression: TiffCompression::Lzw,
-        extras: PageExtras {
-            reduced_resolution: true,
-            sub_ifds: &nested_children,
-            ..Default::default()
-        },
-        ..gray_page(&thumb_px, 8, 8, PageExtras::default())
+    let thumb_a = {
+        let mut encode_page = gray_page(&thumb_px, 8, 8, PageExtras::default());
+        encode_page.compression = TiffCompression::Lzw;
+        encode_page.extras = PageExtras::default()
+            .with_reduced_resolution(true)
+            .with_sub_ifds(&nested_children);
+        encode_page
     };
-    let thumb_b = EncodePage {
-        compression: TiffCompression::Deflate,
-        extras: PageExtras {
-            reduced_resolution: true,
-            ..Default::default()
-        },
-        ..gray_page(&thumb_px, 8, 8, PageExtras::default())
+    let thumb_b = {
+        let mut encode_page = gray_page(&thumb_px, 8, 8, PageExtras::default());
+        encode_page.compression = TiffCompression::Deflate;
+        encode_page.extras = PageExtras::default().with_reduced_resolution(true);
+        encode_page
     };
     let children = [thumb_a, thumb_b];
     let main = gray_page(
         &main_px,
         32,
         32,
-        PageExtras {
-            sub_ifds: &children,
-            ..Default::default()
-        },
+        PageExtras::default().with_sub_ifds(&children),
     );
     let file = encode_page(&main).unwrap();
 
@@ -348,26 +287,23 @@ fn sub_ifds_single_child_stays_inline_and_bigtiff_composes() {
     let main_px = ramp(16, 16);
     let thumb_px = ramp(4, 4);
     for bigtiff in [false, true] {
-        let child = EncodePage {
-            extras: PageExtras {
-                reduced_resolution: true,
-                ..Default::default()
-            },
-            ..gray_page(&thumb_px, 4, 4, PageExtras::default())
+        let child = {
+            let mut encode_page = gray_page(&thumb_px, 4, 4, PageExtras::default());
+            encode_page.extras = PageExtras::default().with_reduced_resolution(true);
+            encode_page
         };
         let children = [child];
-        let main = EncodePage {
-            bigtiff,
-            ..gray_page(
+        let main = {
+            let mut encode_page = gray_page(
                 &main_px,
                 16,
                 16,
-                PageExtras {
-                    sub_ifds: &children,
-                    page_number: Some((0, 1)),
-                    ..Default::default()
-                },
-            )
+                PageExtras::default()
+                    .with_sub_ifds(&children)
+                    .with_page_number(Some((0, 1))),
+            );
+            encode_page.bigtiff = bigtiff;
+            encode_page
         };
         let file = encode_page(&main).unwrap();
         let hdr = parse_header(&file).unwrap();
@@ -395,10 +331,7 @@ fn sub_ifd_depth_cap_enforced() {
                 &px,
                 4,
                 4,
-                PageExtras {
-                    sub_ifds: &$inner,
-                    ..Default::default()
-                },
+                PageExtras::default().with_sub_ifds(&$inner),
             )]
         };
     }
@@ -413,29 +346,13 @@ fn sub_ifd_depth_cap_enforced() {
     let l9 = wrap!(l8);
     let l10 = wrap!(l9);
     // Depth 9 nesting below the root: must exceed the cap.
-    let root = gray_page(
-        &px,
-        4,
-        4,
-        PageExtras {
-            sub_ifds: &l10,
-            ..Default::default()
-        },
-    );
+    let root = gray_page(&px, 4, 4, PageExtras::default().with_sub_ifds(&l10));
     assert!(
         encode_page(&root).is_err(),
         "SubIFDs deeper than the cap must be rejected"
     );
     // A shallow tree stays fine.
-    let ok_root = gray_page(
-        &px,
-        4,
-        4,
-        PageExtras {
-            sub_ifds: &l3,
-            ..Default::default()
-        },
-    );
+    let ok_root = gray_page(&px, 4, 4, PageExtras::default().with_sub_ifds(&l3));
     assert!(encode_page(&ok_root).is_ok());
 }
 
@@ -446,33 +363,24 @@ fn multi_page_chain_with_extras_and_children() {
     // survive together.
     let p0 = ramp(8, 8);
     let p1 = ramp(8, 8);
-    static EXIF: [AuxIfdEntry<'static>; 1] = [AuxIfdEntry {
-        tag: 40961,
-        field_type: 3,
-        count: 1,
-        value: &[1, 0],
-    }];
+    static EXIF: [AuxIfdEntry<'static>; 1] = [AuxIfdEntry::new(40961, 3, 1, &[1, 0])];
     let pages = [
         gray_page(
             &p0,
             8,
             8,
-            PageExtras {
-                page_number: Some((0, 2)),
-                multi_page: true,
-                exif_ifd: Some(&EXIF),
-                ..Default::default()
-            },
+            PageExtras::default()
+                .with_page_number(Some((0, 2)))
+                .with_multi_page(true)
+                .with_exif_ifd(Some(&EXIF)),
         ),
         gray_page(
             &p1,
             8,
             8,
-            PageExtras {
-                page_number: Some((1, 2)),
-                multi_page: true,
-                ..Default::default()
-            },
+            PageExtras::default()
+                .with_page_number(Some((1, 2)))
+                .with_multi_page(true),
         ),
     ];
     let file = encode_pages(&pages).unwrap();
@@ -587,27 +495,27 @@ fn bigtiff_two_sub_ifds_spill_out_of_line() {
     let main_px = ramp(16, 16);
     let t1 = ramp(8, 8);
     let t2: Vec<u8> = ramp(8, 8).iter().map(|b| b.wrapping_add(7)).collect();
-    let c1 = EncodePage {
-        bigtiff: true,
-        ..gray_page(&t1, 8, 8, PageExtras::default())
+    let c1 = {
+        let mut encode_page = gray_page(&t1, 8, 8, PageExtras::default());
+        encode_page.bigtiff = true;
+        encode_page
     };
-    let c2 = EncodePage {
-        bigtiff: true,
-        compression: TiffCompression::Zstd,
-        ..gray_page(&t2, 8, 8, PageExtras::default())
+    let c2 = {
+        let mut encode_page = gray_page(&t2, 8, 8, PageExtras::default());
+        encode_page.bigtiff = true;
+        encode_page.compression = TiffCompression::Zstd;
+        encode_page
     };
     let children = [c1, c2];
-    let main = EncodePage {
-        bigtiff: true,
-        ..gray_page(
+    let main = {
+        let mut encode_page = gray_page(
             &main_px,
             16,
             16,
-            PageExtras {
-                sub_ifds: &children,
-                ..Default::default()
-            },
-        )
+            PageExtras::default().with_sub_ifds(&children),
+        );
+        encode_page.bigtiff = true;
+        encode_page
     };
     let file = encode_page(&main).unwrap();
     assert_eq!(decode_page(&file).unwrap().image.planes[0].data, main_px);
@@ -635,23 +543,18 @@ fn bigtiff_two_sub_ifds_spill_out_of_line() {
 fn resolution_and_ascii_metadata_roundtrip() {
     use oxideav_tiff::PageResolution;
     let px = ramp(8, 8);
-    let extras = PageExtras {
-        resolution: Some(PageResolution {
-            x: (300, 1),
-            y: (600, 2),
-            unit: 2,
-        }),
-        description: Some("An eight by eight ramp"),
-        software: Some("oxideav-tiff test"),
-        date_time: Some("2026:07:04 12:34:56"),
-        artist: Some("OxideAV"),
-        copyright: Some("Copyright test notice"),
-        ..Default::default()
-    };
+    let extras = PageExtras::default()
+        .with_resolution(Some(PageResolution::new((300, 1), (600, 2), 2)))
+        .with_description(Some("An eight by eight ramp"))
+        .with_software(Some("oxideav-tiff test"))
+        .with_date_time(Some("2026:07:04 12:34:56"))
+        .with_artist(Some("OxideAV"))
+        .with_copyright(Some("Copyright test notice"));
     for bigtiff in [false, true] {
-        let page = EncodePage {
-            bigtiff,
-            ..gray_page(&px, 8, 8, extras.clone())
+        let page = {
+            let mut encode_page = gray_page(&px, 8, 8, extras.clone());
+            encode_page.bigtiff = bigtiff;
+            encode_page
         };
         let file = encode_page(&page).unwrap();
         assert_eq!(decode_page(&file).unwrap().image.planes[0].data, px);
@@ -693,46 +596,25 @@ fn metadata_validation_rejects_bad_values() {
     use oxideav_tiff::PageResolution;
     let px = ramp(4, 4);
     // Bad resolution unit.
-    let bad_unit = PageExtras {
-        resolution: Some(PageResolution {
-            x: (72, 1),
-            y: (72, 1),
-            unit: 4,
-        }),
-        ..Default::default()
-    };
+    let bad_unit =
+        PageExtras::default().with_resolution(Some(PageResolution::new((72, 1), (72, 1), 4)));
     assert!(encode_page(&gray_page(&px, 4, 4, bad_unit)).is_err());
     // Zero denominator.
-    let bad_den = PageExtras {
-        resolution: Some(PageResolution {
-            x: (72, 0),
-            y: (72, 1),
-            unit: 2,
-        }),
-        ..Default::default()
-    };
+    let bad_den =
+        PageExtras::default().with_resolution(Some(PageResolution::new((72, 0), (72, 1), 2)));
     assert!(encode_page(&gray_page(&px, 4, 4, bad_den)).is_err());
     // Malformed DateTime shapes.
     for dt in ["2026-07-04 12:34:56", "2026:07:04", "2026:07:04 12:34:5"] {
-        let bad_dt = PageExtras {
-            date_time: Some(dt),
-            ..Default::default()
-        };
+        let bad_dt = PageExtras::default().with_date_time(Some(dt));
         assert!(
             encode_page(&gray_page(&px, 4, 4, bad_dt)).is_err(),
             "DateTime {dt:?} must reject"
         );
     }
     // Non-ASCII and embedded-NUL strings.
-    let non_ascii = PageExtras {
-        artist: Some("Karpelès"),
-        ..Default::default()
-    };
+    let non_ascii = PageExtras::default().with_artist(Some("Karpelès"));
     assert!(encode_page(&gray_page(&px, 4, 4, non_ascii)).is_err());
-    let embedded_nul = PageExtras {
-        software: Some("abc\0def"),
-        ..Default::default()
-    };
+    let embedded_nul = PageExtras::default().with_software(Some("abc\0def"));
     assert!(encode_page(&gray_page(&px, 4, 4, embedded_nul)).is_err());
 }
 
@@ -748,10 +630,7 @@ fn orientation_write_roundtrips_through_decoder_reorientation() {
         &px,
         w,
         h,
-        PageExtras {
-            orientation: Some(6),
-            ..Default::default()
-        },
+        PageExtras::default().with_orientation(Some(6)),
     ))
     .unwrap();
     let hdr = parse_header(&file).unwrap();
@@ -787,10 +666,7 @@ fn orientation_write_roundtrips_through_decoder_reorientation() {
             &px,
             w,
             h,
-            PageExtras {
-                orientation: Some(9),
-                ..Default::default()
-            }
+            PageExtras::default().with_orientation(Some(9))
         ))
         .is_err()
     );
@@ -798,10 +674,7 @@ fn orientation_write_roundtrips_through_decoder_reorientation() {
         &px,
         w,
         h,
-        PageExtras {
-            orientation: Some(1),
-            ..Default::default()
-        },
+        PageExtras::default().with_orientation(Some(1)),
     ))
     .unwrap();
     assert_eq!(decode_page(&f1).unwrap().image.planes[0].data, px);

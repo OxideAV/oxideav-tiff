@@ -143,17 +143,17 @@ fn run_tiffinfo(tiff_bytes: &[u8]) -> Option<String> {
 #[test]
 fn encoder_gray8_lzw_roundtrips_through_convert() {
     let pixels = ramp_gray8(32, 32);
-    let page = EncodePage {
-        width: 32,
-        height: 32,
-        kind: EncodePixelFormat::Gray8 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        32,
+        32,
+        EncodePixelFormat::Gray8 { pixels: &pixels },
+        TiffCompression::Lzw,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     // Round-trip through our own decoder first.
     let d = decode_page(&bytes).unwrap();
@@ -169,17 +169,17 @@ fn encoder_gray8_lzw_roundtrips_through_convert() {
 #[test]
 fn encoder_rgb24_packbits_roundtrips_through_convert() {
     let pixels = pattern_rgb(40, 30);
-    let page = EncodePage {
-        width: 40,
-        height: 30,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::PackBits,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        40,
+        30,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::PackBits,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     let d = decode_page(&bytes).unwrap();
     assert_eq!((d.image.width, d.image.height), (40, 30));
@@ -193,17 +193,17 @@ fn encoder_rgb24_packbits_roundtrips_through_convert() {
 #[test]
 fn encoder_rgb24_deflate_roundtrips_through_convert() {
     let pixels = pattern_rgb(48, 16);
-    let page = EncodePage {
-        width: 48,
-        height: 16,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::Deflate,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        48,
+        16,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::Deflate,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         assert_eq!(im_bytes, pixels);
@@ -219,20 +219,20 @@ fn encoder_palette_roundtrips_through_convert() {
             indices.push(((x ^ y) & 0x3) as u8);
         }
     }
-    let page = EncodePage {
-        width: 8,
-        height: 8,
-        kind: EncodePixelFormat::Palette8 {
+    let page = EncodePage::new(
+        8,
+        8,
+        EncodePixelFormat::Palette8 {
             indices: &indices,
             palette: &palette,
         },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         // Reconstruct expected RGB pixels.
@@ -248,17 +248,17 @@ fn encoder_palette_roundtrips_through_convert() {
 #[test]
 fn encoder_tiffinfo_reports_expected_metadata() {
     let pixels = pattern_rgb(64, 48);
-    let page = EncodePage {
-        width: 64,
-        height: 48,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        64,
+        48,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::Lzw,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         assert!(
@@ -293,39 +293,39 @@ fn encoder_multi_page_visible_to_convert_and_tiffinfo() {
     let p2 = pattern_rgb(16, 16);
     let p3 = ramp_gray8(16, 16);
     let pages = vec![
-        EncodePage {
-            width: 16,
-            height: 16,
-            kind: EncodePixelFormat::Gray8 { pixels: &p1 },
-            compression: TiffCompression::None,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        },
-        EncodePage {
-            width: 16,
-            height: 16,
-            kind: EncodePixelFormat::Rgb24 { pixels: &p2 },
-            compression: TiffCompression::Lzw,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        },
-        EncodePage {
-            width: 16,
-            height: 16,
-            kind: EncodePixelFormat::Gray8 { pixels: &p3 },
-            compression: TiffCompression::Deflate,
-            predictor: false,
-            planar: false,
-            tiling: None,
-            bigtiff: false,
-            extras: PageExtras::default(),
-        },
+        EncodePage::new(
+            16,
+            16,
+            EncodePixelFormat::Gray8 { pixels: &p1 },
+            TiffCompression::None,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        ),
+        EncodePage::new(
+            16,
+            16,
+            EncodePixelFormat::Rgb24 { pixels: &p2 },
+            TiffCompression::Lzw,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        ),
+        EncodePage::new(
+            16,
+            16,
+            EncodePixelFormat::Gray8 { pixels: &p3 },
+            TiffCompression::Deflate,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        ),
     ];
     let bytes = encode_pages(&pages).unwrap();
     let imgs = decode_all(&bytes).unwrap();
@@ -543,17 +543,17 @@ fn encoder_ccitt_rle_visible_to_tiffinfo() {
     // Encode a CCITT MH bilevel image, then have tiffinfo read it.
     // It must report the right dimensions + Compression name.
     let (packed, _gray) = bilevel_stripes_and_gray8(64, 16, 8);
-    let page = EncodePage {
-        width: 64,
-        height: 16,
-        kind: EncodePixelFormat::Bilevel { pixels: &packed },
-        compression: TiffCompression::CcittRle,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        64,
+        16,
+        EncodePixelFormat::Bilevel { pixels: &packed },
+        TiffCompression::CcittRle,
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     // Self-roundtrip first.
     let d = decode_page(&bytes).unwrap();
@@ -590,19 +590,19 @@ fn encoder_ccitt_t4_1d_decodes_via_tiffcp_to_uncompressed() {
         return;
     }
     let (packed, gray_expected) = bilevel_stripes_and_gray8(48, 8, 4);
-    let page = EncodePage {
-        width: 48,
-        height: 8,
-        kind: EncodePixelFormat::Bilevel { pixels: &packed },
-        compression: TiffCompression::CcittT4OneD {
+    let page = EncodePage::new(
+        48,
+        8,
+        EncodePixelFormat::Bilevel { pixels: &packed },
+        TiffCompression::CcittT4OneD {
             eol_byte_aligned: false,
         },
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     let dir = tmp_dir();
     let in_path = dir.join("ccitt_t4.tiff");
@@ -649,19 +649,19 @@ fn encoder_ccitt_t4_1d_byte_aligned_decodes_via_tiffcp() {
         return;
     }
     let (packed, gray_expected) = bilevel_stripes_and_gray8(64, 8, 4);
-    let page = EncodePage {
-        width: 64,
-        height: 8,
-        kind: EncodePixelFormat::Bilevel { pixels: &packed },
-        compression: TiffCompression::CcittT4OneD {
+    let page = EncodePage::new(
+        64,
+        8,
+        EncodePixelFormat::Bilevel { pixels: &packed },
+        TiffCompression::CcittT4OneD {
             eol_byte_aligned: true,
         },
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     let dir = tmp_dir();
     let in_path = dir.join("ccitt_t4_bf.tiff");
@@ -780,17 +780,17 @@ fn tiffcp_transcode_predictor_matches(tiff_bytes: &[u8], width: u32, height: u32
 #[test]
 fn encoder_predictor_tiffinfo_reports_horizontal_differencing() {
     let pixels = ramp_gray8(64, 48);
-    let page = EncodePage {
-        width: 64,
-        height: 48,
-        kind: EncodePixelFormat::Gray8 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        64,
+        48,
+        EncodePixelFormat::Gray8 { pixels: &pixels },
+        TiffCompression::Lzw,
+        true,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         assert!(
@@ -809,17 +809,17 @@ fn encoder_gray8_predictor_lzw_transcodes_via_tiffcp() {
         return;
     }
     let pixels = ramp_gray8(50, 30);
-    let page = EncodePage {
-        width: 50,
-        height: 30,
-        kind: EncodePixelFormat::Gray8 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        50,
+        30,
+        EncodePixelFormat::Gray8 { pixels: &pixels },
+        TiffCompression::Lzw,
+        true,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     tiffcp_transcode_predictor_matches(&bytes, 50, 30, &pixels);
 }
@@ -834,17 +834,17 @@ fn encoder_rgb24_predictor_deflate_transcodes_via_tiffcp() {
     // differencing; a wrong offset would make libtiff produce wrong
     // colours after transcoding.
     let pixels = pattern_rgb(40, 24);
-    let page = EncodePage {
-        width: 40,
-        height: 24,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::Deflate,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        40,
+        24,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::Deflate,
+        true,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     tiffcp_transcode_predictor_matches(&bytes, 40, 24, &pixels);
 }
@@ -852,17 +852,17 @@ fn encoder_rgb24_predictor_deflate_transcodes_via_tiffcp() {
 #[test]
 fn encoder_gray8_predictor_lzw_roundtrips_through_convert() {
     let pixels = ramp_gray8(36, 20);
-    let page = EncodePage {
-        width: 36,
-        height: 20,
-        kind: EncodePixelFormat::Gray8 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        36,
+        20,
+        EncodePixelFormat::Gray8 { pixels: &pixels },
+        TiffCompression::Lzw,
+        true,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     // Our own decoder first.
     let d = decode_page(&bytes).unwrap();
@@ -879,17 +879,17 @@ fn encoder_gray8_predictor_lzw_roundtrips_through_convert() {
 #[test]
 fn encoder_rgb24_predictor_lzw_roundtrips_through_convert() {
     let pixels = pattern_rgb(40, 30);
-    let page = EncodePage {
-        width: 40,
-        height: 30,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        40,
+        30,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::Lzw,
+        true,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         assert_eq!(im_bytes, pixels, "ImageMagick mismatch on Predictor=2 RGB");
@@ -911,17 +911,17 @@ fn encoder_planar_rgb_transcodes_via_tiffcp() {
         return;
     }
     let pixels = pattern_rgb(40, 24);
-    let page = EncodePage {
-        width: 40,
-        height: 24,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: true,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        40,
+        24,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::None,
+        false,
+        true,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     let dir = tmp_dir();
     let in_path = dir.join("planar.tiff");
@@ -965,17 +965,17 @@ fn encoder_planar_predictor_lzw_transcodes_via_tiffcp() {
         return;
     }
     let pixels = pattern_rgb(48, 32);
-    let page = EncodePage {
-        width: 48,
-        height: 32,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: true,
-        planar: true,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        48,
+        32,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::Lzw,
+        true,
+        true,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     let dir = tmp_dir();
     let in_path = dir.join("planar.tiff");
@@ -1013,17 +1013,17 @@ fn encoder_planar_predictor_lzw_transcodes_via_tiffcp() {
 #[test]
 fn encoder_planar_rgb_roundtrips_through_convert() {
     let pixels = pattern_rgb(40, 30);
-    let page = EncodePage {
-        width: 40,
-        height: 30,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::Deflate,
-        predictor: false,
-        planar: true,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        40,
+        30,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::Deflate,
+        false,
+        true,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         assert_eq!(
@@ -1037,17 +1037,17 @@ fn encoder_planar_rgb_roundtrips_through_convert() {
 #[test]
 fn encoder_planar_tiffinfo_reports_separate_planes() {
     let pixels = pattern_rgb(32, 16);
-    let page = EncodePage {
-        width: 32,
-        height: 16,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: true,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        32,
+        16,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::None,
+        false,
+        true,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         let lc = info.to_lowercase();
@@ -1110,17 +1110,17 @@ fn encoder_tiled_gray8_transcodes_via_tiffcp() {
     // column (50 = 3*16 + 2 visible) and bottom row (30 = 16 + 14) so
     // the §15 boundary padding gets validated by libtiff.
     let pixels = ramp_gray8(50, 30);
-    let page = EncodePage {
-        width: 50,
-        height: 30,
-        kind: EncodePixelFormat::Gray8 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: false,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        50,
+        30,
+        EncodePixelFormat::Gray8 { pixels: &pixels },
+        TiffCompression::Lzw,
+        false,
+        false,
+        Some((16, 16)),
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 50, 30, &pixels);
 }
@@ -1134,17 +1134,17 @@ fn encoder_tiled_rgb24_predictor_transcodes_via_tiffcp() {
     // Tiled + Predictor=2: libtiff must reverse the per-tile §14
     // differencing as well as the tile geometry.
     let pixels = pattern_rgb(48, 32);
-    let page = EncodePage {
-        width: 48,
-        height: 32,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::Deflate,
-        predictor: true,
-        planar: false,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        48,
+        32,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::Deflate,
+        true,
+        false,
+        Some((16, 16)),
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 48, 32, &pixels);
 }
@@ -1153,17 +1153,17 @@ fn encoder_tiled_rgb24_predictor_transcodes_via_tiffcp() {
 fn encoder_tiled_rgb24_roundtrips_through_convert() {
     // ImageMagick reads our tiled RGB and emits the visible pixels.
     let pixels = pattern_rgb(50, 30);
-    let page = EncodePage {
-        width: 50,
-        height: 30,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: false,
-        tiling: Some((32, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        50,
+        30,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::Lzw,
+        false,
+        false,
+        Some((32, 16)),
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         assert_eq!(im_bytes, pixels, "ImageMagick mismatch on tiled RGB");
@@ -1173,17 +1173,17 @@ fn encoder_tiled_rgb24_roundtrips_through_convert() {
 #[test]
 fn encoder_tiled_tiffinfo_reports_tile_geometry() {
     let pixels = pattern_rgb(48, 32);
-    let page = EncodePage {
-        width: 48,
-        height: 32,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        48,
+        32,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::None,
+        false,
+        false,
+        Some((16, 16)),
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         let lc = info.to_lowercase();
@@ -1215,17 +1215,17 @@ fn encoder_tiled_planar_rgb24_transcodes_via_tiffcp() {
     // such grids (R/G/B). tiffcp must walk all 24 tile entries in
     // plane-major order to transcode.
     let pixels = pattern_rgb(50, 30);
-    let page = EncodePage {
-        width: 50,
-        height: 30,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: true,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        50,
+        30,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::Lzw,
+        false,
+        true,
+        Some((16, 16)),
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 50, 30, &pixels);
 }
@@ -1240,17 +1240,17 @@ fn encoder_tiled_planar_rgb24_predictor_transcodes_via_tiffcp() {
     // per-tile §14 differencing (offset = 1 sample) as well as the tile
     // geometry.
     let pixels = pattern_rgb(48, 32);
-    let page = EncodePage {
-        width: 48,
-        height: 32,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::Deflate,
-        predictor: true,
-        planar: true,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        48,
+        32,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::Deflate,
+        true,
+        true,
+        Some((16, 16)),
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     tiffcp_transcode_tiled_matches(&bytes, 48, 32, &pixels);
 }
@@ -1260,17 +1260,17 @@ fn encoder_tiled_planar_rgb24_roundtrips_through_convert() {
     // ImageMagick reads our planar-tiled RGB and emits the visible
     // pixels — independent confirmation of the per-plane tile layout.
     let pixels = pattern_rgb(50, 30);
-    let page = EncodePage {
-        width: 50,
-        height: 30,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: true,
-        tiling: Some((32, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        50,
+        30,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::Lzw,
+        false,
+        true,
+        Some((32, 16)),
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(im_bytes) = write_and_decode_with_convert(&bytes, true) {
         assert_eq!(im_bytes, pixels, "ImageMagick mismatch on planar-tiled RGB");
@@ -1280,17 +1280,17 @@ fn encoder_tiled_planar_rgb24_roundtrips_through_convert() {
 #[test]
 fn encoder_tiled_planar_tiffinfo_reports_tiles_and_separate_planes() {
     let pixels = pattern_rgb(48, 32);
-    let page = EncodePage {
-        width: 48,
-        height: 32,
-        kind: EncodePixelFormat::Rgb24 { pixels: &pixels },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: true,
-        tiling: Some((16, 16)),
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        48,
+        32,
+        EncodePixelFormat::Rgb24 { pixels: &pixels },
+        TiffCompression::None,
+        false,
+        true,
+        Some((16, 16)),
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         let lc = info.to_lowercase();
@@ -1318,20 +1318,20 @@ fn encoder_ccitt_t4_2d_decodes_via_tiffcp_to_uncompressed() {
         return;
     }
     let (packed, gray_expected) = bilevel_stripes_and_gray8(48, 8, 4);
-    let page = EncodePage {
-        width: 48,
-        height: 8,
-        kind: EncodePixelFormat::Bilevel { pixels: &packed },
-        compression: TiffCompression::CcittT4TwoD {
+    let page = EncodePage::new(
+        48,
+        8,
+        EncodePixelFormat::Bilevel { pixels: &packed },
+        TiffCompression::CcittT4TwoD {
             eol_byte_aligned: false,
             uncompressed: false,
         },
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     let dir = tmp_dir();
     let in_path = dir.join("ccitt_t4_2d.tiff");
@@ -1375,19 +1375,19 @@ fn encoder_ccitt_t6_decodes_via_tiffcp_to_uncompressed() {
         return;
     }
     let (packed, gray_expected) = bilevel_stripes_and_gray8(64, 8, 4);
-    let page = EncodePage {
-        width: 64,
-        height: 8,
-        kind: EncodePixelFormat::Bilevel { pixels: &packed },
-        compression: TiffCompression::CcittT6 {
+    let page = EncodePage::new(
+        64,
+        8,
+        EncodePixelFormat::Bilevel { pixels: &packed },
+        TiffCompression::CcittT6 {
             uncompressed: false,
         },
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     let dir = tmp_dir();
     let in_path = dir.join("ccitt_t6.tiff");
@@ -1426,20 +1426,20 @@ fn encoder_ccitt_t4_2d_tiffinfo_reports_2d_coding() {
     // `tiffinfo` should report Compression scheme 3 and T4Options
     // with bit 0 set (2-D coding). We don't pin the exact wording.
     let (packed, _) = bilevel_stripes_and_gray8(32, 8, 4);
-    let page = EncodePage {
-        width: 32,
-        height: 8,
-        kind: EncodePixelFormat::Bilevel { pixels: &packed },
-        compression: TiffCompression::CcittT4TwoD {
+    let page = EncodePage::new(
+        32,
+        8,
+        EncodePixelFormat::Bilevel { pixels: &packed },
+        TiffCompression::CcittT4TwoD {
             eol_byte_aligned: false,
             uncompressed: false,
         },
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         let lc = info.to_lowercase();
@@ -1460,19 +1460,19 @@ fn encoder_ccitt_t4_2d_tiffinfo_reports_2d_coding() {
 fn encoder_ccitt_t6_tiffinfo_reports_group4() {
     // `tiffinfo` should report Compression scheme 4 / Group 4.
     let (packed, _) = bilevel_stripes_and_gray8(32, 8, 4);
-    let page = EncodePage {
-        width: 32,
-        height: 8,
-        kind: EncodePixelFormat::Bilevel { pixels: &packed },
-        compression: TiffCompression::CcittT6 {
+    let page = EncodePage::new(
+        32,
+        8,
+        EncodePixelFormat::Bilevel { pixels: &packed },
+        TiffCompression::CcittT6 {
             uncompressed: false,
         },
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        false,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         let lc = info.to_lowercase();
@@ -1501,20 +1501,20 @@ fn encoder_planar_subsampled_ycbcr_tiffinfo_reports_geometry() {
             pixels.push(((y / 2) * 20 + 60) as u8);
         }
     }
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::YCbCrSubsampled24 {
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::YCbCrSubsampled24 {
             pixels: &pixels,
             subsampling: (2, 2),
         },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: true,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+        TiffCompression::Lzw,
+        false,
+        true,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     // Our own decoder first.
     let d = decode_page(&bytes).unwrap();
@@ -1548,17 +1548,17 @@ fn encoder_f16_tiffinfo_reports_ieee_float_16() {
     let bits: Vec<u16> = (0..w * h)
         .map(|i| f32_to_f16_bits(i as f32 * 0.125))
         .collect();
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::GrayF16 { pixels: &bits },
-        compression: TiffCompression::Deflate,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: PageExtras::default(),
-    };
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::GrayF16 { pixels: &bits },
+        TiffCompression::Deflate,
+        true,
+        false,
+        None,
+        false,
+        PageExtras::default(),
+    );
     let bytes = encode_page(&page).unwrap();
     let d = decode_page(&bytes).unwrap();
     assert_eq!((d.image.width, d.image.height), (w, h));
@@ -1589,44 +1589,35 @@ fn encoder_extras_page_number_and_subifd_visible_to_tiffinfo() {
     // without erroring on the child-IFD pointers.
     let px = ramp_gray8(24, 24);
     let thumb = ramp_gray8(8, 8);
-    static EXIF: [oxideav_tiff::AuxIfdEntry<'static>; 1] = [oxideav_tiff::AuxIfdEntry {
-        tag: 40961,
-        field_type: 3,
-        count: 1,
-        value: &[1, 0],
-    }];
-    let child = EncodePage {
-        width: 8,
-        height: 8,
-        kind: EncodePixelFormat::Gray8 { pixels: &thumb },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: oxideav_tiff::PageExtras {
-            reduced_resolution: true,
-            ..Default::default()
-        },
-    };
+    static EXIF: [oxideav_tiff::AuxIfdEntry<'static>; 1] =
+        [oxideav_tiff::AuxIfdEntry::new(40961, 3, 1, &[1, 0])];
+    let child = EncodePage::new(
+        8,
+        8,
+        EncodePixelFormat::Gray8 { pixels: &thumb },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        oxideav_tiff::PageExtras::default().with_reduced_resolution(true),
+    );
     let children = [child];
-    let page = EncodePage {
-        width: 24,
-        height: 24,
-        kind: EncodePixelFormat::Gray8 { pixels: &px },
-        compression: TiffCompression::Lzw,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: oxideav_tiff::PageExtras {
-            page_number: Some((0, 1)),
-            multi_page: true,
-            exif_ifd: Some(&EXIF),
-            sub_ifds: &children,
-            ..Default::default()
-        },
-    };
+    let page = EncodePage::new(
+        24,
+        24,
+        EncodePixelFormat::Gray8 { pixels: &px },
+        TiffCompression::Lzw,
+        false,
+        false,
+        None,
+        false,
+        oxideav_tiff::PageExtras::default()
+            .with_page_number(Some((0, 1)))
+            .with_multi_page(true)
+            .with_exif_ifd(Some(&EXIF))
+            .with_sub_ifds(&children),
+    );
     let bytes = encode_page(&page).unwrap();
     assert_eq!(decode_page(&bytes).unwrap().image.planes[0].data, px);
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -1653,20 +1644,17 @@ fn encoder_multi_strip_visible_to_tiffinfo_and_convert() {
     // report the Rows/Strip value, and ImageMagick must read the
     // striped file back to the same pixels.
     let pixels = ramp_gray8(32, 21);
-    let page = EncodePage {
-        width: 32,
-        height: 21,
-        kind: EncodePixelFormat::Gray8 { pixels: &pixels },
-        compression: TiffCompression::Lzw,
-        predictor: true,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: oxideav_tiff::PageExtras {
-            rows_per_strip: Some(6),
-            ..Default::default()
-        },
-    };
+    let page = EncodePage::new(
+        32,
+        21,
+        EncodePixelFormat::Gray8 { pixels: &pixels },
+        TiffCompression::Lzw,
+        true,
+        false,
+        None,
+        false,
+        oxideav_tiff::PageExtras::default().with_rows_per_strip(Some(6)),
+    );
     let bytes = encode_page(&page).unwrap();
     assert_eq!(decode_page(&bytes).unwrap().image.planes[0].data, pixels);
     if let Some(info) = run_tiffinfo(&bytes) {
@@ -1685,26 +1673,24 @@ fn encoder_multi_strip_visible_to_tiffinfo_and_convert() {
 #[test]
 fn encoder_resolution_and_ascii_metadata_visible_to_tiffinfo() {
     let pixels = ramp_gray8(16, 16);
-    let page = EncodePage {
-        width: 16,
-        height: 16,
-        kind: EncodePixelFormat::Gray8 { pixels: &pixels },
-        compression: TiffCompression::None,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: oxideav_tiff::PageExtras {
-            resolution: Some(oxideav_tiff::PageResolution {
-                x: (300, 1),
-                y: (300, 1),
-                unit: 2,
-            }),
-            software: Some("oxideav-tiff"),
-            date_time: Some("2026:07:04 00:00:00"),
-            ..Default::default()
-        },
-    };
+    let page = EncodePage::new(
+        16,
+        16,
+        EncodePixelFormat::Gray8 { pixels: &pixels },
+        TiffCompression::None,
+        false,
+        false,
+        None,
+        false,
+        oxideav_tiff::PageExtras::default()
+            .with_resolution(Some(oxideav_tiff::PageResolution::new(
+                (300, 1),
+                (300, 1),
+                2,
+            )))
+            .with_software(Some("oxideav-tiff"))
+            .with_date_time(Some("2026:07:04 00:00:00")),
+    );
     let bytes = encode_page(&page).unwrap();
     if let Some(info) = run_tiffinfo(&bytes) {
         assert!(

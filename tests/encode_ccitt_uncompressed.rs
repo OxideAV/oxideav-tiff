@@ -25,17 +25,17 @@ use oxideav_tiff::types::*;
 use oxideav_tiff::{EncodePage, EncodePixelFormat, TiffCompression, decode_page, encode_page};
 
 fn bilevel_page(w: u32, h: u32, pixels: &[u8], compression: TiffCompression) -> Vec<u8> {
-    let page = EncodePage {
-        width: w,
-        height: h,
-        kind: EncodePixelFormat::Bilevel { pixels },
+    let page = EncodePage::new(
+        w,
+        h,
+        EncodePixelFormat::Bilevel { pixels },
         compression,
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: Default::default(),
-    };
+        false,
+        false,
+        None,
+        false,
+        Default::default(),
+    );
     encode_page(&page).expect("encode")
 }
 
@@ -210,20 +210,17 @@ fn uncompressed_multistrip_roundtrip() {
     let (w, h) = (40usize, 32usize);
     let pixels = content("noise", w, h);
     let packed = pack_bits(&pixels, w, h);
-    let page = EncodePage {
-        width: w as u32,
-        height: h as u32,
-        kind: EncodePixelFormat::Bilevel { pixels: &packed },
-        compression: TiffCompression::CcittT6 { uncompressed: true },
-        predictor: false,
-        planar: false,
-        tiling: None,
-        bigtiff: false,
-        extras: oxideav_tiff::PageExtras {
-            rows_per_strip: Some(8),
-            ..Default::default()
-        },
-    };
+    let page = EncodePage::new(
+        w as u32,
+        h as u32,
+        EncodePixelFormat::Bilevel { pixels: &packed },
+        TiffCompression::CcittT6 { uncompressed: true },
+        false,
+        false,
+        None,
+        false,
+        oxideav_tiff::PageExtras::default().with_rows_per_strip(Some(8)),
+    );
     let tiff = encode_page(&page).expect("encode");
     assert_eq!(decode_bits(&tiff, w, h), pixels);
 }

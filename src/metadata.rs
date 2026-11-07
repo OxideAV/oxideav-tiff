@@ -52,6 +52,7 @@ impl ResolutionUnit {
 /// [`crate::decode_page`] result carries when a file omits every
 /// informational tag.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TiffMetadata {
     // ---- TIFF 6.0 §8 ASCII descriptive fields ----
     /// DocumentName (tag 269).
@@ -128,6 +129,148 @@ pub struct TiffMetadata {
     pub iptc: Option<Vec<u8>>,
 }
 
+impl TiffMetadata {
+    /// Set `document_name`.
+    #[must_use]
+    pub fn with_document_name(mut self, document_name: Option<String>) -> Self {
+        self.document_name = document_name;
+        self
+    }
+
+    /// Set `image_description`.
+    #[must_use]
+    pub fn with_image_description(mut self, image_description: Option<String>) -> Self {
+        self.image_description = image_description;
+        self
+    }
+
+    /// Set `make`.
+    #[must_use]
+    pub fn with_make(mut self, make: Option<String>) -> Self {
+        self.make = make;
+        self
+    }
+
+    /// Set `model`.
+    #[must_use]
+    pub fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// Set `page_name`.
+    #[must_use]
+    pub fn with_page_name(mut self, page_name: Option<String>) -> Self {
+        self.page_name = page_name;
+        self
+    }
+
+    /// Set `software`.
+    #[must_use]
+    pub fn with_software(mut self, software: Option<String>) -> Self {
+        self.software = software;
+        self
+    }
+
+    /// Set `date_time`.
+    #[must_use]
+    pub fn with_date_time(mut self, date_time: Option<String>) -> Self {
+        self.date_time = date_time;
+        self
+    }
+
+    /// Set `artist`.
+    #[must_use]
+    pub fn with_artist(mut self, artist: Option<String>) -> Self {
+        self.artist = artist;
+        self
+    }
+
+    /// Set `host_computer`.
+    #[must_use]
+    pub fn with_host_computer(mut self, host_computer: Option<String>) -> Self {
+        self.host_computer = host_computer;
+        self
+    }
+
+    /// Set `copyright`.
+    #[must_use]
+    pub fn with_copyright(mut self, copyright: Option<String>) -> Self {
+        self.copyright = copyright;
+        self
+    }
+
+    /// Set `x_resolution`.
+    #[must_use]
+    pub fn with_x_resolution(mut self, x_resolution: Option<(u32, u32)>) -> Self {
+        self.x_resolution = x_resolution;
+        self
+    }
+
+    /// Set `y_resolution`.
+    #[must_use]
+    pub fn with_y_resolution(mut self, y_resolution: Option<(u32, u32)>) -> Self {
+        self.y_resolution = y_resolution;
+        self
+    }
+
+    /// Set `resolution_unit`.
+    #[must_use]
+    pub fn with_resolution_unit(mut self, resolution_unit: Option<ResolutionUnit>) -> Self {
+        self.resolution_unit = resolution_unit;
+        self
+    }
+
+    /// Set `orientation`.
+    #[must_use]
+    pub fn with_orientation(mut self, orientation: Option<u16>) -> Self {
+        self.orientation = orientation;
+        self
+    }
+
+    /// Set `page_number`.
+    #[must_use]
+    pub fn with_page_number(mut self, page_number: Option<(u16, u16)>) -> Self {
+        self.page_number = page_number;
+        self
+    }
+
+    /// Set `new_subfile_type`.
+    #[must_use]
+    pub fn with_new_subfile_type(mut self, new_subfile_type: Option<u32>) -> Self {
+        self.new_subfile_type = new_subfile_type;
+        self
+    }
+
+    /// Set `subfile_type`.
+    #[must_use]
+    pub fn with_subfile_type(mut self, subfile_type: Option<u16>) -> Self {
+        self.subfile_type = subfile_type;
+        self
+    }
+
+    /// Set `xmp`.
+    #[must_use]
+    pub fn with_xmp(mut self, xmp: Option<Vec<u8>>) -> Self {
+        self.xmp = xmp;
+        self
+    }
+
+    /// Set `icc_profile`.
+    #[must_use]
+    pub fn with_icc_profile(mut self, icc_profile: Option<Vec<u8>>) -> Self {
+        self.icc_profile = icc_profile;
+        self
+    }
+
+    /// Set `iptc`.
+    #[must_use]
+    pub fn with_iptc(mut self, iptc: Option<Vec<u8>>) -> Self {
+        self.iptc = iptc;
+        self
+    }
+}
+
 /// Raw structural / codec tags describing *how* the image is stored —
 /// the introspection surface a CLI or transcoder needs ("8-bit RGB,
 /// LZW, tiled 256×256") without re-walking the IFD.
@@ -139,6 +282,7 @@ pub struct TiffMetadata {
 /// value where the default is unambiguous (`samples_per_pixel` default
 /// 1, `bits_per_sample` default `[1]`), else `None` / empty.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct TiffFormatInfo {
     /// PhotometricInterpretation (tag 262) — raw code.
     pub photometric: Option<u16>,
