@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.9...v0.0.10) - 2026-11-07
+
+### Other
+
+- API hygiene: #[non_exhaustive] on growable enums + encode / metadata records, constructors and with_* setters
+- edition 2024, MSRV 1.95
+- tiff tests: tiffinfo lists the muxed mixed-geometry pages in write order with their schemes
+- tiff fuzz: registry_encode target + registry seam in decode; lockfile on core 0.1.40
+- multi-stream muxer — mixed-geometry pages in write order, re-encoded under each stream's options
+- registry encoder declares its nine layouts, typed refusals, quality governs JPEG only
+- metadata blobs through the registry + one frame per page
+- IPTC-IIM record stream carriage (tag 33723) on the contract and depth surfaces
+
 ### Added
 
 - `new(..)` (every field, in declaration order) on `AuxIfdEntry` (a `const fn`, so entry tables can stay `static`), `PageResolution` and `EncodePage`; `with_<field>` setters on `PageExtras`, `JpegOptions` and `TiffMetadata`.
