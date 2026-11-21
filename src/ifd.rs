@@ -223,9 +223,7 @@ impl Entry {
                 }
             }
             TYPE_SBYTE => {
-                for i in 0..n {
-                    out.push(self.data[i] as i8 as f64);
-                }
+                out.extend(self.data[..n].iter().map(|&b| b as i8 as f64));
             }
             TYPE_SSHORT => {
                 for i in 0..n {
