@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10](https://github.com/OxideAV/oxideav-tiff/compare/v0.0.9...v0.0.10) - 2026-11-21
+
+### Other
+
+- crate-level coverage text, fuzz run counts, package description
+- FillOrder=2 on WebP and JPEG pages
+- real little-endian files from magick, threaded decode on every file
+- Segments past 64 MiB decode; tile-size gate
+- LZW both ways, opt-in strip / tile threads, coder level, CCITT in tiles
+- daily scheduled workflow; decode target covers the Exif reader
+- typed Exif / GPS / Interoperability directories and GeoTIFF georeferencing
+- live black-box matrix in both directions; tiff_probe example
+- Black-box audit: float predictor offset, PackBits rows, Lab, every integer layout
+- compcol 0.8: Zstandard frames the 0.6 decoder refused
+- iterator form for the SBYTE float read (clippy 1.100 needless_range_loop)
+- API hygiene: #[non_exhaustive] on growable enums + encode / metadata records, constructors and with_* setters
+- edition 2024, MSRV 1.95
+- tiff tests: tiffinfo lists the muxed mixed-geometry pages in write order with their schemes
+- tiff fuzz: registry_encode target + registry seam in decode; lockfile on core 0.1.40
+- multi-stream muxer — mixed-geometry pages in write order, re-encoded under each stream's options
+- registry encoder declares its nine layouts, typed refusals, quality governs JPEG only
+- metadata blobs through the registry + one frame per page
+- IPTC-IIM record stream carriage (tag 33723) on the contract and depth surfaces
+
 ### Fixed
 
 - **Floating-point predictor (`Predictor = 3`) on chunky multi-sample
