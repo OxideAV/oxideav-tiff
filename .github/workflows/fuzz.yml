@@ -1,0 +1,17 @@
+name: Fuzz
+
+# Daily bounded run of the cargo-fuzz harnesses under fuzz/ (decode,
+# registry_encode, jpeg_roundtrip): the 30-minute budget is split
+# across the targets by the org-level reusable workflow.
+
+on:
+  schedule:
+    - cron: "23 5 * * *"   # daily 05:23 UTC, off the hour
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    uses: OxideAV/.github/.github/workflows/crate-fuzz.yml@master
+    with:
+      time_budget_seconds: 1800
+    secrets: inherit

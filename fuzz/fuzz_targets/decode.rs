@@ -98,8 +98,14 @@ fuzz_target!(|data: &[u8]| {
             .with_max_height(64)
             .with_strict(true),
     );
-    let _ = decode_page(data);
+        let _ = decode_page(data);
     let _ = decode_all(data);
+    // The typed Exif / GPS reader takes any TIFF-structured block (the
+    // input doubles as one); GeoTIFF resolution runs inside the page
+    // decodes above.
+    let _ = oxideav_tiff::ExifData::parse(data);
+    // A granted thread budget must change nothing but the schedule.
+    let _ = decode_with(data, &DecodeOptions::default().with_max_pixels(1 << 22));
     // `decode_pages` walks the same chain but also runs the
     // metadata + format-info extractors per page; drive it too.
     let _ = decode_pages(data);
