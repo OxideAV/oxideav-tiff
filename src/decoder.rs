@@ -177,7 +177,11 @@ pub(crate) fn decode_page_entries(
         gamma: None,
         iptc: metadata.iptc.clone(),
     };
-    Ok(Page::new(image, metadata, layout))
+    Ok(Page::new(image, metadata, layout)
+        .with_exif(crate::tags::ExifData::from_directory(
+            input, header, entries,
+        ))
+        .with_geotiff(crate::tags::GeoTiff::from_directory(entries, bo)))
 }
 
 /// H.273 Table 2 chromaticity rows this decoder recognises in the

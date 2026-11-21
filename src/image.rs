@@ -934,6 +934,12 @@ pub struct Page {
     pub metadata: TiffMetadata,
     /// Raw on-disk layout tags of the same IFD.
     pub layout: TiffFormatInfo,
+    /// The Exif, GPS and Interoperability directories the IFD points
+    /// at, typed (empty when it has none).
+    pub exif: crate::tags::ExifData,
+    /// GeoTIFF georeferencing of the page, when its directory carries
+    /// the GeoTIFF tags.
+    pub geotiff: Option<crate::tags::GeoTiff>,
 }
 
 impl Page {
@@ -943,7 +949,21 @@ impl Page {
             image,
             metadata,
             layout,
+            exif: crate::tags::ExifData::default(),
+            geotiff: None,
         }
+    }
+
+    /// Set the typed Exif-family directories.
+    pub fn with_exif(mut self, exif: crate::tags::ExifData) -> Self {
+        self.exif = exif;
+        self
+    }
+
+    /// Set the GeoTIFF georeferencing.
+    pub fn with_geotiff(mut self, geotiff: impl Into<Option<crate::tags::GeoTiff>>) -> Self {
+        self.geotiff = geotiff.into();
+        self
     }
 
     /// Image width in pixels.

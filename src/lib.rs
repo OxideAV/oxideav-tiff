@@ -166,6 +166,7 @@ pub mod ifd;
 pub mod image;
 pub mod metadata;
 mod options;
+pub mod tags;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub mod types;
@@ -231,6 +232,7 @@ pub use encoder::{
 pub use jpeg_enc::JpegProcess;
 pub use jpeg_wrap::{JpegOptions, JpegTablesLayout};
 pub use metadata::{ResolutionUnit, TiffFormatInfo, TiffMetadata};
+pub use tags::{ExifData, GeoKey, GeoKeyValue, GeoTiff, GpsPosition, TagEntry, TagGroup, TagValue};
 
 // ---- Deprecated pre-contract entry points (one release) -------------------
 #[allow(deprecated)]
