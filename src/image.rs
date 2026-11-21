@@ -72,6 +72,18 @@ pub enum TiffPixelFormat {
     /// bytes per pixel) — `SampleFormat = 3` RGB sources at any IEEE
     /// width, samples as stored (see [`Self::GrayF32Le`]).
     RgbF32Le,
+    /// 8-bit grayscale + straight alpha, packed `Y A` (2 bytes per
+    /// pixel) — a grayscale page with an alpha §ExtraSamples entry.
+    Ya8,
+    /// 16-bit grayscale + straight alpha, little-endian, packed `Y A`
+    /// (4 bytes per pixel).
+    Ya16Le,
+    /// 16-bit packed RGBA, little-endian, straight alpha (8 bytes per
+    /// pixel).
+    Rgba64Le,
+    /// 32-bit IEEE-float packed RGBA, little-endian, straight alpha
+    /// (16 bytes per pixel).
+    RgbaF32Le,
 }
 
 /// The contract name for [`TiffPixelFormat`].
@@ -82,31 +94,37 @@ impl TiffPixelFormat {
     pub fn bytes_per_pixel(self) -> usize {
         match self {
             Self::Gray8 | Self::Pal8 => 1,
-            Self::Gray16Le => 2,
+            Self::Gray16Le | Self::Ya8 => 2,
             Self::Rgb24 => 3,
-            Self::Rgba | Self::Cmyk | Self::GrayF32Le => 4,
+            Self::Rgba | Self::Cmyk | Self::GrayF32Le | Self::Ya16Le => 4,
             Self::Rgb48Le => 6,
+            Self::Rgba64Le => 8,
             Self::RgbF32Le => 12,
+            Self::RgbaF32Le => 16,
         }
     }
 
-    /// `true` for the IEEE-float layouts (`GrayF32Le` / `RgbF32Le`).
+    /// `true` for the IEEE-float layouts (`GrayF32Le` / `RgbF32Le` /
+    /// `RgbaF32Le`).
     pub fn is_float(self) -> bool {
-        matches!(self, Self::GrayF32Le | Self::RgbF32Le)
+        matches!(self, Self::GrayF32Le | Self::RgbF32Le | Self::RgbaF32Le)
     }
 
     /// `true` when the layout carries an alpha channel of its own
-    /// (`Rgba`).
+    /// (`Rgba`, `Rgba64Le`, `RgbaF32Le`, `Ya8`, `Ya16Le`).
     pub fn has_alpha(self) -> bool {
-        matches!(self, Self::Rgba)
+        matches!(
+            self,
+            Self::Rgba | Self::Rgba64Le | Self::RgbaF32Le | Self::Ya8 | Self::Ya16Le
+        )
     }
 
     /// Bits per sample of the layout (8, 16 or 32).
     pub fn bits_per_sample(self) -> u8 {
         match self {
-            Self::Gray8 | Self::Pal8 | Self::Rgb24 | Self::Rgba | Self::Cmyk => 8,
-            Self::Gray16Le | Self::Rgb48Le => 16,
-            Self::GrayF32Le | Self::RgbF32Le => 32,
+            Self::Gray8 | Self::Pal8 | Self::Rgb24 | Self::Rgba | Self::Cmyk | Self::Ya8 => 8,
+            Self::Gray16Le | Self::Rgb48Le | Self::Ya16Le | Self::Rgba64Le => 16,
+            Self::GrayF32Le | Self::RgbF32Le | Self::RgbaF32Le => 32,
         }
     }
 }
@@ -609,6 +627,7 @@ impl TiffImage {
     /// | `Rgb24`    | copy                                                      |
     /// | `Rgb48Le`  | high byte per channel                                     |
     /// | `Rgba`     | alpha dropped (straight alpha, so the colour is unchanged) |
+    /// | `Ya8` / `Ya16Le` / `Rgba64Le` / `RgbaF32Le` | as their alpha-less layout, alpha dropped |
     /// | `Pal8`     | palette lookup; an index past the palette is black        |
     /// | `Cmyk`     | TIFF 6.0 §16 ink inversion: `R = (255−C)(255−K)/255`, `G = (255−M)(255−K)/255`, `B = (255−Y)(255−K)/255` (integer division) |
     /// | `GrayF32Le` / `RgbF32Le` | tone-scaled: each sample clamped to `[0, 1]`, `× 255`, rounded half-up; NaN / ±Inf render 0 (the `SMin` / `SMax` display extent is on [`crate::TiffFormatInfo`] for callers who want another mapping) |
@@ -637,18 +656,18 @@ impl TiffImage {
                 let px = |i: usize| src.get(s + i).copied().unwrap_or(0);
                 let d = &mut drow[x * 3..x * 3 + 3];
                 match self.format {
-                    PixelFormat::Gray8 => {
+                    PixelFormat::Gray8 | PixelFormat::Ya8 => {
                         let g = px(0);
                         d.copy_from_slice(&[g, g, g]);
                     }
-                    PixelFormat::Gray16Le => {
+                    PixelFormat::Gray16Le | PixelFormat::Ya16Le => {
                         let g = px(1);
                         d.copy_from_slice(&[g, g, g]);
                     }
                     PixelFormat::Rgb24 | PixelFormat::Rgba => {
                         d.copy_from_slice(&[px(0), px(1), px(2)]);
                     }
-                    PixelFormat::Rgb48Le => {
+                    PixelFormat::Rgb48Le | PixelFormat::Rgba64Le => {
                         d.copy_from_slice(&[px(1), px(3), px(5)]);
                     }
                     PixelFormat::Pal8 => {
@@ -668,7 +687,7 @@ impl TiffImage {
                         let g = f32_to_u8(f32::from_le_bytes([px(0), px(1), px(2), px(3)]));
                         d.copy_from_slice(&[g, g, g]);
                     }
-                    PixelFormat::RgbF32Le => {
+                    PixelFormat::RgbF32Le | PixelFormat::RgbaF32Le => {
                         let ch = |c: usize| {
                             f32_to_u8(f32::from_le_bytes([
                                 px(c * 4),
@@ -686,9 +705,10 @@ impl TiffImage {
     }
 
     /// Tightly packed 8-bit RGBA, `4 × width` bytes per row: the
-    /// [`Self::to_rgb8`] colour with the source alpha for `Rgba`, the
-    /// palette entry's alpha for `Pal8`, and `255` (opaque) for every
-    /// other layout.
+    /// [`Self::to_rgb8`] colour with the source alpha for the alpha
+    /// layouts (`Rgba`, `Ya8`; the high byte for `Ya16Le` / `Rgba64Le`;
+    /// tone-scaled for `RgbaF32Le`), the palette entry's alpha for
+    /// `Pal8`, and `255` (opaque) for every other layout.
     pub fn to_rgba8(&self) -> Vec<u8> {
         let w = self.width as usize;
         let h = self.height as usize;
@@ -701,8 +721,15 @@ impl TiffImage {
         for y in 0..h {
             for x in 0..w {
                 let i = y * w + x;
+                let at = |i: usize| src.get(y * stride + x * bpp + i).copied().unwrap_or(0);
                 let a = match self.format {
-                    PixelFormat::Rgba => src.get(y * stride + x * bpp + 3).copied().unwrap_or(0),
+                    PixelFormat::Rgba => at(3),
+                    PixelFormat::Ya8 => at(1),
+                    PixelFormat::Ya16Le => at(3),
+                    PixelFormat::Rgba64Le => at(7),
+                    PixelFormat::RgbaF32Le => {
+                        f32_to_u8(f32::from_le_bytes([at(12), at(13), at(14), at(15)]))
+                    }
                     PixelFormat::Pal8 => {
                         lut[src.get(y * stride + x).copied().unwrap_or(0) as usize][3]
                     }
@@ -740,6 +767,10 @@ fn format_name(f: PixelFormat) -> &'static str {
         PixelFormat::Cmyk => "Cmyk",
         PixelFormat::GrayF32Le => "GrayF32Le",
         PixelFormat::RgbF32Le => "RgbF32Le",
+        PixelFormat::Ya8 => "Ya8",
+        PixelFormat::Ya16Le => "Ya16Le",
+        PixelFormat::Rgba64Le => "Rgba64Le",
+        PixelFormat::RgbaF32Le => "RgbaF32Le",
     }
 }
 

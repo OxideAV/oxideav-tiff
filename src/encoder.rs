@@ -38,7 +38,7 @@
 //! [`EncodePage::planar`].
 
 use crate::ccitt::{CcittVariant, FillOrder, encode_ccitt};
-use crate::compress::{pack_deflate, pack_lzw, pack_packbits, pack_zstd};
+use crate::compress::{pack_deflate, pack_lzw, pack_packbits_rows, pack_zstd};
 use crate::error::{Result, TiffError as Error};
 pub use crate::jpeg_wrap::JpegOptions;
 use crate::jpeg_wrap::{JpegPageInput, build_jpeg_segments};
@@ -663,6 +663,34 @@ pub enum EncodePixelFormat<'a> {
         pixels: &'a [u8],
         kind: ExtraSampleKind,
     },
+    /// 8-bit grayscale + one §ExtraSamples component, chunky `Y X`
+    /// (`pixels.len() == width * height * 2`): BlackIsZero,
+    /// `SamplesPerPixel = 2`, `ExtraSamples = [kind]`. Composes with
+    /// the byte-stream compressors, `Predictor = 2`,
+    /// `PlanarConfiguration = 2`, tiling and BigTIFF like [`Self::Rgba32`].
+    GrayAlpha8 {
+        pixels: &'a [u8],
+        kind: ExtraSampleKind,
+    },
+    /// 16-bit grayscale + one §ExtraSamples component, chunky `Y X`,
+    /// little-endian (`pixels.len() == width * height * 4`).
+    GrayAlpha16 {
+        pixels: &'a [u8],
+        kind: ExtraSampleKind,
+    },
+    /// 16-bit RGB + one §ExtraSamples component, chunky `R G B X`,
+    /// little-endian (`pixels.len() == width * height * 8`).
+    Rgba64 {
+        pixels: &'a [u8],
+        kind: ExtraSampleKind,
+    },
+    /// IEEE single-precision RGB + one §ExtraSamples component, chunky
+    /// `R G B X` (`pixels.len() == width * height * 4`):
+    /// `SampleFormat = 3`, `BitsPerSample = 32`.
+    RgbaF32 {
+        pixels: &'a [f32],
+        kind: ExtraSampleKind,
+    },
     /// 8-bit indexed palette. `indices.len() == width * height`,
     /// `palette.len() <= 256` (any extras are ignored).
     Palette8 {
@@ -1128,7 +1156,7 @@ impl TiffCompression {
     fn pack(self, raw: &[u8], width: u32, rows: u32) -> Result<Vec<u8>> {
         match self {
             TiffCompression::None => Ok(raw.to_vec()),
-            TiffCompression::PackBits => Ok(pack_packbits(raw)),
+            TiffCompression::PackBits => Ok(pack_packbits_rows(raw, rows as usize)),
             TiffCompression::Lzw => Ok(pack_lzw(raw)),
             TiffCompression::Deflate => pack_deflate(raw),
             TiffCompression::Zstd => pack_zstd(raw),
@@ -1760,6 +1788,26 @@ struct PageIfd {
 const MAX_SUB_IFD_DEPTH: usize = 8;
 
 fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<PlannedPage> {
+    // §14: "Currently this field is used only with LZW (Compression=5)
+    // encoding"; the Deflate technote and the Zstandard registration
+    // extend it to those two byte-stream coders. Other readers do not
+    // reverse a predictor declared next to uncompressed or PackBits
+    // data, so such a page is written without one: the predictor is a
+    // compression aid, and there is nothing for it to aid there.
+    let unpredicted;
+    let p = if p.predictor
+        && matches!(
+            p.compression,
+            TiffCompression::None | TiffCompression::PackBits
+        ) {
+        unpredicted = EncodePage {
+            predictor: false,
+            ..p.clone()
+        };
+        &unpredicted
+    } else {
+        p
+    };
     if depth > MAX_SUB_IFD_DEPTH {
         return Err(Error::invalid(format!(
             "TIFF encode: SubIFDs (tag 330) tree deeper than {MAX_SUB_IFD_DEPTH} levels"
@@ -1841,6 +1889,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
             | EncodePixelFormat::RgbF16 { .. }
             | EncodePixelFormat::RgbF32 { .. }
             | EncodePixelFormat::RgbF64 { .. }
+            | EncodePixelFormat::RgbaF32 { .. }
     );
 
     // PlanarConfiguration=2 (separate component planes) is only
@@ -1864,6 +1913,10 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
             EncodePixelFormat::Rgb24 { .. }
                 | EncodePixelFormat::Rgb48 { .. }
                 | EncodePixelFormat::Rgba32 { .. }
+                | EncodePixelFormat::GrayAlpha8 { .. }
+                | EncodePixelFormat::GrayAlpha16 { .. }
+                | EncodePixelFormat::Rgba64 { .. }
+                | EncodePixelFormat::RgbaF32 { .. }
                 | EncodePixelFormat::CieLab8 { .. }
                 | EncodePixelFormat::Cmyk32 { .. }
                 | EncodePixelFormat::YCbCr24 { .. }
@@ -2154,6 +2207,44 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                     )));
                 }
                 (4u16, vec![8u16, 8, 8, 8], PHOTO_RGB, pixels.to_vec(), None)
+            }
+            EncodePixelFormat::GrayAlpha8 { pixels, .. }
+            | EncodePixelFormat::GrayAlpha16 { pixels, .. }
+            | EncodePixelFormat::Rgba64 { pixels, .. } => {
+                // §ExtraSamples next to a grayscale / 16-bit RGB page:
+                // the extra rides as the last component of each pixel.
+                let (spp, bits, photo, name) = match &p.kind {
+                    EncodePixelFormat::GrayAlpha8 { .. } => {
+                        (2u16, 8u16, PHOTO_BLACK_IS_ZERO, "GrayAlpha8")
+                    }
+                    EncodePixelFormat::GrayAlpha16 { .. } => {
+                        (2, 16, PHOTO_BLACK_IS_ZERO, "GrayAlpha16")
+                    }
+                    _ => (4, 16, PHOTO_RGB, "Rgba64"),
+                };
+                let want =
+                    (p.width as usize) * (p.height as usize) * spp as usize * (bits as usize / 8);
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/{name}: pixel buffer is {} bytes, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                (spp, vec![bits; spp as usize], photo, pixels.to_vec(), None)
+            }
+            EncodePixelFormat::RgbaF32 { pixels, .. } => {
+                let want = (p.width as usize) * (p.height as usize) * 4;
+                if pixels.len() != want {
+                    return Err(Error::invalid(format!(
+                        "TIFF encode/RgbaF32: pixel buffer is {} samples, expected {want}",
+                        pixels.len()
+                    )));
+                }
+                let mut buf = Vec::with_capacity(want * 4);
+                for s in *pixels {
+                    buf.extend_from_slice(&s.to_le_bytes());
+                }
+                (4u16, vec![32u16; 4], PHOTO_RGB, buf, None)
             }
             EncodePixelFormat::Palette8 { indices, palette } => {
                 let want = (p.width as usize) * (p.height as usize);
@@ -2777,6 +2868,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 forward_float_predictor(
                     &mut raw_pixels,
                     (p.width as usize) * (samples_per_pixel as usize),
+                    samples_per_pixel as usize,
                     p.height as usize,
                     bps / 8,
                     row_bytes,
@@ -3324,7 +3416,12 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
     // unspecified / 1 associated alpha / 2 unassociated alpha),
     // inline. Sits between 334 (NumberOfInks) and 339 (SampleFormat)
     // in ascending tag order.
-    if let EncodePixelFormat::Rgba32 { kind, .. } = &p.kind {
+    if let EncodePixelFormat::Rgba32 { kind, .. }
+    | EncodePixelFormat::GrayAlpha8 { kind, .. }
+    | EncodePixelFormat::GrayAlpha16 { kind, .. }
+    | EncodePixelFormat::Rgba64 { kind, .. }
+    | EncodePixelFormat::RgbaF32 { kind, .. } = &p.kind
+    {
         entries.push(PageIfdEntry {
             tag: TAG_EXTRA_SAMPLES,
             field_type: TYPE_SHORT,
@@ -3939,6 +4036,7 @@ fn build_planes_chunky_source(
                 forward_float_predictor(
                     &mut plane_buf,
                     width,
+                    1,
                     height,
                     bytes_per_sample,
                     plane_row_bytes,
@@ -4301,6 +4399,7 @@ fn build_tiles(
                 forward_float_predictor(
                     &mut tile,
                     tile_w * samples,
+                    samples,
                     tile_h,
                     bytes_per_sample,
                     tile_row_bytes,
@@ -4738,6 +4837,7 @@ fn forward_horizontal_predictor(
 fn forward_float_predictor(
     buf: &mut [u8],
     width: usize,
+    comps: usize,
     rows: usize,
     bytes_per_sample: usize,
     row_bytes: usize,
@@ -4768,8 +4868,10 @@ fn forward_float_predictor(
         // Stage 2: horizontal byte differencing across the reordered row,
         // right-to-left so each "previous" byte is still its original
         // value when its successor is differenced.
-        for i in (1..row_len).rev() {
-            plane[i] = plane[i].wrapping_sub(plane[i - 1]);
+        // The offset is the row's component count (TIFF 6.0 §14:
+        // "an offset of SamplesPerPixel" for chunky data, 1 per plane).
+        for i in (comps..row_len).rev() {
+            plane[i] = plane[i].wrapping_sub(plane[i - comps]);
         }
         row.copy_from_slice(&plane);
     }
@@ -5216,9 +5318,9 @@ mod tests {
 
     #[test]
     fn encode_gray8_predictor_none_roundtrip() {
-        // §14 ties the predictor to LZW, but the tag is orthogonal to
-        // the compressor; Compression=1 + Predictor=2 must still
-        // round-trip (the decoder reverses the differencing regardless).
+        // §14 ties the predictor to the LZW family: next to
+        // Compression=1 it is not written at all (other readers do not
+        // reverse one there), and the page round-trips unpredicted.
         let pixels = ramp_gray8(16, 16);
         let out = predictor_roundtrip(
             16,

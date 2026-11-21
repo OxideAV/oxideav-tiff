@@ -346,6 +346,28 @@ pub fn unpack_zstd(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
 // Encoders (used by the writer in `encoder.rs`)
 // ---------------------------------------------------------------------------
 
+/// PackBits-encode a strip / tile of `rows` scan-lines row by row —
+/// TIFF 6.0 §9: "Pack each row separately. Do not compress across row
+/// boundaries." Readers that decode a scan-line at a time depend on
+/// it. `rows` is the luma row count; a chroma-subsampled YCbCr strip
+/// holds one data-unit row per 2 or 4 of those, so the row length is
+/// taken from the first of `rows`, `⌈rows / 2⌉`, `⌈rows / 4⌉` that
+/// divides the buffer (splitting finer than the true row is still
+/// row-aligned).
+pub fn pack_packbits_rows(input: &[u8], rows: usize) -> Vec<u8> {
+    let chunk = [rows, rows.div_ceil(2), rows.div_ceil(4)]
+        .into_iter()
+        .find(|&d| d > 0 && input.len().is_multiple_of(d))
+        .map(|d| input.len() / d)
+        .filter(|&c| c > 0)
+        .unwrap_or(input.len().max(1));
+    let mut out = Vec::with_capacity(input.len() / 2 + 16);
+    for row in input.chunks(chunk) {
+        out.extend_from_slice(&pack_packbits(row));
+    }
+    out
+}
+
 /// PackBits encode per TIFF 6.0 §9 pseudocode. Greedy: emit replicate
 /// runs of length >=3, otherwise literal runs up to 128 bytes.
 pub fn pack_packbits(input: &[u8]) -> Vec<u8> {

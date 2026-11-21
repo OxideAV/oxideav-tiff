@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Floating-point predictor (`Predictor = 3`) on chunky multi-sample
+  pages.** The byte differencing ran with an offset of one byte where
+  TIFF 6.0 §14 prescribes "an offset of SamplesPerPixel": float RGB
+  pages written by other software decoded to garbage, and the ones this
+  crate wrote were unreadable elsewhere. Read and write both fixed
+  (single-sample and separate-plane pages were unaffected).
+- **PackBits writer crossed row boundaries.** §9: "Pack each row
+  separately. Do not compress across row boundaries." Readers that
+  decode a scan-line at a time mis-read such strips; every strip / tile
+  is now packed row by row (`compress::pack_packbits_rows`).
+- **`Orientation` 2..=8 on a palette page lost the palette** (the page
+  rendered black); the remap now keeps palette, colour and metadata.
+- **CIELab rendering.** The Lab → RGB step used the §23 example matrix
+  for NTSC primaries against a D65 white, so neutral Lab was not
+  neutral RGB and saturated colours were off by tens of levels. The
+  conversion is now Lab → XYZ under the page's reference white
+  (`WhitePoint`, default D50 per the Adobe Lab update) → linear Bradford
+  adaptation to D65 (ICC.1:2010 Annex E.3) → BT.709 primaries → sRGB
+  curve, and the page's `color` says so (primaries 1, transfer 13).
+- **`ReferenceBlackWhite` / `YCbCrCoefficients` were ignored** on
+  byte-stream-coded YCbCr pages (TIFF 6.0 §20 / §21): pages with video
+  headroom (16..235) decoded 16 levels too bright in the blacks.
+- **JPEG-in-TIFF with an odd width and subsampled chroma** was refused
+  ("cannot classify 3-plane JPEG") when a strip's chroma stride was
+  `⌈w / 2⌉`.
+- **Zstandard frames** that the previous `compcol` 0.6 decoder rejected
+  as corrupt (`compcol` 0.8 now).
+- **Writer: a predictor next to `None` / `PackBits`** is no longer
+  written (§14 defines the predictor for the LZW family; other readers
+  do not reverse one declared on uncompressed or PackBits data, so
+  those pages were mis-read elsewhere). `predictor = true` now takes
+  effect with `Lzw` / `Deflate` / `Zstd` only.
+
+### Added
+
+- **General integer sample path** (`generic` module): any
+  `BitsPerSample` from 1 to 64 (bit-packed or whole-byte, both byte
+  orders), signed samples on any colour model, extra samples next to
+  grayscale / RGB / CMYK, sub-byte samples in separate planes and in
+  tiles, 1- / 2-bit palettes — under None / PackBits / LZW / Deflate /
+  Zstd, strips or tiles, with `Predictor = 2` at every width. Samples
+  narrower than the layout are widened by bit replication, wider ones
+  keep their top bits.
+- Native layouts `Ya8`, `Ya16Le`, `Rgba64Le`, `RgbaF32Le`
+  (`TiffPixelFormat`; decode, `encode`, `EncodePixelFormat::GrayAlpha8`
+  / `GrayAlpha16` / `Rgba64` / `RgbaF32`, registry bridge).
+- **Associated alpha is kept**: an `ExtraSamples = 1` page decodes to
+  the straight-alpha layout with the alpha divided back out of the
+  colour (it used to decode to opaque RGB).
+- `FillOrder = 2` on any byte-stream layout (every stored byte
+  bit-reversed, compressed or not).
+- `Compression = 32946` (Deflate under its older code).
+- 16-bit CIELab and ICCLab (`PhotometricInterpretation = 9`), L\*-only
+  pages at 16 bits, `WhitePoint` honoured.
+- YCbCr subsampling `[4, 4]`; `Predictor = 2` over 32- / 64-bit words
+  (integer or float).
+- The registry encoder accepts the four new layouts
+  (`ACCEPTED_PIXEL_FORMATS` now lists thirteen).
+- Float pages with extra samples (float RGBA → `RgbaF32Le`).
+- `tags` module: typed Exif / GPS / Interoperability directories
+  (`ExifData`, catalogue names from Exif 3.1 Tables 8 / 9 / 14, UTF-8
+  field type 129, GPS position in decimal degrees) on `Page::exif`,
+  and GeoTIFF georeferencing (`GeoTiff`: GeoKey directory resolved to
+  SHORT / DOUBLE / ASCII values, pixel scale, tiepoints, transformation,
+  `raster_to_model`) on `Page::geotiff`.
+- `tests/blackbox_matrix.rs`: the live black-box matrix (files written
+  by `magick`, `tiffcp`, `raw2tiff`, `ffmpeg`, `sips`, `tiffset` decoded
+  here and by a black-box reader; every layout this crate writes read
+  back by `tiffinfo` and two black-box readers).
+- `.github/workflows/fuzz.yml`: daily bounded run of the three fuzz
+  targets.
+- `examples/tiff_probe.rs` (decode a file, print every page's layout).
+
+### Changed
+
+- `Page` gains `exif` and `geotiff` (with `with_exif` / `with_geotiff`).
+- `compcol` 0.6 → 0.8.
+- `info()` / the demuxer's layout probe apply the decoder's
+  `BitsPerSample` checks (count = `SamplesPerPixel`, uniform), so a
+  page they describe is a page `decode` accepts.
+
 ### Added
 
 - `new(..)` (every field, in declaration order) on `AuxIfdEntry` (a `const fn`, so entry tables can stay `static`), `PageResolution` and `EncodePage`; `with_<field>` setters on `PageExtras`, `JpegOptions` and `TiffMetadata`.

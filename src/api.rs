@@ -125,7 +125,24 @@ pub(crate) fn native_layout(entries: &[Entry], bo: ByteOrder) -> Result<Layout> 
     }
     let bps = match find(entries, TAG_BITS_PER_SAMPLE) {
         None => 1,
-        Some(e) => e.as_u32_vec(bo)?.first().copied().unwrap_or(1) as u16,
+        Some(e) => {
+            // The same structural checks the pixel decoder applies: one
+            // entry per sample, all equal.
+            if e.count != spp as u64 {
+                return Err(Error::invalid(format!(
+                    "TIFF: BitsPerSample count {} != SamplesPerPixel {spp}",
+                    e.count
+                )));
+            }
+            let v = e.as_u32_vec(bo)?;
+            let first = v.first().copied().unwrap_or(1);
+            if v.iter().any(|&b| b != first) {
+                return Err(Error::invalid(
+                    "TIFF: per-channel BitsPerSample must be uniform in this build",
+                ));
+            }
+            first as u16
+        }
     };
     let sample_format = match find(entries, TAG_SAMPLE_FORMAT) {
         None => SAMPLE_FORMAT_UINT,
@@ -142,26 +159,49 @@ pub(crate) fn native_layout(entries: &[Entry], bo: ByteOrder) -> Result<Layout> 
     let is_float = sample_format == SAMPLE_FORMAT_IEEE_FP;
     let jpeg = matches!(compression, COMPRESSION_JPEG_OLD | COMPRESSION_JPEG_NEW);
     let deep_jpeg = jpeg && (9..=16).contains(&bps);
+    let generic = if jpeg
+        || crate::decoder::is_fast_layout(photometric, spp, bps, sample_format, &extra, compression)
+    {
+        None
+    } else {
+        crate::generic::classify(photometric, spp, bps, sample_format, &extra)
+    };
     let format = match (photometric, spp, bps) {
+        _ if generic.is_some() => generic.map(|g| g.out).unwrap_or(PixelFormat::Gray8),
         (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO | PHOTO_TRANSPARENCY_MASK, 1, 1 | 4 | 8) => {
             PixelFormat::Gray8
         }
-        (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, 1, 16 | 32 | 64) if is_float => {
+        (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, _, 16 | 32 | 64) if is_float => {
             PixelFormat::GrayF32Le
         }
         (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, 1, 16) => PixelFormat::Gray16Le,
         (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, 1, _) if deep_jpeg => PixelFormat::Gray16Le,
-        (PHOTO_RGB, 3, 16 | 32 | 64) if is_float => PixelFormat::RgbF32Le,
+        (PHOTO_RGB, n, 16 | 32 | 64) if is_float && n >= 3 => {
+            let alpha = extra.iter().take(n as usize - 3).any(|&k| {
+                k == EXTRA_SAMPLE_ASSOCIATED_ALPHA || k == EXTRA_SAMPLE_UNASSOCIATED_ALPHA
+            });
+            if alpha {
+                PixelFormat::RgbaF32Le
+            } else {
+                PixelFormat::RgbF32Le
+            }
+        }
         (PHOTO_RGB, 3, 8) => PixelFormat::Rgb24,
         (PHOTO_RGB, 3, 16) => PixelFormat::Rgb48Le,
         (PHOTO_RGB | PHOTO_YCBCR, 3, _) if deep_jpeg => PixelFormat::Rgb48Le,
         (PHOTO_RGB, 4, 8) if extra == [EXTRA_SAMPLE_UNASSOCIATED_ALPHA] => PixelFormat::Rgba,
-        (PHOTO_RGB, n, 8) if n >= 4 => PixelFormat::Rgb24,
+        (PHOTO_RGB, n, 8) if n >= 4 => {
+            crate::generic::classify(photometric, spp, 8, SAMPLE_FORMAT_UINT, &extra)
+                .map(|g| g.out)
+                .unwrap_or(PixelFormat::Rgb24)
+        }
         (PHOTO_PALETTE, 1, 4 | 8) => PixelFormat::Pal8,
         (PHOTO_CMYK, 4, 8) => PixelFormat::Cmyk,
         (PHOTO_YCBCR, 3, 8) => PixelFormat::Rgb24,
-        (PHOTO_CIELAB, 3, 8) => PixelFormat::Rgb24,
-        (PHOTO_CIELAB, 1, 8) => PixelFormat::Gray8,
+        (PHOTO_CIELAB | PHOTO_ICCLAB, 3, 8) => PixelFormat::Rgb24,
+        (PHOTO_CIELAB | PHOTO_ICCLAB, 1, 8) => PixelFormat::Gray8,
+        (PHOTO_CIELAB | PHOTO_ICCLAB, 3, 16) => PixelFormat::Rgb48Le,
+        (PHOTO_CIELAB | PHOTO_ICCLAB, 1, 16) => PixelFormat::Gray16Le,
         (p, s, b) => {
             return Err(Error::invalid(format!(
                 "TIFF: photometric={p} samples_per_pixel={s} bits_per_sample={b} not supported"
@@ -461,6 +501,22 @@ impl<'i> PreparedPage<'i> {
             },
             PixelFormat::RgbF32Le => EncodePixelFormat::RgbF32 {
                 pixels: &self.floats,
+            },
+            PixelFormat::Ya8 => EncodePixelFormat::GrayAlpha8 {
+                pixels,
+                kind: ExtraSampleKind::UnassociatedAlpha,
+            },
+            PixelFormat::Ya16Le => EncodePixelFormat::GrayAlpha16 {
+                pixels,
+                kind: ExtraSampleKind::UnassociatedAlpha,
+            },
+            PixelFormat::Rgba64Le => EncodePixelFormat::Rgba64 {
+                pixels,
+                kind: ExtraSampleKind::UnassociatedAlpha,
+            },
+            PixelFormat::RgbaF32Le => EncodePixelFormat::RgbaF32 {
+                pixels: &self.floats,
+                kind: ExtraSampleKind::UnassociatedAlpha,
             },
         };
         let (exif_entries, gps_entries) = aux;

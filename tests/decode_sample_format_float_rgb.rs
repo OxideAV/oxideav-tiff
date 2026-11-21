@@ -174,21 +174,6 @@ fn f64_strip(vals: &[f64]) -> Vec<u8> {
     s
 }
 
-/// Assert `decode_page` returned an error whose Display includes the
-/// given substring.
-fn expect_err_containing(bytes: &[u8], needle: &str) {
-    match decode_page(bytes) {
-        Ok(_) => panic!("expected an error containing {needle:?}, got Ok(..)"),
-        Err(e) => {
-            let msg = format!("{e}");
-            assert!(
-                msg.contains(needle),
-                "expected error to contain {needle:?}, got: {msg}"
-            );
-        }
-    }
-}
-
 #[test]
 fn float32_rgb_native_samples() {
     // Two pixels: (0.0, 0.5, 1.0) and (0.25, 0.75, 1.0) decode as
@@ -268,11 +253,20 @@ fn float64_rgb_double_precision_narrowed() {
 }
 
 #[test]
-fn float_rgb_predictor_rejected() {
-    // Predictor = 2 (§14 horizontal differencing) is integer-only; a
-    // float RGB image declaring it must be rejected, not mis-decoded.
-    let strip = f32_strip(&[0.0, 0.5, 1.0]);
+fn float_rgb_with_horizontal_differencing_decodes() {
+    // Predictor = 2 over float RGB: differencing of the 32-bit words
+    // with an offset of SamplesPerPixel (TIFF 6.0 §14). Two pixels; the
+    // second stores each word minus the same component of the first.
+    let first = [0.0f32, 0.5, 1.0];
+    let second = [0.25f32, 0.5, 2.0];
+    let mut strip = f32_strip(&first);
+    for (a, b) in first.iter().zip(&second) {
+        strip.extend_from_slice(&b.to_bits().wrapping_sub(a.to_bits()).to_le_bytes());
+    }
     let extra = [entry_short(317, 2)]; // Predictor = 2
-    let bytes = build_float_rgb_row(1, 32, &strip, &extra);
-    expect_err_containing(&bytes, "predictor");
+    let bytes = build_float_rgb_row(2, 32, &strip, &extra);
+    let d = decode_page(&bytes).expect("float RGB + Predictor=2 must decode");
+    let mut want = f32_strip(&first);
+    want.extend_from_slice(&f32_strip(&second));
+    assert_eq!(d.image.planes[0].data, want);
 }

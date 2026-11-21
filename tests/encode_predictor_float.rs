@@ -79,14 +79,16 @@ fn find_tag(tiff: &[u8], tag: u16) -> Option<(u16, u32, u32)> {
 
 /// Reverse the float predictor over one strip: inclusive prefix sum, then
 /// scatter the significance-ordered planes back to little-endian sample
-/// bytes. `width` is samples per row, `rows` the scan-lines.
-fn reverse_float_predictor(buf: &mut [u8], width: usize, rows: usize, bytes: usize) {
+/// bytes. `width` is samples per row, `rows` the scan-lines, `comps`
+/// the differencing offset (TIFF 6.0 §14: `SamplesPerPixel` for chunky
+/// data).
+fn reverse_float_predictor(buf: &mut [u8], width: usize, comps: usize, rows: usize, bytes: usize) {
     let row_len = width * bytes;
     let mut plane = vec![0u8; row_len];
     for r in 0..rows {
         let row = &mut buf[r * row_len..r * row_len + row_len];
-        for i in 1..row_len {
-            row[i] = row[i].wrapping_add(row[i - 1]);
+        for i in comps..row_len {
+            row[i] = row[i].wrapping_add(row[i - comps]);
         }
         for p in 0..bytes {
             // Little-endian: significance rank p -> in-file byte bytes-1-p.
@@ -99,13 +101,15 @@ fn reverse_float_predictor(buf: &mut [u8], width: usize, rows: usize, bytes: usi
     }
 }
 
-/// Pull the single uncompressed strip bytes from a classic-II TIFF.
-fn single_strip(tiff: &[u8]) -> Vec<u8> {
+/// Pull the single LZW strip of a classic-II TIFF and decompress it to
+/// `len` bytes (a predictor is only written next to a compressor).
+fn single_strip(tiff: &[u8], len: usize) -> Vec<u8> {
     let (_, soc, so) = find_tag(tiff, 273).expect("StripOffsets");
     assert_eq!(soc, 1, "test fixtures use a single strip");
     let (_, sbc_c, sbc) = find_tag(tiff, 279).expect("StripByteCounts");
     assert_eq!(sbc_c, 1);
-    tiff[so as usize..so as usize + sbc as usize].to_vec()
+    oxideav_tiff::compress::unpack_lzw(&tiff[so as usize..so as usize + sbc as usize], len)
+        .expect("strip inflates")
 }
 
 // ---------------------------------------------------------------------------
@@ -182,10 +186,19 @@ fn grayf32_emits_sampleformat_and_predictor_tags() {
     assert_eq!(sf_val & 0xFFFF, 3, "SampleFormat = 3 (IEEE float)");
     assert!(find_tag(&t1, 317).is_none(), "no Predictor tag when off");
 
-    // With predictor: Predictor = 3.
+    // A predictor next to uncompressed data is not written.
+    let p_none = {
+        let mut encode_page = p1.clone();
+        encode_page.predictor = true;
+        encode_page
+    };
+    assert_eq!(encode_page(&p_none).unwrap(), t1);
+
+    // With predictor under LZW: Predictor = 3.
     let p2 = {
         let mut encode_page = p1.clone();
         encode_page.predictor = true;
+        encode_page.compression = TiffCompression::Lzw;
         encode_page
     };
     let t2 = encode_page(&p2).unwrap();
@@ -204,7 +217,7 @@ fn grayf32_raw_predictor_reverses_to_input() {
         w,
         h,
         EncodePixelFormat::GrayF32 { pixels: &fpix },
-        TiffCompression::None,
+        TiffCompression::Lzw,
         true,
         false,
         None,
@@ -212,8 +225,8 @@ fn grayf32_raw_predictor_reverses_to_input() {
         PageExtras::default(),
     );
     let tiff = encode_page(&page).unwrap();
-    let mut strip = single_strip(&tiff);
-    reverse_float_predictor(&mut strip, w as usize, h as usize, 4);
+    let mut strip = single_strip(&tiff, input_bytes.len());
+    reverse_float_predictor(&mut strip, w as usize, 1, h as usize, 4);
     assert_eq!(
         strip, input_bytes,
         "reversing the encoder's float predictor must recover the input sample bytes"
@@ -334,7 +347,7 @@ fn rgbf32_raw_predictor_reverses_to_input() {
         w,
         h,
         EncodePixelFormat::RgbF32 { pixels: &fpix },
-        TiffCompression::None,
+        TiffCompression::Lzw,
         true,
         false,
         None,
@@ -342,9 +355,10 @@ fn rgbf32_raw_predictor_reverses_to_input() {
         PageExtras::default(),
     );
     let tiff = encode_page(&page).unwrap();
-    let mut strip = single_strip(&tiff);
-    // Width in samples = image width * 3 components.
-    reverse_float_predictor(&mut strip, w as usize * 3, h as usize, 4);
+    let mut strip = single_strip(&tiff, input_bytes.len());
+    // Width in samples = image width * 3 components, differenced with
+    // an offset of 3 (SamplesPerPixel).
+    reverse_float_predictor(&mut strip, w as usize * 3, 3, h as usize, 4);
     assert_eq!(strip, input_bytes);
 }
 

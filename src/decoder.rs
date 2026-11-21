@@ -162,6 +162,14 @@ pub(crate) fn decode_page_entries(
     let metadata = extract_metadata(entries, bo);
     let layout = extract_format_info(entries, bo);
     image.color = resolve_color(entries, bo);
+    if matches!(layout.photometric, Some(PHOTO_CIELAB | PHOTO_ICCLAB)) {
+        // A CIELab page is rendered to display RGB: BT.709 primaries
+        // with the sRGB transfer curve (H.273 code points 1 / 13).
+        // §23: WhitePoint / PrimaryChromaticities "do not apply".
+        image.color = ColorInfo::tiff_default()
+            .with_primaries(1)
+            .with_transfer(13);
+    }
     image.metadata = Metadata {
         icc: metadata.icc_profile.clone(),
         exif: crate::exif::extract_exif_payload(input, header, entries),
@@ -530,7 +538,7 @@ pub(crate) fn decode_ifd(
             }
             PHOTO_RGB | PHOTO_YCBCR => &[3],
             PHOTO_CMYK => &[4],
-            PHOTO_CIELAB => &[3, 1],
+            PHOTO_CIELAB | PHOTO_ICCLAB => &[3, 1],
             // Unknown photometric: leave the rejection to the
             // photometric dispatch below, which names the value.
             _ => &[],
@@ -588,12 +596,36 @@ pub(crate) fn decode_ifd(
     // below applies its own per-photometric depth gates.
     let deep_jpeg_ok = matches!(compression, COMPRESSION_JPEG_OLD | COMPRESSION_JPEG_NEW)
         && (9..=16).contains(&bps_first);
+    // Every other integer layout (any width up to 32 bits, signed
+    // samples, extra samples next to any colour model) is read by the
+    // general sample path.
+    let jpeg = matches!(compression, COMPRESSION_JPEG_OLD | COMPRESSION_JPEG_NEW);
+    let generic_layout = if jpeg
+        || is_fast_layout(
+            photometric,
+            samples_per_pixel,
+            bps_first,
+            sample_format,
+            &extra_samples,
+            compression,
+        ) {
+        None
+    } else {
+        crate::generic::classify(
+            photometric,
+            samples_per_pixel,
+            bps_first,
+            sample_format,
+            &extra_samples,
+        )
+    };
     if bps_first != 1
         && bps_first != 4
         && bps_first != 8
         && bps_first != 16
         && !float_width_ok
         && !deep_jpeg_ok
+        && generic_layout.is_none()
     {
         return Err(Error::invalid(format!(
             "TIFF: BitsPerSample={bps_first} not supported"
@@ -654,26 +686,39 @@ pub(crate) fn decode_ifd(
         .map(|e| e.as_u32(bo))
         .transpose()?
         .unwrap_or(1) as u16;
-    let fill_order = match fill_order_raw {
-        1 => FillOrder::MsbFirst,
+    // FillOrder is "the logical order of bits within a byte": under
+    // value 2 every byte of the stored strip / tile data is
+    // bit-reversed ("it is easy and inexpensive for writers to reverse
+    // bit order by using a 256-byte lookup table"). The 1-bit
+    // uncompressed and CCITT cases — the only ones page 32 recommends —
+    // are handled where the bits are consumed; for every other
+    // byte-stream layout the segments are read from a bit-reversed copy
+    // of the file, which is what other writers of such pages store
+    // (compressed or not, at any sample width).
+    let reversed_input: Vec<u8>;
+    let (input, fill_order) = match fill_order_raw {
+        1 => (input, FillOrder::MsbFirst),
         2 => {
-            // Spec page 32: FillOrder=2 is only valid for BPS=1
-            // (uncompressed or CCITT-compressed). Reject other
-            // combinations rather than silently mis-decode.
-            let allowed_compression = matches!(
-                compression,
-                COMPRESSION_NONE
-                    | COMPRESSION_CCITT_HUFFMAN
-                    | COMPRESSION_CCITT_T4
-                    | COMPRESSION_CCITT_T6
-            );
-            if bps_first != 1 || !allowed_compression {
-                return Err(Error::invalid(format!(
-                    "TIFF: FillOrder=2 only valid for BitsPerSample=1 uncompressed/CCITT \
-                     (got bps={bps_first}, compression={compression})"
+            let bilevel_native = bps_first == 1
+                && matches!(
+                    compression,
+                    COMPRESSION_NONE
+                        | COMPRESSION_CCITT_HUFFMAN
+                        | COMPRESSION_CCITT_T4
+                        | COMPRESSION_CCITT_T6
+                );
+            let jpeg = matches!(compression, COMPRESSION_JPEG_OLD | COMPRESSION_JPEG_NEW);
+            if bilevel_native {
+                (input, FillOrder::LsbFirst)
+            } else if jpeg || compression == COMPRESSION_WEBP {
+                return Err(Error::Unsupported(format!(
+                    "TIFF: FillOrder=2 with Compression={compression} is not supported"
                 )));
+            } else {
+                opts.check_bytes(input.len() as u64, "FillOrder=2 working copy")?;
+                reversed_input = input.iter().map(|b| b.reverse_bits()).collect();
+                (reversed_input.as_slice(), FillOrder::MsbFirst)
             }
-            FillOrder::LsbFirst
         }
         n => {
             return Err(Error::invalid(format!(
@@ -817,6 +862,54 @@ pub(crate) fn decode_ifd(
         }
     }
 
+    if let Some(layout) = generic_layout {
+        // The sample matrix holds one `u32` per sample.
+        opts.check_bytes(
+            (width as u64)
+                .saturating_mul(height as u64)
+                .saturating_mul(samples_per_pixel as u64)
+                .saturating_mul(4),
+            &format!("{width}x{height} x {samples_per_pixel} samples (sample matrix)"),
+        )?;
+        let palette = if photometric == PHOTO_PALETTE {
+            let cm = find(entries, TAG_COLOR_MAP)
+                .ok_or_else(|| Error::invalid("TIFF: palette image missing ColorMap"))?
+                .as_u32_vec(bo)?;
+            Some(crate::image::Palette::from_rgb_triples(&parse_colormap(
+                &cm, bps_first,
+            )?))
+        } else {
+            None
+        };
+        let vals = crate::generic::read_samples(
+            input,
+            entries,
+            bo,
+            width,
+            height,
+            samples_per_pixel,
+            bps_first,
+            compression,
+            predictor,
+            planar == PLANAR_SEPARATE,
+            // Only reachable for 1-bit uncompressed data (the FillOrder
+            // gate above refuses every other combination).
+            fill_order == FillOrder::LsbFirst,
+        )?;
+        let image = crate::generic::build_image(
+            &vals,
+            width,
+            height,
+            samples_per_pixel,
+            crate::generic::matrix_bits(bps_first),
+            photometric,
+            sample_format == SAMPLE_FORMAT_SINT,
+            layout,
+            palette,
+        )?;
+        return Ok(apply_orientation(image, orientation));
+    }
+
     let pixel_buf = if find(entries, TAG_TILE_WIDTH).is_some() {
         if planar == PLANAR_SEPARATE {
             decode_tiles_planar(
@@ -954,14 +1047,13 @@ pub(crate) fn decode_ifd(
     // gracefully" reader rule rather than mis-rendered.
     if sample_format == SAMPLE_FORMAT_IEEE_FP {
         let grayscale = matches!(photometric, PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO);
-        let rgb = photometric == PHOTO_RGB && samples_per_pixel == 3;
+        let rgb = photometric == PHOTO_RGB && samples_per_pixel >= 3;
         let width_ok = matches!(bps_first, 16 | 32 | 64);
-        let shape_ok = (grayscale && samples_per_pixel == 1) || rgb;
+        let shape_ok = grayscale || rgb;
         if !shape_ok || !width_ok {
             return Err(Error::Unsupported(format!(
                 "TIFF: SampleFormat=3 (IEEE floating-point) supported only for \
-                 16-/32-/64-bit grayscale (photometric 0/1, SamplesPerPixel=1) or \
-                 RGB (photometric 2, SamplesPerPixel=3); got \
+                 16-/32-/64-bit grayscale (photometric 0/1) or RGB (photometric 2); got \
                  photometric={photometric} samples_per_pixel={samples_per_pixel} \
                  bits_per_sample={bps_first}"
             )));
@@ -975,13 +1067,6 @@ pub(crate) fn decode_ifd(
         // undefined over IEEE floating-point samples — only the
         // floating-point predictor (value 3) applies, and it was already
         // validated above (SampleFormat / width) before strip decode.
-        if predictor == PREDICTOR_HORIZONTAL {
-            return Err(Error::Unsupported(format!(
-                "TIFF: SampleFormat=3 (IEEE floating-point) with Predictor={predictor} \
-                 not supported (§14 horizontal differencing is integer-only; \
-                 float images use Predictor=3)"
-            )));
-        }
     }
 
     // ---- Convert into a standard TiffPixelFormat ----
@@ -1040,15 +1125,16 @@ pub(crate) fn decode_ifd(
         // native `GrayF32Le` plane (samples as stored, widened /
         // narrowed to f32; WhiteIsZero re-expressed as `1 − x`); tone
         // scaling happens only in `to_rgb8` / `to_rgba8`.
-        (PHOTO_BLACK_IS_ZERO, 1, bpsw @ (16 | 32 | 64))
-        | (PHOTO_WHITE_IS_ZERO, 1, bpsw @ (16 | 32 | 64))
+        (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, n, bpsw @ (16 | 32 | 64))
             if sample_format == SAMPLE_FORMAT_IEEE_FP =>
         {
+            // Extra samples next to float grayscale are dropped (there
+            // is no float gray + alpha layout).
             let inv = photometric == PHOTO_WHITE_IS_ZERO;
-            (
-                build_f32_plane(&pixel_buf, width, height, 1, bo, bpsw, inv)?,
-                TiffPixelFormat::GrayF32Le,
-            )
+            let img = build_float(
+                &pixel_buf, width, height, n as usize, 1, None, bo, bpsw, inv,
+            )?;
+            (img, TiffPixelFormat::GrayF32Le)
         }
         (PHOTO_BLACK_IS_ZERO, 1, 16) | (PHOTO_WHITE_IS_ZERO, 1, 16) => {
             let inv = photometric == PHOTO_WHITE_IS_ZERO;
@@ -1059,15 +1145,27 @@ pub(crate) fn decode_ifd(
             )
         }
         // SampleFormat = 3 (IEEE floating-point) RGB: 16-bit half,
-        // 32-bit single, 64-bit double, three interleaved colour
-        // channels per pixel. These guarded arms take precedence over
-        // the integer 16-bit RGB arm below, so the integer path only
-        // runs when the field is not float. Output is the native
-        // `RgbF32Le` plane (see the grayscale float arm).
-        (PHOTO_RGB, 3, bpsw @ (16 | 32 | 64)) if sample_format == SAMPLE_FORMAT_IEEE_FP => (
-            build_f32_plane(&pixel_buf, width, height, 3, bo, bpsw, false)?,
-            TiffPixelFormat::RgbF32Le,
-        ),
+        // 32-bit single, 64-bit double. An alpha extra sample
+        // (§ExtraSamples 1 / 2) is kept as the native `RgbaF32Le` plane
+        // (associated alpha divided out of the colour, §18); any other
+        // extra is dropped. These guarded arms take precedence over the
+        // integer RGB arms below.
+        (PHOTO_RGB, n, bpsw @ (16 | 32 | 64))
+            if n >= 3 && sample_format == SAMPLE_FORMAT_IEEE_FP =>
+        {
+            let alpha = extra_samples
+                .iter()
+                .take(n as usize - 3)
+                .position(|&k| {
+                    k == EXTRA_SAMPLE_ASSOCIATED_ALPHA || k == EXTRA_SAMPLE_UNASSOCIATED_ALPHA
+                })
+                .map(|i| (3 + i, extra_samples[i] == EXTRA_SAMPLE_ASSOCIATED_ALPHA));
+            let img = build_float(
+                &pixel_buf, width, height, n as usize, 3, alpha, bo, bpsw, false,
+            )?;
+            let pf = img.format;
+            (img, pf)
+        }
         (PHOTO_RGB, 3, 8) => (
             build_rgb24(&pixel_buf, width, height),
             TiffPixelFormat::Rgb24,
@@ -1085,21 +1183,36 @@ pub(crate) fn decode_ifd(
             (build_rgba(&pixel_buf, width, height), TiffPixelFormat::Rgba)
         }
         (PHOTO_RGB, n, 8) if n >= 4 => {
-            // §ExtraSamples (pages 31-32): "By convention, extra
-            // components that are present must be stored as the
-            // 'last components' in each pixel" — the leading three
-            // components are the R, G, B triple and the trailing
-            // n − 3 extras (unspecified data, or more than one extra)
-            // are dropped. For an associated-alpha (tag 338 = 1) RGBA
-            // page the leading triple is the §18 pre-multiplied color,
-            // which §18 page 78 states is the composite-over-black
-            // value a display reader shows directly — so the same
-            // verbatim copy renders it (there is no straight-alpha
-            // layout to hand the pre-multiplied samples back in).
-            (
-                build_rgb_from_n_chunky_8bit(&pixel_buf, width, height, n as usize),
-                TiffPixelFormat::Rgb24,
+            // Only reached for the pixel-codec segments (WebP) that the
+            // general sample path does not read: the chunky bytes are
+            // settled by the same extra-sample rules (alpha kept,
+            // associated alpha divided out, other extras dropped).
+            let layout = crate::generic::classify(
+                photometric,
+                samples_per_pixel,
+                8,
+                SAMPLE_FORMAT_UINT,
+                &extra_samples,
             )
+            .ok_or_else(|| Error::invalid("TIFF: RGB page with unusable extra samples"))?;
+            let need = width as usize * height as usize * n as usize;
+            if pixel_buf.len() < need {
+                return Err(Error::invalid("TIFF: sample data shorter than image"));
+            }
+            let vals: Vec<u32> = pixel_buf[..need].iter().map(|&b| b as u32).collect();
+            let img = crate::generic::build_image(
+                &vals,
+                width,
+                height,
+                samples_per_pixel,
+                8,
+                photometric,
+                false,
+                layout,
+                None,
+            )?;
+            let pf = img.format;
+            (img, pf)
         }
         (PHOTO_PALETTE, 1, b @ (4 | 8)) => {
             let cm = find(entries, TAG_COLOR_MAP)
@@ -1146,40 +1259,41 @@ pub(crate) fn decode_ifd(
                 (sh, sv)
             };
             (
-                build_rgb24_from_ycbcr(&pixel_buf, width, height, sh, sv)?,
+                build_rgb24_from_ycbcr(
+                    &pixel_buf,
+                    width,
+                    height,
+                    sh,
+                    sv,
+                    &YccTransform::from_entries(entries, bo),
+                )?,
                 TiffPixelFormat::Rgb24,
             )
         }
-        // PhotometricInterpretation = 8 (1976 CIE L*a*b*), TIFF 6.0
-        // §23 "CIE L*a*b* Images" (page 110). Three 8-bit chunky
-        // samples per pixel: L* in 0..255 mapping linearly to the
-        // 0..100 perceptual-lightness scale, a* and b* as
-        // two's-complement signed 8-bit values in -128..127
-        // representing the red/green and yellow/blue chrominance
-        // channels (§23: "L* range is from 0 ... to 100 ... The
-        // a* and b* ranges will be represented as signed 8 bit
-        // values having the range -127 to +127"). The decoder
-        // colorimetrically converts via Lab -> XYZ (D65 reference
-        // white) -> linear NTSC RGB (§23's stated forward matrix,
-        // inverted analytically) -> sRGB-encoded 8-bit, matching
-        // the "(perfect reflecting diffuser ... D65 illumination)"
-        // reference white the spec mandates. This is a display-
-        // ready render path consistent with how the existing
-        // YCbCr and CMYK photometrics collapse to Rgb24.
-        (PHOTO_CIELAB, 3, 8) => (
-            build_rgb24_from_cielab(&pixel_buf, width, height),
-            TiffPixelFormat::Rgb24,
-        ),
-        // §23: "SamplesPerPixel - ExtraSamples: 3 for L*a*b*, 1
-        // implies L* only, for monochrome data". An L*-only CIELab
-        // image is a perceptual grayscale: the stored 0..255 byte
-        // maps linearly to L* 0..100, which we re-encode as
-        // gamma-corrected sRGB-luminance so the 8-bit output is
-        // ready for display.
-        (PHOTO_CIELAB, 1, 8) => (
-            build_gray8_from_cielab_l(&pixel_buf, width, height),
-            TiffPixelFormat::Gray8,
-        ),
+        // CIELab (PhotometricInterpretation = 8, TIFF 6.0 §23) and
+        // ICCLab (= 9), 8 or 16 bits, three samples or L* only — the
+        // sample encodings are in the Lab update of the *Adobe
+        // Photoshop TIFF Technical Notes*. Rendered to display RGB /
+        // gray of the same depth (see `build_from_lab`).
+        (PHOTO_CIELAB | PHOTO_ICCLAB, ch @ (3 | 1), depth @ (8 | 16)) => {
+            let encoding = if photometric == PHOTO_ICCLAB {
+                LabEncoding::Icc
+            } else {
+                LabEncoding::Cie
+            };
+            let img = build_from_lab(
+                &pixel_buf,
+                width,
+                height,
+                ch as usize,
+                depth,
+                bo,
+                encoding,
+                lab_white(entries, bo),
+            )?;
+            let pf = img.format;
+            (img, pf)
+        }
         (p, s, b) => {
             return Err(Error::invalid(format!(
                 "TIFF: photometric={p} samples_per_pixel={s} bits_per_sample={b} not supported"
@@ -1249,7 +1363,9 @@ fn apply_orientation(image: TiffImage, orientation: u16) -> TiffImage {
         }
     }
 
-    TiffImage::from_parts(
+    // The remap moves pixel cells only: the palette, colour signalling
+    // and metadata of the page stay as they were.
+    let mut out = TiffImage::from_parts(
         dw as u32,
         dh as u32,
         image.format,
@@ -1257,7 +1373,11 @@ fn apply_orientation(image: TiffImage, orientation: u16) -> TiffImage {
             stride: dstride,
             data,
         }],
-    )
+    );
+    out.palette = image.palette;
+    out.color = image.color;
+    out.metadata = image.metadata;
+    out
 }
 
 /// Detect the chroma-subsampled YCbCr (TIFF 6.0 §21,
@@ -1626,6 +1746,7 @@ fn decode_strips(
             undo_float_predictor(
                 &mut strip,
                 width as usize * samples_per_pixel as usize,
+                samples_per_pixel as usize,
                 rows_this_strip as usize,
                 bps_first as usize / 8,
                 row_bytes,
@@ -1806,6 +1927,7 @@ fn decode_tiles(
                 undo_float_predictor(
                     &mut tile,
                     tile_w as usize * samples_per_pixel as usize,
+                    samples_per_pixel as usize,
                     tile_h as usize,
                     bps_first as usize / 8,
                     tile_row_bytes,
@@ -2171,6 +2293,7 @@ fn decode_strips_planar(
                 undo_float_predictor(
                     &mut strip,
                     width as usize,
+                    1,
                     rows_this_strip as usize,
                     bps_first as usize / 8,
                     plane_row_bytes,
@@ -2539,6 +2662,7 @@ fn decode_tiles_planar(
                     undo_float_predictor(
                         &mut tile,
                         tile_w as usize,
+                        1,
                         tile_h as usize,
                         bps_first as usize / 8,
                         tile_row_bytes,
@@ -2630,6 +2754,43 @@ struct WebpParams {
     samples_per_pixel: u16,
 }
 
+/// Byte-stream decompression of one strip / tile (no CCITT / WebP
+/// geometry): the general sample path's entry point.
+pub(crate) fn decompress_bytes(raw: &[u8], expected: usize, compression: u16) -> Result<Vec<u8>> {
+    decompress_block(raw, expected, compression, None, None)
+}
+
+/// `true` for the layouts the whole-byte fast paths assemble; every
+/// other integer layout goes through [`crate::generic`].
+pub(crate) fn is_fast_layout(
+    photometric: u16,
+    spp: u16,
+    bps: u16,
+    sample_format: u16,
+    extras: &[u16],
+    compression: u16,
+) -> bool {
+    if sample_format == SAMPLE_FORMAT_IEEE_FP {
+        return true;
+    }
+    let signed = sample_format == SAMPLE_FORMAT_SINT;
+    match (photometric, spp, bps) {
+        (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, 1, 8 | 16) => true,
+        (PHOTO_BLACK_IS_ZERO | PHOTO_WHITE_IS_ZERO, 1, 1 | 4)
+        | (PHOTO_TRANSPARENCY_MASK, 1, 1)
+        | (PHOTO_PALETTE, 1, 4 | 8)
+        | (PHOTO_RGB, 3, 8 | 16)
+        | (PHOTO_CMYK, 4, 8)
+        | (PHOTO_YCBCR, 3, 8)
+        | (PHOTO_CIELAB | PHOTO_ICCLAB, 3 | 1, 8 | 16) => !signed,
+        (PHOTO_RGB, 4, 8) => {
+            !signed
+                && (compression == COMPRESSION_WEBP || extras == [EXTRA_SAMPLE_UNASSOCIATED_ALPHA])
+        }
+        _ => false,
+    }
+}
+
 fn decompress_block(
     raw: &[u8],
     expected: usize,
@@ -2641,7 +2802,10 @@ fn decompress_block(
         COMPRESSION_NONE => Ok(raw.to_vec()),
         COMPRESSION_PACKBITS => unpack_packbits(raw, expected),
         COMPRESSION_LZW => unpack_lzw(raw, expected),
-        COMPRESSION_DEFLATE_ADOBE => unpack_deflate(raw, expected),
+        // 32946 is the older code for the same scheme (the registry
+        // table in `docs/image/tiff/tiff-zstd-compression-50000.md` §1
+        // lists both as Deflate): one zlib stream per segment.
+        COMPRESSION_DEFLATE_ADOBE | COMPRESSION_DEFLATE_LEGACY => unpack_deflate(raw, expected),
         // Compression=50000 (Zstandard, de-facto registry extension —
         // trace doc `docs/image/tiff/tiff-zstd-compression-50000.md`).
         // Structurally identical to Deflate: one self-contained codec
@@ -2810,6 +2974,46 @@ fn apply_horizontal_predictor(
                 }
             }
         }
+        32 => {
+            // Modular 32-bit differencing over words in file byte order.
+            for r in 0..rows {
+                let row = &mut buf[r * row_bytes..r * row_bytes + width * samples * 4];
+                for x in samples..width * samples {
+                    let prev = bo.read_u32(&row[(x - samples) * 4..(x - samples) * 4 + 4]);
+                    let cur = bo.read_u32(&row[x * 4..x * 4 + 4]).wrapping_add(prev);
+                    row[x * 4..x * 4 + 4].copy_from_slice(&match bo {
+                        ByteOrder::Little => cur.to_le_bytes(),
+                        ByteOrder::Big => cur.to_be_bytes(),
+                    });
+                }
+            }
+        }
+        64 => {
+            for r in 0..rows {
+                let row = &mut buf[r * row_bytes..r * row_bytes + width * samples * 8];
+                for x in samples..width * samples {
+                    let prev = bo.read_u64(&row[(x - samples) * 8..(x - samples) * 8 + 8]);
+                    let cur = bo.read_u64(&row[x * 8..x * 8 + 8]).wrapping_add(prev);
+                    row[x * 8..x * 8 + 8].copy_from_slice(&match bo {
+                        ByteOrder::Little => cur.to_le_bytes(),
+                        ByteOrder::Big => cur.to_be_bytes(),
+                    });
+                }
+            }
+        }
+        1..=31 => {
+            // Any other width: §14 "expand each component", difference
+            // modulo 2^bps, repack.
+            let n = width * samples;
+            let len = crate::generic::row_len(n, bps as u32);
+            let mut vals = vec![0u64; n];
+            for r in 0..rows {
+                let row = &mut buf[r * row_bytes..r * row_bytes + len];
+                crate::generic::unpack_row(row, bps as u32, bo, &mut vals);
+                crate::generic::undo_differencing(&mut vals, samples, bps as u32);
+                crate::generic::pack_row(&vals, bps as u32, bo, row);
+            }
+        }
         _ => {
             return Err(Error::invalid(format!(
                 "TIFF: predictor at bits_per_sample={bps} unsupported"
@@ -2858,12 +3062,15 @@ fn apply_horizontal_predictor(
 ///
 /// `width` is the row length in *samples* (already `width × samples` for
 /// chunky multi-component rows, or the plane width for planar layout),
+/// `comps` the differencing offset (`SamplesPerPixel` for a chunky row,
+/// 1 for a plane),
 /// `bytes_per_sample` is BPS/8 (2, 4 or 8), `rows` the scan-lines in this
 /// strip/tile and `row_bytes` the padded stride. Trailing pad bytes past
 /// `width × bytes_per_sample` in each row are left untouched.
 fn undo_float_predictor(
     buf: &mut [u8],
     width: usize,
+    comps: usize,
     rows: usize,
     bytes_per_sample: usize,
     row_bytes: usize,
@@ -2883,9 +3090,13 @@ fn undo_float_predictor(
     for r in 0..rows {
         let row = &mut buf[r * row_bytes..r * row_bytes + row_len];
         // Stage 1 reversed: inclusive prefix sum (undo the horizontal
-        // byte differencing across the whole reordered row).
-        for i in 1..row_len {
-            row[i] = row[i].wrapping_add(row[i - 1]);
+        // byte differencing across the whole reordered row). The
+        // differencing offset is the component count of the row — the
+        // TIFF 6.0 §14 rule for PlanarConfiguration = 1 ("we will do our
+        // horizontal differences with an offset of SamplesPerPixel"),
+        // 1 for a single-component row.
+        for i in comps..row_len {
+            row[i] = row[i].wrapping_add(row[i - comps]);
         }
         // Stage 2 reversed: scatter the significance-ordered plane bytes
         // back into each sample's bytes. Plane `p` carries significance
@@ -3022,67 +3233,76 @@ pub(crate) fn half_to_f32(bits: u16) -> f32 {
 }
 
 /// Assemble the native `f32` little-endian plane of a `SampleFormat = 3`
-/// image: `channels` interleaved IEEE samples per pixel at `bps` bits
-/// (16-bit half, 32-bit single, 64-bit double), each converted to `f32`
-/// as stored (a double is narrowed). `invert` (WhiteIsZero) re-expresses
-/// every sample as `1 − x` so the plane is black-is-zero over the
-/// nominal `[0, 1]` range. No display scaling happens here — that is
-/// [`TiffImage::to_rgb8`]'s job.
-fn build_f32_plane(
+/// page: `spp` interleaved IEEE samples per pixel at `bps` bits (16-bit
+/// half, 32-bit single, 64-bit double), each converted to `f32` as
+/// stored (a double is narrowed). The first `colour` samples (1 or 3)
+/// are kept, plus the alpha sample when `alpha = Some((index,
+/// associated))` and the colour is RGB — associated alpha is divided
+/// out of the colour (TIFF 6.0 §18; zero alpha gives zero colour).
+/// `invert` (WhiteIsZero) re-expresses every colour sample as `1 − x`.
+/// No display scaling happens here — that is [`TiffImage::to_rgb8`]'s
+/// job.
+#[allow(clippy::too_many_arguments)]
+fn build_float(
     src: &[u8],
     w: u32,
     h: u32,
-    channels: usize,
+    spp: usize,
+    colour: usize,
+    alpha: Option<(usize, bool)>,
     bo: ByteOrder,
     bps: u16,
     invert: bool,
 ) -> Result<TiffImage> {
-    let n = (w as usize) * (h as usize) * channels;
+    let pixels = (w as usize) * (h as usize);
     let bytes_per = (bps / 8) as usize;
-    if src.len() < n * bytes_per {
+    if src.len() < pixels * spp * bytes_per {
         return Err(Error::invalid("TIFF: float strip data shorter than image"));
     }
-    let stride = w as usize * channels * 4;
-    let mut data = Vec::with_capacity(stride * h as usize);
-    for i in 0..n {
-        let v = match bps {
-            16 => half_to_f32(bo.read_u16(&src[i * 2..i * 2 + 2])),
-            32 => bo.read_f32(&src[i * 4..i * 4 + 4]),
-            _ => bo.read_f64(&src[i * 8..i * 8 + 8]) as f32,
-        };
-        let v = if invert { 1.0 - v } else { v };
-        data.extend_from_slice(&v.to_le_bytes());
-    }
-    let format = if channels == 1 {
-        TiffPixelFormat::GrayF32Le
-    } else {
-        TiffPixelFormat::RgbF32Le
+    let alpha = alpha.filter(|_| colour == 3);
+    let out_ch = colour + alpha.is_some() as usize;
+    let mut data = Vec::with_capacity(pixels * out_ch * 4);
+    let read = |px: &[u8], c: usize| -> f32 {
+        let at = c * bytes_per;
+        match bps {
+            16 => half_to_f32(bo.read_u16(&px[at..at + 2])),
+            32 => bo.read_f32(&px[at..at + 4]),
+            _ => bo.read_f64(&px[at..at + 8]) as f32,
+        }
     };
+    for px in src.chunks_exact(spp * bytes_per).take(pixels) {
+        let a = alpha.map(|(i, assoc)| (read(px, i), assoc));
+        for c in 0..colour {
+            let mut v = read(px, c);
+            if let Some((a, true)) = a {
+                v = if a > 0.0 { v / a } else { 0.0 };
+            }
+            if invert {
+                v = 1.0 - v;
+            }
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        if let Some((a, _)) = a {
+            data.extend_from_slice(&a.to_le_bytes());
+        }
+    }
+    let format = match out_ch {
+        1 => TiffPixelFormat::GrayF32Le,
+        3 => TiffPixelFormat::RgbF32Le,
+        _ => TiffPixelFormat::RgbaF32Le,
+    };
+    let stride = w as usize * out_ch * 4;
     Ok(TiffImage::from_parts(
         w,
         h,
         format,
-        vec![Plane::new(stride, data)],
+        vec![Plane { stride, data }],
     ))
 }
 
 fn build_rgb24(src: &[u8], w: u32, h: u32) -> TiffImage {
     let stride = w as usize * 3;
     let data = src[..stride * h as usize].to_vec();
-    TiffImage::from_parts(w, h, TiffPixelFormat::Rgb24, vec![Plane { stride, data }])
-}
-
-fn build_rgb_from_n_chunky_8bit(src: &[u8], w: u32, h: u32, n: usize) -> TiffImage {
-    let stride = w as usize * 3;
-    let mut data = Vec::with_capacity(stride * h as usize);
-    for y in 0..h as usize {
-        let row = &src[y * w as usize * n..(y + 1) * w as usize * n];
-        for x in 0..w as usize {
-            data.push(row[x * n]);
-            data.push(row[x * n + 1]);
-            data.push(row[x * n + 2]);
-        }
-    }
     TiffImage::from_parts(w, h, TiffPixelFormat::Rgb24, vec![Plane { stride, data }])
 }
 
@@ -3179,13 +3399,20 @@ fn build_cmyk(src: &[u8], w: u32, h: u32) -> TiffImage {
 /// "data unit" ordering: each block is (sh*sv) Y samples followed
 /// by 1 Cb and 1 Cr sample. We re-tile that into per-pixel YCbCr
 /// then apply the matrix.
-fn build_rgb24_from_ycbcr(src: &[u8], w: u32, h: u32, sh: u16, sv: u16) -> Result<TiffImage> {
+fn build_rgb24_from_ycbcr(
+    src: &[u8],
+    w: u32,
+    h: u32,
+    sh: u16,
+    sv: u16,
+    ycc: &YccTransform,
+) -> Result<TiffImage> {
     if sh == 0 || sv == 0 {
         return Err(Error::invalid("TIFF: YCbCrSubSampling must be > 0"));
     }
     if !matches!(
         (sh, sv),
-        (1, 1) | (2, 1) | (2, 2) | (1, 2) | (4, 1) | (4, 2)
+        (1, 1) | (2, 1) | (2, 2) | (1, 2) | (4, 1) | (4, 2) | (4, 4)
     ) {
         return Err(Error::invalid(format!(
             "TIFF: YCbCrSubSampling=({sh},{sv}) not supported"
@@ -3218,7 +3445,7 @@ fn build_rgb24_from_ycbcr(src: &[u8], w: u32, h: u32, sh: u16, sv: u16) -> Resul
                     if px >= w as usize || py >= h as usize {
                         continue;
                     }
-                    let (r, g, b) = ycbcr_to_rgb(y_val, cb, cr);
+                    let (r, g, b) = ycc.to_rgb(y_val, cb, cr);
                     let dst = (py * (w as usize) + px) * 3;
                     data[dst] = r;
                     data[dst + 1] = g;
@@ -3236,6 +3463,72 @@ fn build_rgb24_from_ycbcr(src: &[u8], w: u32, h: u32, sh: u16, sv: u16) -> Resul
             data,
         }],
     ))
+}
+
+/// The YCbCr → RGB transform of a page: `YCbCrCoefficients` (tag 529,
+/// TIFF 6.0 §21) and `ReferenceBlackWhite` (tag 532, §20).
+///
+/// §20: `FullRangeValue = (code − ReferenceBlack) × CodingRange /
+/// (ReferenceWhite − ReferenceBlack)` with `CodingRange = 255` for Y
+/// and `127` for Cb / Cr; §21: `R = Cr × (2 − 2·LumaRed) + Y`,
+/// `B = Cb × (2 − 2·LumaBlue) + Y`, `G = (Y − LumaBlue·B −
+/// LumaRed·R) / LumaGreen`.
+pub(crate) struct YccTransform {
+    /// `(ReferenceBlack, scale)` for Y, Cb, Cr.
+    range: [(f32, f32); 3],
+    luma: [f32; 3],
+    /// Both fields at their defaults (CCIR 601-1 coefficients, no
+    /// headroom / footroom): the integer kernel applies.
+    default: bool,
+}
+
+impl YccTransform {
+    pub(crate) fn from_entries(entries: &[Entry], bo: ByteOrder) -> Self {
+        let rationals = |tag: u16, n: usize| -> Option<Vec<f64>> {
+            find(entries, tag)
+                .and_then(|e| e.as_f64_vec(bo).ok())
+                .filter(|v| v.len() >= n && v.iter().all(|x| x.is_finite()))
+        };
+        let luma = rationals(TAG_YCBCR_COEFFICIENTS, 3)
+            .filter(|v| v[1] > 0.0 && v[0] < 1.0 && v[2] < 1.0)
+            .map(|v| [v[0], v[1], v[2]])
+            .unwrap_or([0.299, 0.587, 0.114]);
+        // Default: "no headroom/footroom" [0, 255, 128, 255, 128, 255].
+        let rbw = rationals(TAG_REFERENCE_BLACK_WHITE, 6)
+            .filter(|v| v[1] != v[0] && v[3] != v[2] && v[5] != v[4])
+            .map(|v| [v[0], v[1], v[2], v[3], v[4], v[5]])
+            .unwrap_or([0.0, 255.0, 128.0, 255.0, 128.0, 255.0]);
+        let default =
+            luma == [0.299, 0.587, 0.114] && rbw == [0.0, 255.0, 128.0, 255.0, 128.0, 255.0];
+        Self {
+            range: [
+                (rbw[0] as f32, (255.0 / (rbw[1] - rbw[0])) as f32),
+                (rbw[2] as f32, (127.0 / (rbw[3] - rbw[2])) as f32),
+                (rbw[4] as f32, (127.0 / (rbw[5] - rbw[4])) as f32),
+            ],
+            luma: [luma[0] as f32, luma[1] as f32, luma[2] as f32],
+            default,
+        }
+    }
+
+    #[inline]
+    fn to_rgb(&self, y: i32, cb: i32, cr: i32) -> (u8, u8, u8) {
+        if self.default {
+            return ycbcr_to_rgb(y, cb, cr);
+        }
+        let full = |code: i32, (black, scale): (f32, f32)| (code as f32 - black) * scale;
+        let (y, cb, cr) = (
+            full(y, self.range[0]),
+            full(cb, self.range[1]),
+            full(cr, self.range[2]),
+        );
+        let [lr, lg, lb] = self.luma;
+        let r = cr * (2.0 - 2.0 * lr) + y;
+        let b = cb * (2.0 - 2.0 * lb) + y;
+        let g = (y - lb * b - lr * r) / lg;
+        let q = |v: f32| (v + 0.5).clamp(0.0, 255.0) as u8;
+        (q(r), q(g), q(b))
+    }
 }
 
 /// ITU-R BT.601 inverse-matrix YCbCr → RGB with the canonical
@@ -3261,169 +3554,241 @@ fn clamp_u8(v: i32) -> u8 {
 // CIELab (PhotometricInterpretation = 8) decode, per TIFF 6.0 §23.
 // ---------------------------------------------------------------------------
 
-/// Decode a 3-sample CIELab strip/tile buffer into a packed Rgb24
-/// [`TiffImage`] suitable for display.
-///
-/// On-disk layout per §23 page 110: 8-bit chunky L*, a*, b* triples
-/// with L* unsigned 0..255 ↔ 0..100 and a*/b* two's-complement signed
-/// 8-bit values in -128..127. The "reference white for this data type
-/// is the perfect reflecting diffuser" with "D65 illumination", so we
-/// convert via the Lab → XYZ formulas given on page 110 and the
-/// inverse of §23's stated NTSC tristimulus matrix to recover linear
-/// RGB. A standard sRGB-style gamma curve then maps the linear values
-/// into a display-ready 8-bit byte. This is the same shape the
-/// existing CMYK and YCbCr photometric paths take (decode produces
-/// Rgb24 ready for compositing).
-fn build_rgb24_from_cielab(src: &[u8], w: u32, h: u32) -> TiffImage {
-    let stride = w as usize * 3;
-    let pixels = (w as usize) * (h as usize);
-    let mut data = Vec::with_capacity(stride * h as usize);
-    for triple in src.as_chunks::<3>().0.iter().take(pixels) {
-        // L* in 0..255 maps linearly to 0..100 per §23 ("Dividing
-        // the 0-100 range of L* into 256 levels").
-        let l_byte = triple[0] as f64;
-        // a*, b* per §23: "signed 8 bit values having the range
-        // -127 to +127". We accept the full two's-complement byte
-        // range (-128..127) — values at the extremes are within
-        // spec tolerance.
-        let a_signed = triple[1] as i8 as f64;
-        let b_signed = triple[2] as i8 as f64;
-        let l = l_byte * (100.0 / 255.0);
-        let (r, g, b) = cielab_to_rgb_byte(l, a_signed, b_signed);
-        data.push(r);
-        data.push(g);
-        data.push(b);
+/// How a CIELab-family page stores its samples.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LabEncoding {
+    /// `PhotometricInterpretation = 8` (TIFF 6.0 §23 + the *Adobe
+    /// Photoshop TIFF Technical Notes* Lab update): L\* unsigned over
+    /// the full sample range, a\* / b\* two's-complement, "encoded
+    /// exactly equal to the 1976 CIE a\* and b\* values" at 8 bits and
+    /// "as 256 times" them at 16.
+    Cie,
+    /// `PhotometricInterpretation = 9` (same note): L\* unsigned with
+    /// 100 at 255 / 65280, a\* / b\* unsigned "plus 128" at 8 bits,
+    /// "256 times the … values plus 32768" at 16.
+    Icc,
+}
+
+/// CIE XYZ (Y = 1) of a white with chromaticity `(x, y)`.
+fn white_xyz(x: f64, y: f64) -> [f64; 3] {
+    [x / y, 1.0, (1.0 - x - y) / y]
+}
+
+/// CIE D50, the default Lab white ("WhitePoint: default is CIE D50",
+/// Adobe Lab update) — nCIEXYZ per ICC.1:2010 §7.2.16.
+const D50_XYZ: [f64; 3] = [0.9642, 1.0, 0.8249];
+
+/// White of the display RGB the Lab planes are rendered to (D65,
+/// chromaticity 0.3127 / 0.3290).
+fn display_white() -> [f64; 3] {
+    white_xyz(0.3127, 0.3290)
+}
+
+/// The Lab reference white of a page: the `WhitePoint` field when it
+/// holds a usable chromaticity, else D50.
+fn lab_white(entries: &[Entry], bo: ByteOrder) -> [f64; 3] {
+    find(entries, TAG_WHITE_POINT)
+        .and_then(|e| e.as_f64_vec(bo).ok())
+        .filter(|v| v.len() >= 2 && v[0] > 0.0 && v[1] > 0.0 && v[0] + v[1] < 1.0)
+        .map(|v| white_xyz(v[0], v[1]))
+        .unwrap_or(D50_XYZ)
+}
+
+/// Lab → display-RGB converter for one reference white.
+struct LabToRgb {
+    white: [f64; 3],
+    /// XYZ under `white` → linear BT.709 RGB: the linear Bradford
+    /// adaptation to the display white (ICC.1:2010 Annex E.3) followed
+    /// by [`xyz_to_bt709`].
+    m: [[f64; 3]; 3],
+}
+
+impl LabToRgb {
+    fn new(white: [f64; 3]) -> Self {
+        // E.1: cone responses = M_BFD · XYZ.
+        const BFD: [[f64; 3]; 3] = [
+            [0.8951, 0.2664, -0.1614],
+            [-0.7502, 1.7135, 0.0367],
+            [0.0389, -0.0685, 1.0296],
+        ];
+        let mul = |m: &[[f64; 3]; 3], v: [f64; 3]| -> [f64; 3] {
+            std::array::from_fn(|r| m[r][0] * v[0] + m[r][1] * v[1] + m[r][2] * v[2])
+        };
+        let mm = |a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]| -> [[f64; 3]; 3] {
+            std::array::from_fn(|r| {
+                std::array::from_fn(|c| a[r][0] * b[0][c] + a[r][1] * b[1][c] + a[r][2] * b[2][c])
+            })
+        };
+        // E.2: M_adapt = M_BFD⁻¹ · diag(dst / src) · M_BFD.
+        let (src, dst) = (mul(&BFD, white), mul(&BFD, display_white()));
+        let mut scaled = BFD;
+        for (row, (d, sr)) in scaled.iter_mut().zip(dst.iter().zip(src)) {
+            for v in row.iter_mut() {
+                *v *= d / sr;
+            }
+        }
+        let adapt = mm(&invert3(&BFD), &scaled);
+        Self {
+            white,
+            m: mm(xyz_to_bt709(), &adapt),
+        }
     }
-    TiffImage::from_parts(w, h, TiffPixelFormat::Rgb24, vec![Plane { stride, data }])
-}
 
-/// Decode a 1-sample CIELab L*-only buffer into a Gray8 [`TiffImage`].
-///
-/// §23 page 110 ("Usage of other Fields"): "SamplesPerPixel -
-/// ExtraSamples: 3 for L*a*b*, 1 implies L* only, for monochrome
-/// data". The byte is the perceptual lightness on the 0..100 scale;
-/// we re-encode it as sRGB-luminance so the gray level matches what
-/// the 3-sample CIELab render produces for a chromatically-neutral
-/// pixel (a* = b* = 0).
-fn build_gray8_from_cielab_l(src: &[u8], w: u32, h: u32) -> TiffImage {
-    let stride = w as usize;
-    let pixels = (w as usize) * (h as usize);
-    let mut data = Vec::with_capacity(pixels);
-    for &byte in src.iter().take(pixels) {
-        let l = byte as f64 * (100.0 / 255.0);
-        // For a chromatically-neutral CIELab pixel (a* = b* = 0)
-        // the Lab → XYZ formula collapses to Y = f(L*) (X and Z
-        // are proportional with fx = fy = fz). Run the same
-        // lightness curve as the 3-sample path so a* = b* = 0
-        // CIELab pixels in either layout produce the same gray.
-        let y_lin = lab_l_to_y_linear(l);
-        data.push(linear_to_srgb_byte(y_lin));
+    /// One L\*a\*b\* triple to encoded display RGB in `[0, 1]`.
+    fn convert(&self, l_star: f64, a_star: f64, b_star: f64) -> [f64; 3] {
+        // §23 page 110, inverted: fy = (L* + 16) / 116,
+        // fx = a* / 500 + fy, fz = fy − b* / 200; each ratio is f³ above
+        // the 0.008856 threshold and (f − 16/116) / 7.787 below it.
+        let fy = (l_star + 16.0) / 116.0;
+        let inv = |f: f64| {
+            let cube = f * f * f;
+            if cube > 0.008856 {
+                cube
+            } else {
+                (f - 16.0 / 116.0) / 7.787
+            }
+        };
+        let xyz = [
+            inv(a_star / 500.0 + fy) * self.white[0],
+            lab_l_to_y_linear(l_star) * self.white[1],
+            inv(fy - b_star / 200.0) * self.white[2],
+        ];
+        std::array::from_fn(|r| {
+            srgb_encode(self.m[r][0] * xyz[0] + self.m[r][1] * xyz[1] + self.m[r][2] * xyz[2])
+        })
     }
-    TiffImage::from_parts(w, h, TiffPixelFormat::Gray8, vec![Plane { stride, data }])
 }
 
-/// CIELab triple to display Rgb24 byte, per TIFF 6.0 §23 + the
-/// inverse of §23's stated forward NTSC matrix.
+/// Render a CIELab / ICCLab page (`channels` = 3, or 1 for an L\*-only
+/// page) at 8 or 16 bits to display RGB / gray of the same depth:
+/// Lab → XYZ under the page's reference white, adapted to the display
+/// white, → linear BT.709 → the sRGB transfer curve. §23: "Since
+/// CIELAB is not a directly displayable format, some conversion to RGB
+/// will be required."
+#[allow(clippy::too_many_arguments)]
+fn build_from_lab(
+    src: &[u8],
+    w: u32,
+    h: u32,
+    channels: usize,
+    bps: u16,
+    bo: ByteOrder,
+    encoding: LabEncoding,
+    white: [f64; 3],
+) -> Result<TiffImage> {
+    let pixels = (w as usize) * (h as usize);
+    let bytes = (bps / 8) as usize;
+    if src.len() < pixels * channels * bytes {
+        return Err(Error::invalid("TIFF: CIELab data shorter than image"));
+    }
+    let conv = LabToRgb::new(white);
+    let sample = |px: usize, c: usize| -> u32 {
+        let at = (px * channels + c) * bytes;
+        if bytes == 2 {
+            bo.read_u16(&src[at..at + 2]) as u32
+        } else {
+            src[at] as u32
+        }
+    };
+    // Sample → L* and a* / b* per the encoding (see `LabEncoding`).
+    let l_of = |v: u32| -> f64 {
+        match (encoding, bytes) {
+            (LabEncoding::Cie, 1) => v as f64 * (100.0 / 255.0),
+            (LabEncoding::Cie, _) => v as f64 * (100.0 / 65535.0),
+            (LabEncoding::Icc, 1) => v as f64 * (100.0 / 255.0),
+            (LabEncoding::Icc, _) => v as f64 * (100.0 / 65280.0),
+        }
+    };
+    let ab_of = |v: u32| -> f64 {
+        match (encoding, bytes) {
+            (LabEncoding::Cie, 1) => v as u8 as i8 as f64,
+            (LabEncoding::Cie, _) => v as u16 as i16 as f64 / 256.0,
+            (LabEncoding::Icc, 1) => v as f64 - 128.0,
+            (LabEncoding::Icc, _) => (v as f64 - 32768.0) / 256.0,
+        }
+    };
+    let max = if bytes == 2 { 65535.0 } else { 255.0 };
+    let out_ch = if channels == 1 { 1 } else { 3 };
+    let mut data = Vec::with_capacity(pixels * out_ch * bytes);
+    let mut put = |v: f64| {
+        let q = (v * max + 0.5).clamp(0.0, max);
+        if bytes == 2 {
+            data.extend_from_slice(&(q as u16).to_le_bytes());
+        } else {
+            data.push(q as u8);
+        }
+    };
+    for px in 0..pixels {
+        let l = l_of(sample(px, 0));
+        if channels == 1 {
+            // "1 implies L* only, for monochrome data": the neutral
+            // axis, whose luminance ratio is white-independent.
+            put(srgb_encode(lab_l_to_y_linear(l)));
+        } else {
+            let rgb = conv.convert(l, ab_of(sample(px, 1)), ab_of(sample(px, 2)));
+            rgb.into_iter().for_each(&mut put);
+        }
+    }
+    let format = match (out_ch, bytes) {
+        (1, 1) => TiffPixelFormat::Gray8,
+        (1, _) => TiffPixelFormat::Gray16Le,
+        (_, 1) => TiffPixelFormat::Rgb24,
+        _ => TiffPixelFormat::Rgb48Le,
+    };
+    let stride = w as usize * out_ch * bytes;
+    Ok(TiffImage::from_parts(
+        w,
+        h,
+        format,
+        vec![Plane { stride, data }],
+    ))
+}
+
+/// XYZ → linear RGB on the BT.709 primaries with the D65 display white
+/// as RGB white.
 ///
-/// Steps:
-/// 1. Lab → XYZ via the inverse of the §23 page 110 formulas. The
-///    reference white is the perfect reflecting diffuser at D65
-///    (Xn = 0.95047, Yn = 1.00000, Zn = 1.08883 — the CIE 1931 2°
-///    Standard Observer values for D65 the spec implies on page
-///    111: "Generally, D65 illumination is used and a perfect
-///    reflecting diffuser is used for the reference white").
-/// 2. XYZ → linear RGB via the analytic inverse of the NTSC
-///    tristimulus matrix the spec prints on page 111:
-///    X = 0.6070 R + 0.1740 G + 0.2000 B,
-///    Y = 0.2990 R + 0.5870 G + 0.1140 B,
-///    Z = 0.0000 R + 0.0660 G + 1.1110 B.
-///    Inverting algebraically (cofactor expansion, det ≈
-///    0.337438) gives the row-major coefficients hard-coded
-///    below. They are arithmetic facts derived from the spec's
-///    matrix only — no external impl was consulted.
-/// 3. Linear RGB → 8-bit display RGB via the standard sRGB OETF
-///    so the result is ready for a contemporary screen. The
-///    spec's "Converting from CIELAB to RGB" caveat (page 111)
-///    explicitly leaves the linear-to-display step to the
-///    implementer; gamma encoding is the universally-applicable
-///    choice and matches the render the rest of the crate
-///    produces from RGB / CMYK / YCbCr.
-fn cielab_to_rgb_byte(l_star: f64, a_star: f64, b_star: f64) -> (u8, u8, u8) {
-    // ---- Lab -> XYZ (D65 white) ----
-    // CIE 1931 2° Standard Observer D65 white in the spec's
-    // normalised "1.0 = perfect reflecting diffuser" form.
-    const XN: f64 = 0.95047;
-    const YN: f64 = 1.00000;
-    const ZN: f64 = 1.08883;
-
-    // §23 page 110:
-    //   L* = 116 (Y/Yn)^(1/3) - 16            (Y/Yn > 0.008856)
-    //   L* = 903.3 (Y/Yn)                     (Y/Yn <= 0.008856)
-    //   a* = 500 [(X/Xn)^(1/3) - (Y/Yn)^(1/3)]
-    //   b* = 200 [(Y/Yn)^(1/3) - (Z/Zn)^(1/3)]
-    // Inverting: let fy = (L*+16)/116; if fy^3 > 0.008856 then
-    // Y/Yn = fy^3 else Y/Yn = L*/903.3. Likewise for X, Z via
-    // fx = a*/500 + fy and fz = fy - b*/200, applying the low-light
-    // branch when the cube is at or below 0.008856 (the spec's
-    // threshold). The cube root inverse of the low-light leg
-    // 7.787*F + 16/116 is (f - 16/116)/7.787.
-    let fy = (l_star + 16.0) / 116.0;
-    let fx = a_star / 500.0 + fy;
-    let fz = fy - b_star / 200.0;
-
-    let y_yn = if l_star > 7.999625 {
-        // Boundary: L* = 116 * 0.008856^(1/3) - 16 ≈ 7.99963; above
-        // this the cubic branch applies.
-        fy.powi(3)
-    } else {
-        l_star / 903.3
-    };
-    let fx3 = fx.powi(3);
-    let x_xn = if fx3 > 0.008856 {
-        fx3
-    } else {
-        (fx - 16.0 / 116.0) / 7.787
-    };
-    let fz3 = fz.powi(3);
-    let z_zn = if fz3 > 0.008856 {
-        fz3
-    } else {
-        (fz - 16.0 / 116.0) / 7.787
-    };
-
-    let x = x_xn * XN;
-    let y = y_yn * YN;
-    let z = z_zn * ZN;
-
-    // ---- XYZ -> linear RGB ----
-    // Inverse of §23 NTSC matrix:
-    //   [ 0.6070  0.1740  0.2000 ]
-    //   [ 0.2990  0.5870  0.1140 ]
-    //   [ 0.0000  0.0660  1.1110 ]
-    // Determinant (cofactor expansion along row 0):
-    //    0.6070*(0.5870*1.1110 - 0.1140*0.0660)
-    //   -0.1740*(0.2990*1.1110 - 0.1140*0.0000)
-    //   +0.2000*(0.2990*0.0660 - 0.5870*0.0000)
-    //  = 0.6070*0.644633 - 0.1740*0.332189 + 0.2000*0.019734
-    //  ≈ 0.337438145
-    // Adjugate row-major / determinant gives the inverse below.
-    // The constants are arithmetic facts derived from the spec
-    // matrix only — no external impl was consulted.
-    let r_lin = 1.9103738257 * x - 0.5337689371 * y - 0.2891315088 * z;
-    let g_lin = -0.9844441268 * x + 1.9985203510 * y - 0.0278510303 * z;
-    let b_lin = 0.0584818293 * x - 0.1187239812 * y + 0.9017445257 * z;
-
-    (
-        linear_to_srgb_byte(r_lin),
-        linear_to_srgb_byte(g_lin),
-        linear_to_srgb_byte(b_lin),
-    )
+/// Derivation: a primary with chromaticity `(x, y)` has the XYZ
+/// direction `(x/y, 1, (1 − x − y)/y)`; scaling the three directions so
+/// that they sum to the white point gives the RGB → XYZ matrix, and
+/// its inverse is returned.
+fn xyz_to_bt709() -> &'static [[f64; 3]; 3] {
+    static M: std::sync::OnceLock<[[f64; 3]; 3]> = std::sync::OnceLock::new();
+    M.get_or_init(|| {
+        let prim = [(0.640, 0.330), (0.300, 0.600), (0.150, 0.060)];
+        let mut p = [[0.0f64; 3]; 3];
+        for (c, &(x, y)) in prim.iter().enumerate() {
+            p[0][c] = x / y;
+            p[1][c] = 1.0;
+            p[2][c] = (1.0 - x - y) / y;
+        }
+        let pi = invert3(&p);
+        let w = display_white();
+        let scale: [f64; 3] =
+            std::array::from_fn(|c| pi[c][0] * w[0] + pi[c][1] * w[1] + pi[c][2] * w[2]);
+        let mut rgb_to_xyz = p;
+        for row in rgb_to_xyz.iter_mut() {
+            for (v, sc) in row.iter_mut().zip(scale) {
+                *v *= sc;
+            }
+        }
+        invert3(&rgb_to_xyz)
+    })
 }
 
-/// Lab L* → linear Y under D65 reference white, used by the
-/// L*-only render path. Same inverse-cube-root step as
-/// [`cielab_to_rgb_byte`].
+/// Inverse of a 3 × 3 matrix by cofactors.
+fn invert3(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let cof = |r: usize, c: usize| {
+        let (r1, r2) = ((r + 1) % 3, (r + 2) % 3);
+        let (c1, c2) = ((c + 1) % 3, (c + 2) % 3);
+        m[r1][c1] * m[r2][c2] - m[r1][c2] * m[r2][c1]
+    };
+    let det = m[0][0] * cof(0, 0) + m[0][1] * cof(0, 1) + m[0][2] * cof(0, 2);
+    std::array::from_fn(|r| std::array::from_fn(|c| cof(c, r) / det))
+}
+
+/// L\* → linear luminance ratio `Y / Yn` (§23 page 110, inverted).
 fn lab_l_to_y_linear(l_star: f64) -> f64 {
+    // The branches meet at L* = 116 · 0.008856^(1/3) − 16 ≈ 7.99963.
     if l_star > 7.999625 {
         ((l_star + 16.0) / 116.0).powi(3)
     } else {
@@ -3431,19 +3796,15 @@ fn lab_l_to_y_linear(l_star: f64) -> f64 {
     }
 }
 
-/// Linear-light value in [0, 1] → 8-bit sRGB display byte using the
-/// canonical sRGB OETF (the published IEC 61966-2-1 piecewise
-/// curve). Out-of-gamut values are clamped to [0, 255].
-fn linear_to_srgb_byte(v: f64) -> u8 {
+/// Linear-light value → sRGB-encoded value in `[0, 1]` (IEC 61966-2-1
+/// piecewise curve; out-of-gamut input is clamped).
+fn srgb_encode(v: f64) -> f64 {
     let c = v.clamp(0.0, 1.0);
-    // sRGB encoding: linear-to-display compander. The piecewise
-    // breakpoint at 0.0031308 maps to ~0.04045 on the display side.
-    let encoded = if c <= 0.0031308 {
+    if c <= 0.0031308 {
         12.92 * c
     } else {
         1.055 * c.powf(1.0 / 2.4) - 0.055
-    };
-    (encoded * 255.0 + 0.5).clamp(0.0, 255.0) as u8
+    }
 }
 
 // ---------------------------------------------------------------------------

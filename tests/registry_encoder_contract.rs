@@ -80,19 +80,19 @@ fn decode_one(ctx: &RuntimeContext, p: &CodecParameters, pkt: &Packet) -> VideoF
 }
 
 #[test]
-fn capabilities_declare_the_nine_layouts_in_ladder_order() {
+fn capabilities_declare_the_thirteen_layouts_in_ladder_order() {
     let ctx = ctx();
     let id = CodecId::new("tiff");
     let imp = &ctx.codecs.implementations(&id)[0];
     assert_eq!(imp.caps.accepted_pixel_formats, ACCEPTED_PIXEL_FORMATS);
-    assert_eq!(ACCEPTED_PIXEL_FORMATS.len(), 9);
+    assert_eq!(ACCEPTED_PIXEL_FORMATS.len(), 13);
     // Colour first (closest rung outward), grey last; no duplicates.
     assert_eq!(ACCEPTED_PIXEL_FORMATS[0], PixelFormat::Rgb24);
-    assert_eq!(ACCEPTED_PIXEL_FORMATS[8], PixelFormat::GrayF32Le);
+    assert_eq!(ACCEPTED_PIXEL_FORMATS[12], PixelFormat::GrayF32Le);
     let mut sorted = ACCEPTED_PIXEL_FORMATS.to_vec();
     sorted.sort_by_key(|f| *f as u32);
     sorted.dedup();
-    assert_eq!(sorted.len(), 9);
+    assert_eq!(sorted.len(), 13);
     // Every declared layout has a TIFF layout and back.
     for f in ACCEPTED_PIXEL_FORMATS {
         let t = TiffPixelFormat::try_from(f).unwrap();
@@ -142,7 +142,7 @@ fn undeclared_layouts_are_refused_by_type_at_the_factory() {
         PixelFormat::Yuv420P,
         PixelFormat::Yuv444P,
         PixelFormat::Bgra,
-        PixelFormat::Rgba64Le,
+        PixelFormat::Gbrp16Le,
     ] {
         assert!(!ACCEPTED_PIXEL_FORMATS.contains(&f));
         let r = ctx.codecs.first_encoder(&params(4, 4, f, &[]));

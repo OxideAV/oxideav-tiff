@@ -96,27 +96,30 @@ and governs JPEG-in-TIFF only — `1..=99` the DCT quantiser scale,
 option order; every other scheme is lossless and ignores it (it never
 switches the scheme).
 
-**Declared layouts:** the registry encoder declares exactly the nine
-layouts it codes on `CodecCapabilities::accepted_pixel_formats`
+**Declared layouts:** the registry encoder declares exactly the
+thirteen layouts it codes on `CodecCapabilities::accepted_pixel_formats`
 (`ACCEPTED_PIXEL_FORMATS`, ladder order: `Rgb24`, `Rgba`, `Rgb48Le`,
-`RgbF32Le`, `Cmyk`, `Pal8`, `Gray8`, `Gray16Le`, `GrayF32Le`), writes
-each as itself with the output label equal to the input, and refuses
-anything else — and every layout × scheme pair the writer cannot code
-(WebP with anything but `Rgb24` / `Rgba`; JPEG with `Pal8` / `Rgba` /
-float, or with `Gray16Le` / `Rgb48Le` under the DCT process) — with a
-typed `Unsupported` from `make_encoder`, never a silent conversion. A
-`Pal8` frame whose palette-alpha record has a transparent entry is
-refused the same way (a TIFF `ColorMap` holds no alpha).
+`Rgba64Le`, `RgbF32Le`, `RgbaF32Le`, `Cmyk`, `Pal8`, `Gray8`, `Ya8`,
+`Gray16Le`, `Ya16Le`, `GrayF32Le`), writes each as itself with the
+output label equal to the input, and refuses anything else — and every
+layout × scheme pair the writer cannot code (WebP with anything but
+`Rgb24` / `Rgba`; JPEG with `Pal8`, an alpha layout or float, or with
+`Gray16Le` / `Rgb48Le` under the DCT process) — with a typed
+`Unsupported` from `make_encoder`, never a silent conversion. A `Pal8`
+frame whose palette-alpha record has a transparent entry is refused the
+same way (a TIFF `ColorMap` holds no alpha).
 
 | Declared input | Written as | Schemes |
 |---|---|---|
 | `Rgb24` | RGB, 8-bit | all; WebP; JPEG (DCT / lossless) |
 | `Rgba` | RGB + `ExtraSamples = [2]` | all; WebP |
 | `Rgb48Le` | RGB, 16-bit | all; JPEG lossless (`quality = 100`) |
-| `RgbF32Le` | RGB, `SampleFormat = 3`, 32-bit | all |
+| `Rgba64Le` | RGB + `ExtraSamples = [2]`, 16-bit | all |
+| `RgbF32Le` / `RgbaF32Le` | RGB (+ `ExtraSamples = [2]`), `SampleFormat = 3`, 32-bit | all |
 | `Cmyk` | `PhotometricInterpretation = 5` | all; JPEG |
 | `Pal8` | `PhotometricInterpretation = 3` + `ColorMap` | all |
 | `Gray8` | `PhotometricInterpretation = 1`, 8-bit | all; JPEG |
+| `Ya8` / `Ya16Le` | `PhotometricInterpretation = 1` + `ExtraSamples = [2]`, 8 / 16-bit | all |
 | `Gray16Le` | `PhotometricInterpretation = 1`, 16-bit | all; JPEG lossless |
 | `GrayF32Le` | `PhotometricInterpretation = 1`, `SampleFormat = 3` | all |
 
@@ -165,28 +168,49 @@ standalone.
 
 ## Supported layouts
 
-Native layouts (`PixelFormat`): `Gray8`, `Gray16Le`, `Rgb24`,
-`Rgb48Le`, `Rgba` (straight alpha), `Pal8` + palette, `Cmyk`,
-`GrayF32Le`, `RgbF32Le` (little-endian `f32` samples). All are packed
-(one plane, `stride = width × bytes per pixel`).
+Native layouts (`PixelFormat`): `Gray8`, `Gray16Le`, `Ya8`, `Ya16Le`,
+`Rgb24`, `Rgb48Le`, `Rgba`, `Rgba64Le` (straight alpha), `Pal8` +
+palette, `Cmyk`, `GrayF32Le`, `RgbF32Le`, `RgbaF32Le` (little-endian
+`f32` samples). All are packed (one plane, `stride = width × bytes per
+pixel`).
 
 **Decode** — what each on-disk shape becomes (the full matrix is in
 *Format specifics → Decode*):
 
 | On disk | `format` |
 |---|---|
-| Bilevel / 4-bit / 8-bit gray (`WhiteIsZero` inverted, `TransparencyMask` 0xFF = interior), 8-bit CIELab L\* | `Gray8` |
-| 16-bit gray (unsigned; signed via offset-binary map) | `Gray16Le` |
-| 8-bit RGB; YCbCr (any §21 subsampling, chunky / planar, JPEG); 3-sample CIELab; RGB with unspecified / associated / several extra samples (extras dropped) | `Rgb24` |
-| 16-bit RGB; 9..16-bit JPEG RGB / YCbCr | `Rgb48Le` |
-| 8-bit RGB + one unassociated-alpha extra sample (`ExtraSamples = [2]`) | `Rgba` |
-| 4- / 8-bit palette (`ColorMap`) | `Pal8` (indices verbatim, 4-bit unpacked) + `palette` |
-| 8-bit CMYK (`InkSet = 1`), uncompressed / JPEG | `Cmyk` |
-| IEEE float gray / RGB (`SampleFormat = 3`, 16 / 32 / 64-bit) | `GrayF32Le` / `RgbF32Le` — samples as stored (half widened, double narrowed to `f32`), `WhiteIsZero` re-expressed as `1 − x`; no display scaling. `SMinSampleValue` / `SMaxSampleValue` are reported on `TiffFormatInfo` (`Page.layout`) |
+| Bilevel / 2..8-bit gray (`WhiteIsZero` inverted, `TransparencyMask` 0xFF = interior), 8-bit CIELab / ICCLab L\* | `Gray8` |
+| 9..64-bit gray (unsigned; signed via offset-binary map), 16-bit L\* | `Gray16Le` |
+| Gray + alpha extra sample, ≤ 8 / > 8 bits | `Ya8` / `Ya16Le` |
+| 1..8-bit RGB; YCbCr (any §21 subsampling, chunky / planar, JPEG); 8-bit CIELab / ICCLab; RGB with unspecified extra samples (dropped) | `Rgb24` |
+| 9..64-bit RGB; 9..16-bit JPEG RGB / YCbCr; 16-bit CIELab / ICCLab | `Rgb48Le` |
+| RGB + alpha extra sample (`ExtraSamples` 1 or 2), ≤ 8 / > 8 bits | `Rgba` / `Rgba64Le` |
+| 1- / 2- / 4- / 8-bit palette (`ColorMap`) | `Pal8` (indices verbatim, unpacked) + `palette` |
+| CMYK (`InkSet = 1`) at any width, with or without extra samples, uncompressed / byte-stream / 8-bit JPEG | `Cmyk` |
+| IEEE float gray / RGB / RGB + alpha (`SampleFormat = 3`, 16 / 32 / 64-bit) | `GrayF32Le` / `RgbF32Le` / `RgbaF32Le` — samples as stored (half widened, double narrowed to `f32`), `WhiteIsZero` re-expressed as `1 − x`; no display scaling. `SMinSampleValue` / `SMaxSampleValue` are reported on `TiffFormatInfo` (`Page.layout`) |
+
+Rules that apply across the table:
+
+- **Width.** A sample narrower than its layout is widened by bit
+  replication (so 0 and the maximum map to 0 and the maximum); a wider
+  one keeps its top bits (a 32-bit sample keeps 16, a 16-bit CMYK ink
+  keeps 8). TIFF 6.0 fixes no rule; a reader that rounds instead
+  differs by at most one step.
+- **Alpha.** The first `ExtraSamples` entry of kind 1 or 2 is the
+  alpha. Associated alpha (kind 1, TIFF 6.0 §18: the colour is stored
+  multiplied by it) is divided back out — `c × max / α`, rounded,
+  clamped; `α = 0` gives colour 0 — so every alpha layout is straight.
+  Unspecified extras (kind 0, or no `ExtraSamples` field) and extras
+  past the alpha are dropped. CMYK, palette and float-gray pages hand
+  back no alpha.
+- **Signed integers** (`SampleFormat = 2`) flip the sign bit
+  (offset-binary: the signed minimum is black) and then follow the
+  unsigned rules, on any colour model.
 
 `to_rgb8` / `to_rgba8` kernels: gray replicated; 16-bit samples keep
-the high byte (the same reduction the `ColorMap` words get); `Rgba`
-drops / keeps its straight alpha; `Pal8` looks up the palette (an index
+the high byte (the same reduction the `ColorMap` words get); the alpha
+layouts drop / keep their straight alpha (high byte at 16 bits,
+tone-scaled for `RgbaF32Le`); `Pal8` looks up the palette (an index
 past it is black); `Cmyk` applies the TIFF 6.0 §16 inversion
 `R = (255−C)(255−K)/255` (and likewise G / B, integer division);
 `GrayF32Le` / `RgbF32Le` are tone-scaled by clamping each sample to
@@ -200,10 +224,11 @@ the native plane. Alpha is `255` for every other layout.
 |---|---|
 | `Gray8` / `Gray16Le` | `PhotometricInterpretation = 1`, 8 / 16 bits |
 | `Rgb24` / `Rgb48Le` | `PhotometricInterpretation = 2`, 8 / 16 bits |
-| `Rgba` | RGB + `ExtraSamples = [2]` |
+| `Rgba` / `Rgba64Le` | RGB + `ExtraSamples = [2]`, 8 / 16 bits |
+| `Ya8` / `Ya16Le` | BlackIsZero + `ExtraSamples = [2]`, 8 / 16 bits |
 | `Pal8` | `PhotometricInterpretation = 3`, 8-bit indices, `ColorMap` from the palette (`Error::Unsupported` if an entry is not opaque — TIFF palettes carry no alpha) |
 | `Cmyk` | `PhotometricInterpretation = 5`, `InkSet = 1` |
-| `GrayF32Le` / `RgbF32Le` | `PhotometricInterpretation = 1` / `2`, 32 bits, `SampleFormat = 3` (`Predictor` = the §14 floating-point predictor when enabled) |
+| `GrayF32Le` / `RgbF32Le` / `RgbaF32Le` | `PhotometricInterpretation = 1` / `2` / `2` + `ExtraSamples = [2]`, 32 bits, `SampleFormat = 3` (`Predictor` = the floating-point predictor when enabled) |
 
 Compression: `None` (default), `PackBits`, `Lzw`, `Deflate`, `Zstd`
 (50000) for every layout; `Webp` (50001) for `Rgb24` / `Rgba`; `Jpeg`
@@ -227,7 +252,9 @@ other malformed layout tag is already an error in both modes.
 `EncodeOptions` (`Default` + `with_*`): `compression`
 (`TiffCompression`, default `None`; JPEG quality / process live in
 `TiffCompression::Jpeg(JpegOptions)`), `predictor` (§14 horizontal
-differencing), `planar` (`PlanarConfiguration = 2`), `tiling`
+differencing; takes effect with `Lzw` / `Deflate` / `Zstd` — §14 defines
+it for the LZW family, and a page written with `None` / `PackBits`
+carries none), `planar` (`PlanarConfiguration = 2`), `tiling`
 (`(TileWidth, TileLength)`, multiples of 16), `rows_per_strip`,
 `bigtiff`, `embed_icc` / `embed_xmp` / `embed_exif` / `embed_iptc`
 (default `true`),
@@ -266,9 +293,14 @@ the lossless round-trip pin.
 - 256 megapixels and 1 GiB of assembled samples per IFD by default
   (`DecodeOptions`), checked from the IFD tags before allocation; with
   `registry` the framework's `DecoderLimits` can only tighten them.
-- Layouts outside the decode table (e.g. 16-bit RGBA, 16-bit CMYK,
-  non-uniform `BitsPerSample`, deep CMYK JPEG) are `Error::Unsupported`
-  / `InvalidData`; see *Backlog*.
+- Layouts outside the decode table are `Error::Unsupported` /
+  `InvalidData`: non-uniform `BitsPerSample`, palettes wider than 8
+  bits, YCbCr at other than 8 bits (outside JPEG), float CMYK / palette
+  / CIELab, `Compression = 34925` (LZMA2) and the other unlisted
+  schemes, deep CMYK JPEG; see *Backlog*.
+- A sample wider than the layout that carries it is narrowed: 17..64-bit
+  integers keep their top 16 bits, CMYK inks wider than 8 bits their
+  top 8.
 - Float samples decode to `f32` (`GrayF32Le` / `RgbF32Le`); a 64-bit
   double is narrowed. The 16- and 64-bit float encode kinds are on
   `EncodePage`.
@@ -290,28 +322,40 @@ the lossless round-trip pin.
 | BlackIsZero    | 1              | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
 | BlackIsZero    | 4 / 8 / 16     | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` / `Gray16Le` |
 | **Transparency Mask** | 1       | None / CCITT-MH / T.4-1D / **T.4-2D** / **T.6 (G4)** / PackBits / LZW / Deflate / **ZSTD** | `Gray8` (interior = 0xFF, exterior = 0x00) |
-| Palette        | 4 / 8          | None / PackBits / LZW / Deflate / **ZSTD** | `Pal8` + `palette` (ColorMap, high byte of each 16-bit word) |
+| Palette        | 1 / 2 / 4 / 8  | None / PackBits / LZW / Deflate / **ZSTD** | `Pal8` + `palette` (ColorMap, high byte of each 16-bit word) |
 | RGB (3 chan)   | 8              | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` |
 | RGB (3 chan)   | 16             | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb48Le` |
 | RGB (3 chan / 4 chan + §ExtraSamples) | 8 | **WebP-in-TIFF** (Compression=50001; VP8L lossless + VP8 lossy segments) | `Rgb24` / `Rgba` (ExtraSamples = [2]) |
 | RGB (4 chan, §ExtraSamples = [2] unassociated alpha) | 8 | None / PackBits / LZW / Deflate / **ZSTD** | `Rgba` (straight alpha, verbatim) |
-| RGB (≥ 4 chan, §ExtraSamples = 0 / 1 or several) | 8 | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` (extras dropped; associated alpha = §18 composite-over-black) |
+| RGB + extra samples, any other arrangement | 1..64 | None / PackBits / LZW / Deflate / **ZSTD** (8-bit also WebP) | `Rgba` / `Rgba64Le` when an extra is alpha (associated alpha divided out), else `Rgb24` / `Rgb48Le` |
+| Gray + extra samples | 1..64 | None / PackBits / LZW / Deflate / **ZSTD** | `Ya8` / `Ya16Le` when an extra is alpha, else `Gray8` / `Gray16Le` |
+| Gray / RGB at any other width (2, 3, 5..7, 9..15, 17..64 bits; signed or unsigned) | — | None / PackBits / LZW / Deflate / **ZSTD** | 8-bit layout up to 8 bits, 16-bit layout above (see *Supported layouts* for the widening rule) |
+| RGB / CMYK, signed (`SampleFormat = 2`) | 8 / 16 | None / PackBits / LZW / Deflate / **ZSTD** | as unsigned after the sign-bit flip |
+| RGB + alpha, IEEE float | 16 / 32 / 64 | None / PackBits / LZW / Deflate / **ZSTD** | `RgbaF32Le` |
 | CMYK (4 chan)  | 8              | None / PackBits / LZW / Deflate / **ZSTD** | `Cmyk` (ink coverages verbatim; `to_rgb8` = §16 inversion) |
+| CMYK, other widths or with extra samples | 1..64 | None / PackBits / LZW / Deflate / **ZSTD** | `Cmyk` (top 8 bits of each ink; extras dropped) |
 | YCbCr (3 chan) | 8              | None / PackBits / LZW / Deflate / **ZSTD** (incl. **§21 chroma subsampling** `[2,1]`/`[2,2]`/`[4,1]`/`[4,2]`, chunky + planar, strip + tiled) / **JPEG-in-TIFF** (Compression=7, chunky + **TN2 planar**) | `Rgb24` |
 | RGB (3 chan)   | 8              | **JPEG-in-TIFF** (Compression=7, chunky + planar) | `Rgb24`      |
 | BlackIsZero / WhiteIsZero | 8   | **JPEG-in-TIFF** (Compression=7)   | `Gray8`      |
 | CMYK (4 chan)  | 8              | **JPEG-in-TIFF** (Compression=7, chunky + planar) | `Cmyk`       |
 | BlackIsZero / WhiteIsZero | **9..=16 (12-bit SOF1, 9..16-bit SOF3)** | **JPEG-in-TIFF** (Compression=7) + **old-style Compression=6 interchange** | `Gray16Le` (bit-replication widening) |
 | YCbCr / RGB (3 chan) | **9..=16** | **JPEG-in-TIFF** (Compression=7, chunky + planar) | `Rgb48Le` |
-| **CIELab (3 chan)** | 8         | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` (Lab→XYZ@D65→linear NTSC→sRGB) |
-| **CIELab (1 chan, L\* only)** | 8 | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` |
+| **CIELab / ICCLab (3 chan)** | 8 / 16 | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` / `Rgb48Le` (Lab → XYZ under the page's white → D65 → BT.709 → sRGB curve) |
+| **CIELab / ICCLab (1 chan, L\* only)** | 8 / 16 | None / PackBits / LZW / Deflate / **ZSTD** | `Gray8` / `Gray16Le` |
+| YCbCr (3 chan) with `ReferenceBlackWhite` / `YCbCrCoefficients` | 8 | None / PackBits / LZW / Deflate / **ZSTD** | `Rgb24` through the §20 / §21 transform the two fields define (JPEG pages use the default transform) |
 | BlackIsZero / WhiteIsZero / RGB / YCbCr / CMYK | 8 | **Old-style JPEG** (Compression=6, TIFF 6.0 §22 — **both layouts**: interchange-format, and **tables-form** via T.81 Annex B marker synthesis; chunky + planar) | `Gray8` / `Rgb24` / `Cmyk` |
 
 `Predictor = 1` (no prediction), `Predictor = 2` (horizontal
-differencing, per-component for `SamplesPerPixel > 1`) and
+differencing, with an offset of `SamplesPerPixel` on chunky data) and
 `Predictor = 3` (the **IEEE floating-point predictor** — significance-
-ordered byte-plane de-interleave followed by an inclusive cumulative byte
-sum, per the Adobe TIFF §14 floating-point predictor) are all supported.
+ordered byte-plane de-interleave followed by an inclusive cumulative
+byte sum, with the same `SamplesPerPixel` offset on chunky data) are
+all supported. `Predictor = 2` is reversed at every sample width:
+modular 8 / 16 / 32 / 64-bit words in file byte order (also over float
+words, which is what other writers store when asked for a horizontal
+predictor on float data), and — §14: "expand each component … perform
+the horizontal differencing … repack" — modulo 2ⁿ on bit-packed
+samples of any other width.
 Predictor 3 decodes for 16-/32-/64-bit `SampleFormat = 3` grayscale and
 RGB across strip and tile layouts (chunky and per-plane), under any
 byte-oriented compression (None / PackBits / LZW / Deflate / ZSTD), and
@@ -326,7 +370,9 @@ rejected over non-float or non-16/32/64-bit data per the §14 "the reader
 must give up" rule. Validated with a binary-independent
 encode/decode oracle (including the new float-encode self-roundtrip and
 raw-byte predictor-reversal oracles) and against ImageMagick-written
-Predictor 1 vs 3 float TIFFs (f32/f64, LZW + Deflate, grayscale + tiled). Strip- and
+Predictor 1 vs 3 float TIFFs (f32/f64, LZW + Deflate, grayscale + tiled);
+the chunky-RGB offset was wrong (1 instead of `SamplesPerPixel`) until
+the black-box matrix caught it — see *Black-box matrix*. Strip- and
 tile-based layouts both decode (any number of
 strips or tiles), including **sub-byte (1-bit and 4-bit) chunky tiles**
 (BlackIsZero / WhiteIsZero grayscale and 4-bit palette): per TIFF 6.0
@@ -494,22 +540,32 @@ Two §22 layouts exist:
 
 #### CIELab (PhotometricInterpretation = 8)
 
-Per TIFF 6.0 §23 "CIE L*a*b* Images" (page 110), `PhotometricInterpretation = 8`
-identifies a 1976 CIE L\*a\*b\* image whose three (or one) 8-bit
-samples per pixel are: L\* unsigned in 0..255 mapping linearly to the
-perceptual lightness scale 0..100; a\* and b\* as two's-complement
-signed bytes in -128..127 representing the red/green and yellow/blue
-chrominance channels. The decoder colorimetrically converts each
-pixel to display Rgb24 via Lab → XYZ under the spec's mandated
-"perfect reflecting diffuser at D65" reference white, then XYZ →
-linear RGB through the analytic inverse of §23's stated NTSC
-tristimulus matrix (page 111), and finally linear RGB → 8-bit through
-the standard sRGB OETF so the result is ready for a contemporary
-display. §23 explicitly leaves the "Converting between RGB and
-CIELAB" linear-to-display step open ("some conversion to RGB will be
-required"); the sRGB gamma curve is the universally-applicable
-choice and matches the render-ready Rgb24 the CMYK / YCbCr
-photometrics already produce.
+`PhotometricInterpretation = 8` (TIFF 6.0 §23 "CIE L\*a\*b\* Images")
+and `= 9` (ICCLab) are decoded at 8 and 16 bits per the Lab update of
+the *Adobe Photoshop TIFF Technical Notes*:
+
+| | L\* | a\* / b\* |
+|---|---|---|
+| CIELab, 8-bit | unsigned, 0..255 ↦ 0..100 | signed byte = the value |
+| CIELab, 16-bit | unsigned, 0..65535 ↦ 0..100 | signed word = 256 × the value |
+| ICCLab, 8-bit | unsigned, 0..255 ↦ 0..100 | unsigned, value + 128 |
+| ICCLab, 16-bit | unsigned, 0..65280 ↦ 0..100 | unsigned, 256 × value + 32768 |
+
+The page is rendered to display RGB of the same depth (`Rgb24` /
+`Rgb48Le`; `Gray8` / `Gray16Le` for an L\*-only page): Lab → XYZ by the
+inverse of the §23 formulas under the page's reference white — the
+`WhitePoint` field when present, else D50 ("WhitePoint: default is CIE
+D50") — then the linear Bradford adaptation to D65 (ICC.1:2010 Annex
+E.3), the XYZ → RGB matrix of the BT.709 primaries, and the sRGB
+transfer curve. The page's `color` reports that result (H.273 primaries
+1, transfer 13). A neutral Lab sample (a\* = b\* = 0) is neutral RGB
+under any white. §23 leaves this step to the reader ("Since CIELAB is
+not a directly displayable format, some conversion to RGB will be
+required"), and readers do differ: two black-box readers are up to 42
+levels apart on saturated colours of the matrix raster, and they do not
+agree on the white of an untagged page either. (Until this round the
+conversion used the §23 example matrix for NTSC primaries against a D65
+white, which tinted neutrals.)
 
 `SamplesPerPixel = 1` is also accepted — §23 "Usage of other Fields"
 on page 110: "3 for L\*a\*b\*, 1 implies L\* only, for monochrome data".
@@ -678,65 +734,44 @@ Predictor=2 layouts remain rejected for 1-bit input on both sides
 Configuration" is irrelevant at `SamplesPerPixel = 1`).
 
 `FillOrder = 1` (MSB-first, the baseline default) and `FillOrder = 2`
-(LSB-first) are both accepted for the bit orderings the spec admits:
-FillOrder=2 is honoured for uncompressed and CCITT-compressed
-(`Compression = 1 / 2 / 3`) `BitsPerSample = 1` strips and tiles, per
-TIFF 6.0 §FillOrder (page 32). Any other combination of FillOrder=2
-with non-bilevel data or with a non-CCITT compressor is rejected with
-a precise error.
+(LSB-first) are both accepted. `FillOrder` is "the logical order of
+bits within a byte": for the two cases TIFF 6.0 page 32 recommends —
+`BitsPerSample = 1`, uncompressed or CCITT-compressed — the bit order
+is honoured where the bits are consumed. Page 32 warns that anything
+else is "potentially ambiguous"; other writers do produce such pages
+(one black-box tool tags every file it writes `FillOrder = 2`), and
+what they store is every byte of the strip / tile data bit-reversed,
+compressed or not, at any sample width. That is how they are read here
+(JPEG and WebP segments under `FillOrder = 2` are refused).
 
 `SampleFormat` (tag 339, TIFF 6.0 §SampleFormat page 80) is inspected
 on every IFD. Value `1` (unsigned integer, the spec default) and value
-`4` (undefined — the §SampleFormat note recommends "treat … as if the
-field were not present, i.e. as unsigned integer data") route through
-the unsigned-integer decoder path that the rest of the codec is built
-around. Value `2` (two's-complement **signed integer**) now decodes
-for the single-channel grayscale photometrics (BlackIsZero /
-WhiteIsZero) at the integer widths the codec assembles, 8-bit and
-16-bit — the layout scientific and elevation TIFFs use. §SampleFormat
-notes the size "is still done by the BitsPerSample field" and the
-companion SMinSampleValue (340) / SMaxSampleValue (341) "default … is
-the full range of the data type", so the signed samples span the full
-signed range and are rendered onto the codec's unsigned display planes
-through the order-preserving **offset-binary** map (signed minimum →
-display 0, signed maximum → the unsigned ceiling, stored signed 0 →
-the display midpoint): a sign-bit flip — `XOR 0x80` at 8-bit, `XOR
-0x8000` at 16-bit — applied before the WhiteIsZero polarity inversion.
-The mapping is bijective and monotone, so relative brightness is
-preserved exactly. SampleFormat = 2 on any other photometric / width
-(RGB, palette, CMYK, YCbCr, CIELab, or a sub-byte / non-assembled
-width) has no single defensible display mapping in this build and is
-surfaced as a precise typed error. Value `3` (IEEE floating-point) now
-decodes for the single-channel grayscale photometrics (BlackIsZero /
-WhiteIsZero) **and for 3-channel RGB** at the three IEEE 754 widths a
-float TIFF stores — 16-bit
-(binary16 half), 32-bit (binary32 single), 64-bit (binary64 double),
-the layout scientific / elevation / HDR-source TIFFs use. §SampleFormat
-fixes the sample size in BitsPerSample (not in this field), so the width
-is read there exactly as for the integer paths, and the binary16 half is
-widened to single precision losslessly and a double is narrowed. The
-decoded image is the native `GrayF32Le` / `RgbF32Le` plane — the
-samples as stored, with `WhiteIsZero` re-expressed as `1 − x` — and no
-display scaling happens on decode (IMAGE_CRATE_API). The SMinSampleValue
-/ SMaxSampleValue pair (tags 340 / 341), which §SampleFormat says
-"makes it possible for readers to assume that data samples are bound to
-the range [SMinSampleValue, SMaxSampleValue] without scanning the image
-data", is reported on `TiffFormatInfo` (`Page.layout`) for callers who
-want that mapping; the contract's `to_rgb8` / `to_rgba8` clamp each
-sample to `[0, 1]` and scale to 255 (NaN / ±Inf render 0). Only
-`Predictor = 1` is meaningful — §14 horizontal differencing is defined
-over integer samples and the floating-point predictor (`Predictor = 3`)
-is rejected at the predictor gate — so a float strip declaring a
-predictor is surfaced as a precise typed error. SampleFormat = 3 on any
-other photometric (palette, CMYK, YCbCr, CIELab — and RGB at a sample
-count other than 3) likewise has no
-single defensible display mapping in this build and is rejected per the
-§SampleFormat reader rule: "If the SampleFormat field is present and the
-value is not 1, a Baseline TIFF reader that cannot handle the
-SampleFormat value must terminate the import process gracefully." An
-absent field defaults to unsigned (so every existing TIFF fixture
-decodes byte-for-byte unchanged); non-uniform per-component values and
-out-of-range values (≥ 5) are also rejected.
+`4` (undefined — "treat … as if the field were not present, i.e. as
+unsigned integer data") are unsigned integers.
+
+Value `2` (two's-complement **signed integer**) decodes at every
+integer width and on grayscale, RGB and CMYK pages. §SampleFormat notes
+the size "is still done by the BitsPerSample field" and that
+SMinSampleValue / SMaxSampleValue default to "the full range of the
+data type", so the samples are rendered through the order-preserving
+**offset-binary** map: the sign bit is flipped (signed minimum → 0,
+stored 0 → the midpoint, signed maximum → the unsigned ceiling), after
+which the unsigned rules apply (widening, `WhiteIsZero` inversion). A
+signed palette index is refused.
+
+Value `3` (IEEE floating-point) decodes for grayscale and RGB at the
+three IEEE 754 widths — 16-bit half, 32-bit single, 64-bit double — to
+the native `GrayF32Le` / `RgbF32Le` plane, or `RgbaF32Le` when an extra
+sample is alpha: the samples as stored (a half widened losslessly, a
+double narrowed), `WhiteIsZero` re-expressed as `1 − x`, no display
+scaling. The SMinSampleValue / SMaxSampleValue pair (tags 340 / 341) is
+reported on `TiffFormatInfo` (`Page.layout`) for callers who want that
+mapping; `to_rgb8` / `to_rgba8` clamp each sample to `[0, 1]` and scale
+to 255 (NaN / ±Inf render 0). Float pages take `Predictor = 3` or
+`Predictor = 2` (word differencing). Float palette / CMYK / YCbCr /
+CIELab pages are refused per the §SampleFormat reader rule ("must
+terminate the import process gracefully"), as are non-uniform
+per-component values and values ≥ 5. An absent field is unsigned.
 
 `Orientation` (tag 274, TIFF 6.0 §Orientation page 36) is inspected on
 every IFD. The spec defines eight values mapping the stored 0th row /
@@ -788,32 +823,28 @@ output.
 
 `ExtraSamples` (tag 338, TIFF 6.0 §ExtraSamples pages 31–32) is
 inspected on every IFD. The field declares `m` extra components per
-pixel ("When this field is used, the SamplesPerPixel field has a value
-greater than the PhotometricInterpretation field suggests"), stored by
-convention as the last components of each pixel. The count must leave
-a color-component tally the photometric defines (3 for RGB / YCbCr, 4
-for CMYK, 1 for the grayscale / palette / mask photometrics, 3-or-1
-for CIELab per §23) — any other arithmetic is `Error::InvalidData`.
-Per-value policy: all three defined kinds render the leading color
-components verbatim and drop the trailing extra(s), so an RGB
-`SamplesPerPixel = 4` page renders its `R G B` triple. `0` (unspecified
-data) and `2` (unassociated alpha — the soft matte logically
-independent of the straight-stored color) carry color stored straight,
-so dropping the extra is exact. `1` (associated alpha) **now decodes**:
-§18 "Associated Alpha Handling" (page 78) states that "naive
-applications that want to display an RGBA image on a display can do so
-simply by displaying the RGB component values … because it is
-effectively the same as merging the image with a black background"
-(`Cr = Cover * Aover`, "which is exactly the pre-multiplied color; i.e.
-what is stored in the image"), so the stored pre-multiplied leading
-triple **is** the composite-over-black display value a display reader
-shows directly — the decoder renders it verbatim and drops the alpha
-(§18 page 78: alpha = 0 stores `(0,0,0)`, which renders as black, the
-naive-display result). Values `≥ 3` are `Error::InvalidData` because
-the spec lists `0..=2` only. An absent field means "no extra samples"
-per the spec default, and an RGB page with `SamplesPerPixel ≥ 4` but
-no tag 338 still decodes by skipping the undeclared trailing
-components.
+pixel, stored by convention as the last components of each pixel. The
+count must leave a colour-component tally the photometric defines (3
+for RGB / YCbCr, 4 for CMYK, 1 for the grayscale / palette / mask
+photometrics, 3-or-1 for CIELab per §23) — any other arithmetic is
+`Error::InvalidData`; values `≥ 3` are `Error::InvalidData` too (the
+spec lists `0..=2`). Per kind:
+
+- `2` (unassociated alpha, "a soft matte"): the colour is stored
+  straight; the page decodes to the alpha layout verbatim.
+- `1` (associated alpha): §18 stores the colour multiplied by the alpha
+  ("Cr = Cover * Aover … which is exactly the pre-multiplied color;
+  i.e. what is stored in the image"). The alpha is kept and divided
+  back out — `c × max / α`, rounded and clamped, and `α = 0` gives
+  colour 0 ("If A is zero, then the color components should be
+  interpreted as zero") — so the result is the same straight-alpha
+  layout. (Earlier releases dropped the alpha and returned the
+  pre-multiplied colour as opaque RGB.)
+- `0` (unspecified), extras past the first alpha, and trailing samples
+  of a page with no tag 338 at all: dropped.
+
+Gray + alpha is `Ya8` / `Ya16Le`, RGB + alpha `Rgba` / `Rgba64Le` /
+`RgbaF32Le`; CMYK, palette and float-gray pages hand back no alpha.
 
 ### Metadata & format introspection
 
@@ -877,6 +908,42 @@ length, the bytes are surfaced verbatim in `TiffMetadata::iptc` /
 (33432) and the Exif pointer (34665), refusing an empty payload. The
 datasets are not interpreted. `tests/iptc_roundtrip.rs` pins the
 round-trip, both field types, the ordering and a `tiffdump` listing.
+
+### Tag catalogues: Exif, GPS, GeoTIFF
+
+`Page::exif` is the typed view of the directories a page points at
+(`tags::ExifData`): the Exif IFD (pointer tag 34665), the GPS Info IFD
+(34853) and the Interoperability IFD (40965, inside the Exif IFD), each
+as a list of `TagEntry { tag, name, value }` in ascending tag order.
+Names come from the Exif 3.1 catalogues (CIPA DC-008 Tables 8, 9 and
+14, §4.6.8); a tag the standard does not list keeps `name = None` and
+its decoded value. `TagValue` covers every field type the directories
+use, including the Exif 3.0 UTF-8 type 129. Derived accessors:
+`exposure_time`, `f_number`, `photographic_sensitivity`,
+`focal_length`, `date_time_original`, `lens_model`, `exif_version`,
+`pixel_dimensions`, and `gps_position` — latitude / longitude in signed
+decimal degrees from the degrees / minutes / seconds RATIONALs and
+their `Ref` fields, altitude negated for `GPSAltitudeRef` 1 and 3
+("below" the ellipsoid / sea level). `ExifData::parse` reads the same
+TIFF-structured block `Metadata::exif` carries (with or without the
+`Exif\0\0` identifier), so it also serves the Exif block of any other
+container.
+
+`Page::geotiff` (`tags::GeoTiff`, OGC 19-008r4 §7) is the
+georeferencing of a page: the GeoKey directory of tag 34735 resolved
+key by key — a SHORT stored in the entry itself, SHORTs read back from
+the directory, DOUBLEs from tag 34736, ASCII from tag 34737 (the `|`
+terminator stripped) — with the 1.1 key names of Annex E, plus
+`ModelPixelScaleTag`, `ModelTiepointTag` and `ModelTransformationTag`.
+`model_type`, `raster_type`, `projected_crs`, `geodetic_crs` and
+`raster_to_model(i, j)` (matrix, or tiepoint + scale with the
+Requirement 10.4 sign convention) are the shortcuts. CRS codes are
+reported, not looked up.
+
+Verification: Exif / GPS directories laid out by another tool (`sips`,
+from a JPEG carrying the block) read back field for field in
+`tests/exif_geotiff_tags.rs`; the GeoTIFF reader has only met
+hand-built directories (no tool on hand writes the tags).
 
 ### Encode
 
@@ -1358,12 +1425,19 @@ remaining gaps are:
   against); likewise per-component `Ss` / `Al` divergence within one
   interleaved §22 tables-form scan (would need one synthesized scan
   per component).
-- **DNG / GeoTIFF / Exif tag semantics.** The child-IFD *mechanics* are
-  in (write side via `PageExtras::exif_ifd` / `gps_ifd` / `sub_ifds`;
-  read side via `parse_ifd` at the pointer offset + `decode_page_at`
-  for SubIFD images), but the crate interprets no Exif/GPS/DNG/GeoTIFF
-  tag meanings — the defining tag catalogues (JEITA/CIPA Exif, OGC
-  GeoTIFF, Adobe DNG) are not in the staged spec material.
+- **Unstaged compression schemes** — `Compression = 34925` (LZMA2),
+  LERC, JBIG, SGILog / LogLuv and the other codes with no description
+  under the project's staged documents are refused with a typed error.
+- **`ReferenceBlackWhite` / `YCbCrCoefficients` on JPEG pages** — the
+  byte-stream YCbCr paths honour both fields; JPEG-in-TIFF pages are
+  still converted with the default transform (CCIR 601-1, no headroom).
+- **Tag catalogues: write side and DNG.** Exif / GPS / Interoperability
+  directories and the GeoTIFF GeoKey directory are *read* typed (see
+  *Tag catalogues*); writing goes through raw `AuxIfdEntry` lists
+  (Exif / GPS) and there is no GeoTIFF writer. DNG raw pages
+  (`PhotometricInterpretation` 32803 / 34892, the DNG predictors, the
+  colour pipeline of the DNG chapters) are not decoded, and the CFA
+  pattern tags are defined by a document (TIFF/EP) that is not staged.
 - **Chunky-subsampled YCbCr × `Predictor = 2`** — §14 differencing has
   no defined shape over the packed §21 data-unit stream (a 2-D luma
   block then single Cb / Cr samples per unit), so the combination
@@ -1389,6 +1463,70 @@ remaining gaps are:
   mapping — precise typed errors on both sides). `Predictor = 3` over
   non-float or non-16/32/64-bit data is rejected per the §14 "the reader
   must give up" rule.
+
+## Black-box matrix
+
+`tests/blackbox_matrix.rs` generates its files at run time (nothing is
+committed) and skips when the tools are absent. Counts below are from
+one run with `magick` 7.1.2, the `tiffcp` / `tiffinfo` / `tiff2rgba` /
+`raw2tiff` / `tiffset` / `tiffcrop` 4.7.2 tools, `ffmpeg` and `sips`.
+
+**Foreign → ours — 5330 files, 4981 decoded and confirmed, 345 refused
+as a known gap, 4 with no reader to compare against, 0 wrong.** Files
+written by other software, decoded here and
+by a black-box reader, compared sample-exact wherever the layout is
+lossless (floats bit-exact; JPEG / chroma-subsampled / CIELab pages
+within the bound stated next to each generator, because TIFF 6.0 §21 /
+§23 and T.81 leave that reconstruction to the reader):
+
+| Writer | Files | Pass | Known gap | Sweep |
+|---|---:|---:|---:|---|
+| `magick` | 2381 | 2219 | 162 | 59 sample kinds (unsigned at 1..16, 31, 32 and 64 bits, signed, half / single / double float, bilevel both polarities, palette 1 / 2 / 4 / 8-bit, gray + alpha, RGB(A) with associated / unassociated / unspecified extra, CMYK(A), YCbCr, CIELab 8 / 16) × None / PackBits / LZW / Deflate / Zstd / LZMA / WebP / JPEG / G3 / G4 × predictor 1 / 2 / 3 × strips (1, 7, all rows) / tiles (16², 32 × 48) × chunky / separate × both byte orders × classic / BigTIFF × `FillOrder`; JPEG sampling 1×1 … 4×2 at three qualities; sizes 1 × 1 … 640 × 400 |
+| `tiffcp` | 1892 | 1705 | 183 | re-writes of 16 base pages: every `-c` scheme incl. G3 1-D / 2-D / fill, G4, JPEG (YCbCr 2 × 2 and RGB), `-r` 1 / 5 / 16, tiles 16² / 32 × 16 / 128², `-p separate`, `-B` / `-L`, `-8`, `-f lsb2msb` |
+| `raw2tiff` | 864 | 864 | 0 | byte / short / long / sbyte / sshort / slong / float / double × gray (both polarities) / gray + extra / RGB / RGB + extra / CMYK / CIELab × pixel / band order × None / PackBits / LZW / Deflate (± predictor); the tool tags every file `FillOrder = 2` |
+| `ffmpeg` | 116 | 116 | 0 | 17 pixel formats (gray, gray + alpha, RGB(A) 8 / 16, palette, bilevel both polarities, YCbCr 4:4:4 / 4:2:2 / 4:4:0 / 4:2:0 / 4:1:1 / 4:1:0 with video-range `ReferenceBlackWhite`) × raw / PackBits / LZW / Deflate (32946) |
+| `sips` | 21 | 21 | 0 | 8 / 16-bit gray, gray + alpha, RGB, RGBA × default / LZW / PackBits |
+| `tiffset`, multi-page | 56 | 56 | 0 | all eight `Orientation` values on six layouts; five-page mixed chains (classic / BigTIFF, both byte orders, tiled); reduced-resolution pyramids |
+
+The known gap is `Compression = 34925` (LZMA2) alone: no description
+of the code or its stream framing is staged, so those files are
+refused with a typed error. Four files (separate-plane YCbCr
+JPEG) decode here but are refused by both black-box readers, so there
+is nothing to compare them with.
+
+**Ours → foreign — 14 014 files, 0 refused or mis-read.** Every layout
+the writer emits (43 input kinds ×
+17 schemes × predictor × chunky / separate × strips / `RowsPerStrip`
+1 / 7 / 16 / tiles 16² / 32 × 48 × classic / BigTIFF, at six image
+sizes from 1 × 1 to 300 × 200): 14 014 files, all accepted by
+`tiffinfo -D` without a warning; 5 820 confirmed sample-exact by two
+black-box readers, 6 474 by one, and 1 720 in layouts none of the readers
+on hand reads at all:
+
+- JPEG at 12 / 16-bit precision (both readers are 8-bit JPEG builds);
+- `Predictor = 2` on 4-bit samples (TIFF 6.0 §14 describes it; the
+  reader reports it unsupported);
+- chroma-subsampled YCbCr in separate planes (§21; the black-box tools
+  neither write nor read the reduced chroma planes);
+- lossless-JPEG YCbCr and a few degenerate 1 × 1 JPEG pages the
+  readers refuse.
+
+Those are checked against this crate's own reader only.
+
+What the matrix found and this round fixed: the floating-point
+predictor on chunky RGB (wrong differencing offset, both directions),
+the PackBits writer crossing row boundaries, the palette lost under
+`Orientation`, CIELab rendered through the wrong primaries,
+`ReferenceBlackWhite` ignored, odd-width subsampled JPEG refused,
+Zstandard frames refused, a predictor written next to uncompressed
+data — and every layout outside 1 / 4 / 8 / 16-bit unsigned that used
+to be refused (see *Supported layouts*).
+
+Never verified against an outside stream: GeoTIFF tags (no tool on
+hand writes them; hand-built directories only), `SubIFDs` image trees,
+old-style JPEG (`Compression = 6`, no current writer), CCITT
+uncompressed-mode segments, `Compression = 2` (CCITT RLE) from another
+writer, DNG raw pages.
 
 ## Fuzzing
 
@@ -1424,7 +1562,8 @@ contract under test is decoder-only panic-freedom — every public
 surface must return a `Result` for any input rather than abort,
 debug-overflow, OOM, or OOB-index.
 
-Run with nightly + cargo-fuzz:
+`.github/workflows/fuzz.yml` runs the three targets daily for a bounded
+budget. Run locally with nightly + cargo-fuzz:
 
 ```sh
 cargo +nightly fuzz run decode -- -max_total_time=60

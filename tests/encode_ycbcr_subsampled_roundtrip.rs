@@ -409,7 +409,10 @@ fn rejects_chunky_predictor_and_ccitt() {
             PageExtras::default(),
         )
     };
-    assert!(encode_page(&base(TiffCompression::None, true, false, None)).is_err());
+    // §14 differencing has no shape over the chunky data-unit stream.
+    // (Next to `None` the predictor is simply not written.)
+    assert!(encode_page(&base(TiffCompression::Lzw, true, false, None)).is_err());
+    assert!(encode_page(&base(TiffCompression::None, true, false, None)).is_ok());
     // Tiled planar subsampled now encodes (TN2-amended §21).
     assert!(encode_page(&base(TiffCompression::None, false, true, Some((16, 16)))).is_ok());
     assert!(

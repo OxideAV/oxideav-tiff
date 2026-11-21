@@ -355,7 +355,7 @@ fn classify(
                         "TIFF/JPEG: 3-plane full-res JPEG but photometric={photometric}"
                     )))
                 }
-            } else if c_stride * 2 == y_w {
+            } else if c_stride == y_w.div_ceil(2) {
                 // Chroma half-width → 4:2:2 or 4:2:0; rely on chroma
                 // height to disambiguate. mjpeg's plane layout for
                 // chroma uses stride == ceil(w/sx) per plane.
@@ -366,7 +366,7 @@ fn classify(
                 } else {
                     Ok(JpegPixelFormat::Yuv420P)
                 }
-            } else if c_stride * 4 == y_w {
+            } else if c_stride == y_w.div_ceil(4) {
                 Ok(JpegPixelFormat::Yuv411P)
             } else {
                 Err(Error::invalid(format!(

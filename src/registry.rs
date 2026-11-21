@@ -88,6 +88,10 @@ impl From<TiffPixelFormat> for PixelFormat {
             TiffPixelFormat::Cmyk => PixelFormat::Cmyk,
             TiffPixelFormat::GrayF32Le => PixelFormat::GrayF32Le,
             TiffPixelFormat::RgbF32Le => PixelFormat::RgbF32Le,
+            TiffPixelFormat::Ya8 => PixelFormat::Ya8,
+            TiffPixelFormat::Ya16Le => PixelFormat::Ya16Le,
+            TiffPixelFormat::Rgba64Le => PixelFormat::Rgba64Le,
+            TiffPixelFormat::RgbaF32Le => PixelFormat::RgbaF32Le,
         }
     }
 }
@@ -105,6 +109,10 @@ impl TryFrom<PixelFormat> for TiffPixelFormat {
             PixelFormat::Cmyk => TiffPixelFormat::Cmyk,
             PixelFormat::GrayF32Le => TiffPixelFormat::GrayF32Le,
             PixelFormat::RgbF32Le => TiffPixelFormat::RgbF32Le,
+            PixelFormat::Ya8 => TiffPixelFormat::Ya8,
+            PixelFormat::Ya16Le => TiffPixelFormat::Ya16Le,
+            PixelFormat::Rgba64Le => TiffPixelFormat::Rgba64Le,
+            PixelFormat::RgbaF32Le => TiffPixelFormat::RgbaF32Le,
             other => {
                 return Err(Error::unsupported(format!(
                     "TIFF: pixel format {other:?} has no TIFF layout (Gray8 / Gray16Le / \
@@ -492,15 +500,19 @@ impl CodecOptionsStruct for EncodeOptions {
 /// families, grey last): every one is written as itself — see
 /// [`TiffPixelFormat`] — and anything else is a typed `Unsupported`
 /// refusal from [`make_encoder`], never a silent conversion.
-pub const ACCEPTED_PIXEL_FORMATS: [PixelFormat; 9] = [
+pub const ACCEPTED_PIXEL_FORMATS: [PixelFormat; 13] = [
     PixelFormat::Rgb24,
     PixelFormat::Rgba,
     PixelFormat::Rgb48Le,
+    PixelFormat::Rgba64Le,
     PixelFormat::RgbF32Le,
+    PixelFormat::RgbaF32Le,
     PixelFormat::Cmyk,
     PixelFormat::Pal8,
     PixelFormat::Gray8,
+    PixelFormat::Ya8,
     PixelFormat::Gray16Le,
+    PixelFormat::Ya16Le,
     PixelFormat::GrayF32Le,
 ];
 

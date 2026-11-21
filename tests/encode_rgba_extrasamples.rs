@@ -34,11 +34,26 @@ fn pixels_rgba(w: u32, h: u32) -> Vec<u8> {
 
 /// The RGB triples of an RGBA raster — the decoder's §ExtraSamples
 /// render (leading color components verbatim, extra dropped).
-fn rgb_of(rgba: &[u8]) -> Vec<u8> {
+/// The straight colour the decoder hands back for `rgba` written with
+/// `kind`: the leading triple as stored, except under associated alpha
+/// (TIFF 6.0 §18), where the alpha is divided back out — `c × 255 / α`
+/// rounded and clamped, zero colour at zero alpha.
+fn rgb_of(rgba: &[u8], kind: ExtraSampleKind) -> Vec<u8> {
     rgba.as_chunks::<4>()
         .0
         .iter()
-        .flat_map(|q| [q[0], q[1], q[2]])
+        .flat_map(|q| {
+            let a = q[3] as u32;
+            [q[0], q[1], q[2]].map(|c| {
+                if kind != ExtraSampleKind::AssociatedAlpha || a == 255 {
+                    c
+                } else {
+                    (c as u32 * 255 + a / 2)
+                        .checked_div(a)
+                        .map_or(0, |v| v.min(255) as u8)
+                }
+            })
+        })
         .collect()
 }
 
@@ -62,11 +77,9 @@ fn page<'a>(
     )
 }
 
-/// The display render of a decoded RGB(+extra) page: `Rgb24` pages
-/// (unspecified / associated-alpha extras, dropped per the decoder's
-/// §ExtraSamples policy) are returned as stored; an unassociated-alpha
-/// page comes back in the native `Rgba` layout and `to_rgb8` drops the
-/// straight alpha. Either way the bytes equal the leading RGB triples.
+/// The display render of a decoded RGB(+extra) page: an unspecified
+/// extra is dropped (`Rgb24`); either alpha kind comes back in the
+/// native straight-alpha `Rgba` layout and `to_rgb8` drops the alpha.
 fn decode_rgb(tiff: &[u8]) -> Vec<u8> {
     let d = decode_page(tiff).expect("decode failed");
     assert!(
@@ -104,14 +117,14 @@ const KINDS: [ExtraSampleKind; 3] = [
 ];
 
 /// Strip layout: all three §ExtraSamples kinds × the compressor set ×
-/// the §14 predictor (offset SamplesPerPixel = 4). The decoder
-/// renders the leading RGB verbatim for every kind.
+/// the §14 predictor (offset SamplesPerPixel = 4). The decoder hands
+/// back the straight colour for every kind (see `rgb_of`).
 #[test]
 fn rgba_strip_roundtrip() {
     let (w, h) = (23u32, 11u32);
     let rgba = pixels_rgba(w, h);
-    let want = rgb_of(&rgba);
     for kind in KINDS {
+        let want = rgb_of(&rgba, kind);
         for compression in COMPRESSORS {
             for predictor in [false, true] {
                 let p = {
@@ -143,7 +156,7 @@ fn rgba_strip_roundtrip() {
 fn rgba_tiled_and_planar_roundtrip() {
     let (w, h) = (40u32, 24u32);
     let rgba = pixels_rgba(w, h);
-    let want = rgb_of(&rgba);
+    let want = rgb_of(&rgba, ExtraSampleKind::UnassociatedAlpha);
     for predictor in [false, true] {
         let p = {
             let mut encode_page = page(
@@ -200,7 +213,10 @@ fn rgba_bigtiff_roundtrip() {
         encode_page.extras = PageExtras::default();
         encode_page
     };
-    assert_eq!(decode_rgb(&encode_page(&p).expect("encode")), rgb_of(&rgba));
+    assert_eq!(
+        decode_rgb(&encode_page(&p).expect("encode")),
+        rgb_of(&rgba, ExtraSampleKind::AssociatedAlpha)
+    );
 }
 
 /// The written IFD carries the §ExtraSamples field set, and the raw

@@ -293,11 +293,16 @@ fn float_rejects_rgb_photometric_wrong_spp() {
 }
 
 #[test]
-fn float_predictor_rejected() {
-    // Predictor = 2 (§14 horizontal differencing) is integer-only; a
-    // float image declaring it must be rejected, not mis-decoded.
-    let strip = f32_strip(&[0.0, 1.0]);
+fn float_with_horizontal_differencing_decodes() {
+    // Predictor = 2 over float samples is differencing of the 32-bit
+    // words (modular, in file byte order) — what other writers store
+    // when asked for a horizontal predictor on float data. The second
+    // word holds `bits(1.0) − bits(0.25)`.
+    let (a, b) = (0.25f32, 1.0f32);
+    let mut strip = a.to_le_bytes().to_vec();
+    strip.extend_from_slice(&b.to_bits().wrapping_sub(a.to_bits()).to_le_bytes());
     let extra = [entry_short(317, 2)]; // Predictor = 2
     let bytes = build_float_row(2, 32, 1, &strip, &extra);
-    expect_err_containing(&bytes, "predictor");
+    let d = decode_page(&bytes).expect("float + Predictor=2 must decode");
+    assert_eq!(d.image.planes[0].data, f32_strip(&[a, b]));
 }

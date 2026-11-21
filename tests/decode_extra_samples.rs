@@ -227,59 +227,69 @@ fn extra_samples_two_unassociated_alpha_decodes_by_skipping() {
 }
 
 #[test]
-fn extra_samples_one_associated_alpha_displays_premultiplied_rgb() {
-    // `ExtraSamples = [1]` (associated alpha, pre-multiplied color):
-    // §18 "Associated Alpha Handling" (page 78) states "naive
-    // applications that want to display an RGBA image on a display can
-    // do so simply by displaying the RGB component values. This works
-    // because it is effectively the same as merging the image with a
-    // black background. … Cr = Cover * Aover" — "which is exactly the
-    // pre-multiplied color; i.e. what is stored in the image." So the
-    // stored pre-multiplied leading triple IS the composite-over-black
-    // display value; the decoder renders it directly and drops the
-    // trailing alpha. The stored `(10, 20, 30)` is already
-    // pre-multiplied by alpha = 99, so it renders verbatim.
+fn extra_samples_one_associated_alpha_is_divided_back_out() {
+    // `ExtraSamples = [1]` (associated alpha): TIFF 6.0 §18 stores the
+    // colour multiplied by the alpha ("Cr = Cover * Aover … which is
+    // exactly the pre-multiplied color; i.e. what is stored in the
+    // image"). The crate's alpha layouts are straight, so the alpha is
+    // kept and divided back out of the colour: `c × 255 / α`, rounded.
+    // Stored `(10, 20, 30)` under α = 99 is `(26, 52, 77)` straight.
     let bytes = build_1x1_rgb(4, &[10, 20, 30, 99], Some(&[1]));
     let d = decode_page(&bytes).expect("ExtraSamples=[1] (associated alpha) must decode");
     assert_eq!((d.image.width, d.image.height), (1, 1));
-    assert_eq!(d.image.planes[0].data, vec![10, 20, 30]);
+    assert_eq!(d.image.format, TiffPixelFormat::Rgba);
+    assert_eq!(d.image.planes[0].data, vec![26, 52, 77, 99]);
+    // Opaque associated alpha leaves the colour as stored.
+    let bytes = build_1x1_rgb(4, &[10, 20, 30, 255], Some(&[1]));
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!(d.image.planes[0].data, vec![10, 20, 30, 255]);
+    // A stored colour above its alpha (not a valid pre-multiplied
+    // pixel) clamps.
+    let bytes = build_1x1_rgb(4, &[200, 20, 30, 99], Some(&[1]));
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!(d.image.planes[0].data, vec![255, 52, 77, 99]);
 }
 
 #[test]
-fn extra_samples_associated_alpha_zero_alpha_renders_stored_black() {
+fn extra_samples_associated_alpha_zero_alpha_is_transparent_black() {
     // §18 page 78: "If A is zero, then the color components should be
-    // interpreted as zero." A well-formed pre-multiplied page with
-    // alpha = 0 therefore stores `(0, 0, 0)` for the color; displaying
-    // the stored triple directly (composite over black) reproduces the
-    // fully-transparent pixel as black, which is the §18 naive-display
-    // result.
+    // interpreted as zero."
     let bytes = build_1x1_rgb(4, &[0, 0, 0, 0], Some(&[1]));
     let d = decode_page(&bytes).expect("ExtraSamples=[1] alpha=0 must decode");
-    assert_eq!(d.image.planes[0].data, vec![0, 0, 0]);
+    assert_eq!(d.image.planes[0].data, vec![0, 0, 0, 0]);
+    // Even when the stored colour is not zero.
+    let bytes = build_1x1_rgb(4, &[9, 8, 7, 0], Some(&[1]));
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!(d.image.planes[0].data, vec![0, 0, 0, 0]);
 }
 
 #[test]
-fn extra_samples_two_extras_spp5_decode_by_skipping() {
+fn extra_samples_two_extras_spp5_keep_the_alpha_one() {
     // Spec example arithmetic: "If SamplesPerPixel is, say, 5 then
     // ExtraSamples will contain 2 values, one for each extra
-    // sample." Both extras are skippable kinds (0 and 2).
+    // sample." The unspecified extra (kind 0) is dropped; the
+    // unassociated-alpha one (kind 2, the fifth sample) is the alpha.
     let bytes = build_1x1_rgb(5, &[10, 20, 30, 99, 77], Some(&[0, 2]));
     let d = decode_page(&bytes).expect("ExtraSamples=[0,2] on SamplesPerPixel=5 must decode");
     assert_eq!((d.image.width, d.image.height), (1, 1));
+    assert_eq!(d.image.format, TiffPixelFormat::Rgba);
+    assert_eq!(d.image.planes[0].data, vec![10, 20, 30, 77]);
+    // Two unspecified extras: plain RGB.
+    let bytes = build_1x1_rgb(5, &[10, 20, 30, 99, 77], Some(&[0, 0]));
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!(d.image.format, TiffPixelFormat::Rgb24);
     assert_eq!(d.image.planes[0].data, vec![10, 20, 30]);
 }
 
 #[test]
 fn extra_samples_mixed_with_associated_alpha_decodes() {
-    // A `SamplesPerPixel = 5` RGB page declaring `[0, 1]` (one
-    // unspecified extra, one associated-alpha extra) still renders the
-    // leading R, G, B triple verbatim: the unspecified extra carries no
-    // meaning and the associated-alpha pre-multiplied color is the §18
-    // composite-over-black display value. Both trailing extras drop.
+    // `[0, 1]` on `SamplesPerPixel = 5`: the unspecified extra is
+    // dropped and the associated alpha (77) divided out of the colour:
+    // `10 × 255 / 77 = 33`, `66`, `99`.
     let bytes = build_1x1_rgb(5, &[10, 20, 30, 99, 77], Some(&[0, 1]));
     let d = decode_page(&bytes).expect("ExtraSamples=[0,1] must decode");
     assert_eq!((d.image.width, d.image.height), (1, 1));
-    assert_eq!(d.image.planes[0].data, vec![10, 20, 30]);
+    assert_eq!(d.image.planes[0].data, vec![33, 66, 99, 77]);
 }
 
 #[test]

@@ -54,10 +54,12 @@ fn entry(tag: u16, ftype: u16, count: u32, value: u32) -> [u8; 12] {
 /// Apply the encoder-side floating-point predictor to one scan-line of
 /// `n` little-endian samples, each `bps / 8` bytes wide: byte-plane
 /// reorder (most-significant byte plane first), then horizontal byte
-/// differencing. The row is built for a little-endian (II) file, so the
+/// differencing with an offset of `comps` bytes — TIFF 6.0 §14: "an
+/// offset of SamplesPerPixel" for chunky data, 1 for a single
+/// component. The row is built for a little-endian (II) file, so the
 /// most-significant byte of a sample is its last in-file byte
 /// (`bytes - 1`); plane 0 collects those high bytes.
-fn encode_float_predictor_row(row: &[u8], n: usize, bps: usize) -> Vec<u8> {
+fn encode_float_predictor_row(row: &[u8], n: usize, comps: usize, bps: usize) -> Vec<u8> {
     let bytes = bps / 8;
     assert_eq!(row.len(), n * bytes);
     // Stage 1: regroup into significance-ordered byte planes (plane p =
@@ -72,8 +74,8 @@ fn encode_float_predictor_row(row: &[u8], n: usize, bps: usize) -> Vec<u8> {
     }
     // Stage 2: horizontal byte differencing across the reordered row.
     let mut out = planar.clone();
-    for i in (1..out.len()).rev() {
-        out[i] = planar[i].wrapping_sub(planar[i - 1]);
+    for i in (comps..out.len()).rev() {
+        out[i] = planar[i].wrapping_sub(planar[i - comps]);
     }
     out
 }
@@ -93,7 +95,12 @@ fn build_float_gray_tiff(w: u32, h: u32, bps: u16, predictor: u16, sample_bytes:
         let mut out = Vec::with_capacity(sample_bytes.len());
         for r in 0..h as usize {
             let row = &sample_bytes[r * row_bytes..r * row_bytes + row_bytes];
-            out.extend_from_slice(&encode_float_predictor_row(row, w as usize, bps as usize));
+            out.extend_from_slice(&encode_float_predictor_row(
+                row,
+                w as usize,
+                1,
+                bps as usize,
+            ));
         }
         out
     } else {
@@ -471,6 +478,7 @@ fn build_float_rgb_tiff(w: u32, h: u32, bps: u16, predictor: u16, sample_bytes: 
             out.extend_from_slice(&encode_float_predictor_row(
                 row,
                 w as usize * 3,
+                3,
                 bps as usize,
             ));
         }

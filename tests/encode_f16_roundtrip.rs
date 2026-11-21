@@ -304,10 +304,22 @@ fn encode_f16_ifd_fields_and_verbatim_strip() {
     }
     assert_eq!(&file[off..off + len], &want[..], "verbatim f16 payload");
 
-    // With predictor on, tag 317 must carry 3 (the §14 float predictor).
+    // A predictor next to uncompressed data is not written (§14 ties
+    // it to the LZW family; other readers ignore it there).
+    let page_none = {
+        let mut encode_page = page.clone();
+        encode_page.predictor = true;
+        encode_page
+    };
+    let file_none = encode_page(&page_none).unwrap();
+    assert_eq!(file_none, file, "predictor is skipped for Compression=1");
+
+    // With predictor on under LZW, tag 317 must carry 3 (the §14 float
+    // predictor).
     let page_p = {
         let mut encode_page = page;
         encode_page.predictor = true;
+        encode_page.compression = TiffCompression::Lzw;
         encode_page
     };
     let file_p = encode_page(&page_p).unwrap();

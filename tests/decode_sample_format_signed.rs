@@ -191,27 +191,12 @@ fn signed_16bit_big_endian_on_disk() {
     assert_eq!(d.image.planes[0].data, expect);
 }
 
-/// Assert `decode_page` returned an error whose Display includes the
-/// given substring (`Page` is not `Debug`).
-fn expect_err_containing(bytes: &[u8], needle: &str) {
-    match decode_page(bytes) {
-        Ok(_) => panic!("expected an error containing {needle:?}, got Ok(..)"),
-        Err(e) => {
-            let msg = format!("{e}");
-            assert!(
-                msg.contains(needle),
-                "expected error to contain {needle:?}, got: {msg}"
-            );
-        }
-    }
-}
-
 #[test]
-fn signed_rgb_is_rejected() {
-    // SampleFormat = 2 on a 3-channel RGB image has no single
-    // defensible display mapping in this build, so it is refused per
-    // the §SampleFormat "terminate gracefully" reader rule rather than
-    // silently mis-rendered. Build a 1x1 RGB signed fixture.
+fn signed_rgb_maps_each_channel_offset_binary() {
+    // SampleFormat = 2 on RGB: every channel takes the same
+    // order-preserving offset-binary map as signed grayscale (sign bit
+    // flipped — the signed minimum is black). A 1x1 RGB signed fixture
+    // storing (0, 16, 32) renders (0x80, 0x90, 0xA0).
     let mut out = Vec::new();
     out.extend_from_slice(b"II");
     out.extend_from_slice(&42u16.to_le_bytes());
@@ -249,17 +234,23 @@ fn signed_rgb_is_rejected() {
     out.extend_from_slice(&entry_short(339, 2)); // SampleFormat signed
     out.extend_from_slice(&0u32.to_le_bytes());
 
-    expect_err_containing(&out, "SampleFormat=2");
+    let d = decode_page(&out).expect("signed RGB must decode");
+    assert_eq!(d.image.format, oxideav_tiff::TiffPixelFormat::Rgb24);
+    assert_eq!(d.image.planes[0].data, vec![0x80u8, 0x90, 0xA0]);
 }
 
 #[test]
-fn signed_4bit_is_rejected() {
-    // 4-bit signed grayscale is outside the assembled integer widths
-    // (8 / 16), so it is refused with the precise SampleFormat=2
-    // message rather than mis-decoded.
+fn signed_4bit_widens_after_the_sign_flip() {
+    // 4-bit signed grayscale: the sign bit (8) is flipped, then the
+    // 4-bit value is widened to 8 bits by replication. Stored 1 and 2
+    // become 9 → 0x99 and 10 → 0xAA; stored −8 (0b1000) is black.
     let strip = [0x12u8]; // two 4-bit samples
     let bytes = build_gray_row(2, 4, 1, 2, &strip);
-    expect_err_containing(&bytes, "SampleFormat=2");
+    let d = decode_page(&bytes).expect("4-bit signed must decode");
+    assert_eq!(d.image.planes[0].data, vec![0x99u8, 0xAA]);
+    let bytes = build_gray_row(2, 4, 1, 2, &[0x87u8]);
+    let d = decode_page(&bytes).unwrap();
+    assert_eq!(d.image.planes[0].data, vec![0x00u8, 0xFF]);
 }
 
 #[test]

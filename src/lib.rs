@@ -159,6 +159,7 @@ pub mod decoder;
 pub mod encoder;
 pub mod error;
 mod exif;
+mod generic;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub mod ifd;

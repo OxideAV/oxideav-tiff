@@ -770,13 +770,12 @@ fn deprecated_wrappers_keep_the_historical_shapes() {
         encode_tiff_multi(std::slice::from_ref(&page)).unwrap(),
         encode_page(&page).unwrap()
     );
-    // Rgba32 with the other extra-sample kinds still flattens to Rgb24
-    // in the contract decode as well (no straight-alpha layout exists
-    // for pre-multiplied or unspecified extras).
+    // An unspecified extra sample is dropped (`Rgb24`); associated
+    // alpha is kept, divided back out of the colour (`Rgba`).
     let rgba_px = ramp(16, 2);
-    for kind in [
-        ExtraSampleKind::Unspecified,
-        ExtraSampleKind::AssociatedAlpha,
+    for (kind, want) in [
+        (ExtraSampleKind::Unspecified, PixelFormat::Rgb24),
+        (ExtraSampleKind::AssociatedAlpha, PixelFormat::Rgba),
     ] {
         let p = EncodePage::new(
             2,
@@ -793,6 +792,6 @@ fn deprecated_wrappers_keep_the_historical_shapes() {
             PageExtras::default(),
         );
         let img = decode(&encode_page(&p).unwrap()).unwrap();
-        assert_eq!(img.format, PixelFormat::Rgb24, "{kind:?}");
+        assert_eq!(img.format, want, "{kind:?}");
     }
 }

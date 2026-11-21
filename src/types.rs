@@ -255,6 +255,9 @@ pub const COMPRESSION_LZW: u16 = 5;
 pub const COMPRESSION_JPEG_OLD: u16 = 6;
 pub const COMPRESSION_JPEG_NEW: u16 = 7;
 pub const COMPRESSION_DEFLATE_ADOBE: u16 = 8;
+/// Deflate under its older code (same zlib stream per segment as
+/// [`COMPRESSION_DEFLATE_ADOBE`]); read, never written.
+pub const COMPRESSION_DEFLATE_LEGACY: u16 = 32946;
 pub const COMPRESSION_PACKBITS: u16 = 32773;
 /// Zstandard (RFC 8478). De-facto registry extension value — there is
 /// no Adobe technical note for it; see the OxideAV trace doc
@@ -293,6 +296,9 @@ pub const PHOTO_TRANSPARENCY_MASK: u16 = 4;
 pub const PHOTO_CMYK: u16 = 5;
 pub const PHOTO_YCBCR: u16 = 6;
 pub const PHOTO_CIELAB: u16 = 8;
+/// ICCLab: CIELab with the ICC profile encoding (*Adobe Photoshop TIFF
+/// Technical Notes*, Lab update).
+pub const PHOTO_ICCLAB: u16 = 9;
 
 // --- Predictor (Section 14) ---------------------------------------------
 pub const PREDICTOR_NONE: u16 = 1;
