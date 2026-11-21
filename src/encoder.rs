@@ -262,6 +262,15 @@ pub struct PageExtras<'a> {
     /// `YCbCrSubsampleVert` (§21 page 90), covering both the chunky
     /// data-unit stream and the reduced planar chroma planes.
     pub rows_per_strip: Option<u32>,
+    /// Thread budget for strip / tile compression: `0` and `1` are
+    /// serial (the default); `n > 1` lets up to `n` threads compress
+    /// the segments of a multi-strip or tiled chunky page. The file
+    /// written is identical at every budget.
+    pub threads: usize,
+    /// Coder effort for `Deflate` (`0..=9`, default 6) and `Zstd`
+    /// (`1..=22`, default 3); ignored by every other scheme. Lower is
+    /// faster and larger. The level is not stored in the file.
+    pub level: Option<u8>,
     /// Write a `SubIFDs` tree (tag 330, LONG / LONG8 × N): each
     /// element is a complete child *image* page — strips / tiles,
     /// compression, predictor, planar and BigTIFF-variant handling
@@ -414,6 +423,21 @@ impl<'a> PageExtras<'a> {
     #[must_use]
     pub fn with_iptc(mut self, iptc: Option<&'a [u8]>) -> Self {
         self.iptc = iptc;
+        self
+    }
+
+    /// Set the thread budget for strip / tile compression (see
+    /// [`Self::threads`]).
+    #[must_use]
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    /// Set the Deflate / Zstandard coder effort (see [`Self::level`]).
+    #[must_use]
+    pub fn with_level(mut self, level: Option<u8>) -> Self {
+        self.level = level;
         self
     }
 
@@ -1787,6 +1811,30 @@ struct PageIfd {
 /// pathologically deep caller-constructed tree).
 const MAX_SUB_IFD_DEPTH: usize = 8;
 
+/// A compression scheme together with the per-page settings of its
+/// segment coder: the strip / tile builders take one of these.
+#[derive(Clone, Copy)]
+struct Packer {
+    scheme: TiffCompression,
+    /// Coder effort for Deflate (0..=9) / Zstandard (1..=22); `None` =
+    /// the coder's default.
+    level: Option<u8>,
+    /// Thread budget for segment compression (0 and 1 are serial).
+    threads: usize,
+}
+
+impl Packer {
+    fn pack(self, raw: &[u8], width: u32, rows: u32) -> Result<Vec<u8>> {
+        match (self.scheme, self.level) {
+            (TiffCompression::Deflate, Some(level)) => {
+                crate::compress::pack_deflate_level(raw, level)
+            }
+            (TiffCompression::Zstd, Some(level)) => crate::compress::pack_zstd_level(raw, level),
+            (scheme, _) => scheme.pack(raw, width, rows),
+        }
+    }
+}
+
 fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<PlannedPage> {
     // §14: "Currently this field is used only with LZW (Compression=5)
     // encoding"; the Deflate technote and the Zstandard registration
@@ -1807,6 +1855,11 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
         &unpredicted
     } else {
         p
+    };
+    let packer = Packer {
+        scheme: p.compression,
+        level: p.extras.level,
+        threads: p.extras.threads,
     };
     if depth > MAX_SUB_IFD_DEPTH {
         return Err(Error::invalid(format!(
@@ -2023,23 +2076,14 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                  (TIFF 6.0 §15 TileWidth / TileLength); got {tw}x{th}"
             )));
         }
-        // 1-bit Bilevel / TransparencyMask input now tiles via the
-        // dedicated sub-byte slicer `build_tiles_bilevel` below (§15: each
-        // tile row is an independent byte-padded scanline, and `tile_w`
-        // being a multiple of 16 keeps every tile-column boundary
-        // byte-aligned at BitsPerSample = 1). It only combines with the
-        // byte-aligned compressors the decoder's sub-byte tile path reads
-        // (None / PackBits / LZW / Deflate / ZSTD): the CCITT schemes are
-        // facsimile-line coders the encoder emits strip-oriented, and the
-        // predictor is undefined for 1-bit data (both rejected just below
-        // / above), so reaching `build_tiles_bilevel` implies a plain
-        // byte-aligned compressor.
-        if p.compression.is_ccitt() {
-            return Err(Error::invalid(
-                "TIFF encode: tiled layout cannot combine with CCITT compression \
-                 (Compression=2/3), which is bilevel-only",
-            ));
-        }
+        // 1-bit Bilevel / TransparencyMask input tiles via the dedicated
+        // sub-byte slicer `build_tiles_bilevel` below (§15: each tile
+        // row is an independent byte-padded scanline, and `tile_w` being
+        // a multiple of 16 keeps every tile-column boundary byte-aligned
+        // at BitsPerSample = 1). The CCITT schemes compose too: §15,
+        // "Tiles are compressed individually, just as strips are
+        // compressed" — each tile is one facsimile page `TileWidth`
+        // pixels wide and `TileLength` lines long.
         // Planar tile write (one tile grid per component plane, TIFF 6.0
         // §15 TileOffsets: "For PlanarConfiguration = 2, the offsets for
         // the first component plane are stored first, followed by all the
@@ -2727,7 +2771,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                     sh,
                     sv,
                     p.predictor,
-                    p.compression,
+                    packer,
                 )?
             } else {
                 build_tiles_ycbcr_subsampled(
@@ -2738,7 +2782,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                     tile_h as usize,
                     sh,
                     sv,
-                    p.compression,
+                    packer,
                 )?
             }
         } else if p.planar {
@@ -2759,7 +2803,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 bps,
                 p.predictor && !is_float,
                 p.predictor && is_float,
-                p.compression,
+                packer,
             )?
         } else if bps == 4 {
             // Tiled 4-bit sub-byte layout (TIFF 6.0 §15). `TileWidth`
@@ -2778,7 +2822,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 tile_w as usize,
                 tile_h as usize,
                 p.predictor,
-                p.compression,
+                packer,
             )?
         } else if bps == 1 {
             // Tiled 1-bit bilevel layout (TIFF 6.0 §15). The bilevel /
@@ -2792,7 +2836,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 p.height as usize,
                 tile_w as usize,
                 tile_h as usize,
-                p.compression,
+                packer,
             )?
         } else {
             // Tiled chunky layout (TIFF 6.0 §15). Split the interleaved
@@ -2814,7 +2858,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 bps,
                 p.predictor && !is_float,
                 p.predictor && is_float,
-                p.compression,
+                packer,
             )?
         }
     } else if p.planar {
@@ -2833,7 +2877,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 sh,
                 sv,
                 p.predictor,
-                p.compression,
+                packer,
                 rows_per_strip as usize,
             )?
         } else {
@@ -2845,7 +2889,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                 bps,
                 p.predictor,
                 is_float,
-                p.compression,
+                packer,
                 rows_per_strip as usize,
             )?
         }
@@ -2885,7 +2929,7 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
             }
         }
         if rows_per_strip >= p.height {
-            vec![p.compression.pack(&raw_pixels, p.width, p.height)?]
+            vec![packer.pack(&raw_pixels, p.width, p.height)?]
         } else {
             // Multi-strip chunky write. Both §14 predictors are
             // row-local transforms (each row differences within
@@ -2898,9 +2942,11 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
             // stream a group of sv luma rows occupies one data-unit
             // row; everything else is the byte-aligned (or sub-byte
             // row-padded) scanline stride.
-            let mut out = Vec::new();
-            let mut done: u32 = 0;
-            while done < p.height {
+            // Strips are compressed independently — on several threads
+            // when the caller granted a budget — and collected in order.
+            let count = p.height.div_ceil(rows_per_strip) as usize;
+            let pack_strip = |i: usize| -> Result<Vec<u8>> {
+                let done = i as u32 * rows_per_strip;
                 let rows_this = rows_per_strip.min(p.height - done);
                 let (start, end) = if let Some((sh, sv)) = ycbcr_subsampling_nontrivial {
                     let unit_row_bytes = ((p.width as usize) / sh) * (sh * sv + 2);
@@ -2912,12 +2958,13 @@ fn plan_page_full(p: &EncodePage<'_>, bigtiff: bool, depth: usize) -> Result<Pla
                     let start = done as usize * row_bytes;
                     (start, start + rows_this as usize * row_bytes)
                 };
-                out.push(
-                    p.compression
-                        .pack(&raw_pixels[start..end], p.width, rows_this)?,
-                );
-                done += rows_this;
-            }
+                packer.pack(&raw_pixels[start..end], p.width, rows_this)
+            };
+            let mut out = Vec::with_capacity(count);
+            crate::par::run_ordered(packer.threads, count, pack_strip, |_, strip| {
+                out.push(strip);
+                Ok(())
+            })?;
             out
         }
     };
@@ -4015,7 +4062,7 @@ fn build_planes_chunky_source(
     bps: usize,
     predictor: bool,
     is_float: bool,
-    compression: TiffCompression,
+    compression: Packer,
     rows_per_strip: usize,
 ) -> Result<Vec<Vec<u8>>> {
     let bytes_per_sample = bps / 8;
@@ -4098,7 +4145,7 @@ fn build_planes_ycbcr_subsampled(
     sh: usize,
     sv: usize,
     predictor: bool,
-    compression: TiffCompression,
+    compression: Packer,
     rows_per_strip: usize,
 ) -> Result<Vec<Vec<u8>>> {
     let cw = width / sh;
@@ -4175,7 +4222,7 @@ fn build_tiles_planar_ycbcr_subsampled(
     sh: usize,
     sv: usize,
     predictor: bool,
-    compression: TiffCompression,
+    compression: Packer,
 ) -> Result<Vec<Vec<u8>>> {
     let cw = width / sh;
     let ch = height / sv;
@@ -4279,7 +4326,7 @@ fn build_tiles_ycbcr_subsampled(
     tile_h: usize,
     sh: usize,
     sv: usize,
-    compression: TiffCompression,
+    compression: Packer,
 ) -> Result<Vec<Vec<u8>>> {
     let unit_len = sh * sv + 2;
     let tile_du_across = tile_w / sh;
@@ -4358,7 +4405,7 @@ fn build_tiles(
     bps: usize,
     predictor: bool,
     float_predictor: bool,
-    compression: TiffCompression,
+    compression: Packer,
 ) -> Result<Vec<Vec<u8>>> {
     let bytes_per_sample = bps / 8;
     let pixel_bytes = samples * bytes_per_sample;
@@ -4369,57 +4416,53 @@ fn build_tiles(
     let tiles_across = width.div_ceil(tile_w);
     let tiles_down = height.div_ceil(tile_h);
 
-    let mut out = Vec::with_capacity(tiles_across * tiles_down);
-    for ty in 0..tiles_down {
-        for tx in 0..tiles_across {
-            // Extract this tile, replicating the last visible column /
-            // row into the padded region (§15 "Padding").
-            let mut tile = vec![0u8; tile_size_bytes];
-            for r in 0..tile_h {
-                // Source image row, clamped to the last visible row.
-                let src_y = (ty * tile_h + r).min(height - 1);
-                for c in 0..tile_w {
-                    // Source image column, clamped to the last visible
-                    // column.
-                    let src_x = (tx * tile_w + c).min(width - 1);
-                    let src_off = src_y * image_row_bytes + src_x * pixel_bytes;
-                    let dst_off = r * tile_row_bytes + c * pixel_bytes;
-                    tile[dst_off..dst_off + pixel_bytes]
-                        .copy_from_slice(&pixels[src_off..src_off + pixel_bytes]);
-                }
+    // Tiles are built and compressed independently — on several
+    // threads when the caller granted a budget — and collected in
+    // order.
+    let build_tile = |idx: usize| -> Result<Vec<u8>> {
+        let (ty, tx) = (idx / tiles_across, idx % tiles_across);
+        let mut tile = vec![0u8; tile_size_bytes];
+        // Columns of the tile that lie inside the image copy as one
+        // span per row; the rest replicate the last column (§15
+        // padding), and rows past the bottom replicate the last row.
+        let x0 = tx * tile_w;
+        let inside = tile_w.min(width - x0);
+        for r in 0..tile_h {
+            let src_y = (ty * tile_h + r).min(height - 1);
+            let src_row = src_y * image_row_bytes + x0 * pixel_bytes;
+            let dst_row = r * tile_row_bytes;
+            tile[dst_row..dst_row + inside * pixel_bytes]
+                .copy_from_slice(&pixels[src_row..src_row + inside * pixel_bytes]);
+            let last = src_row + (inside - 1) * pixel_bytes;
+            for c in inside..tile_w {
+                let dst_off = dst_row + c * pixel_bytes;
+                tile[dst_off..dst_off + pixel_bytes]
+                    .copy_from_slice(&pixels[last..last + pixel_bytes]);
             }
-            // §14 / §15: each tile is a self-contained image for the
-            // predictor — difference per-tile with the tile's own row
-            // stride so the decoder's per-tile cumulative add reverses
-            // it exactly. Float tiles take the §14 floating-point
-            // predictor (significance byte-plane reorder + byte
-            // differencing), reversed per-tile by the decoder's
-            // `undo_float_predictor`.
-            if float_predictor {
-                forward_float_predictor(
-                    &mut tile,
-                    tile_w * samples,
-                    samples,
-                    tile_h,
-                    bytes_per_sample,
-                    tile_row_bytes,
-                )?;
-            } else if predictor {
-                forward_horizontal_predictor(
-                    &mut tile,
-                    tile_w,
-                    tile_h,
-                    samples,
-                    bps,
-                    tile_row_bytes,
-                )?;
-            }
-            // §15: "Tiles are compressed individually, just as strips
-            // are compressed." Pass the tile geometry through (only the
-            // CCITT coders read it, and tiling rejects CCITT upstream).
-            out.push(compression.pack(&tile, tile_w as u32, tile_h as u32)?);
         }
-    }
+        if float_predictor {
+            forward_float_predictor(
+                &mut tile,
+                tile_w * samples,
+                samples,
+                tile_h,
+                bytes_per_sample,
+                tile_row_bytes,
+            )?;
+        } else if predictor {
+            forward_horizontal_predictor(&mut tile, tile_w, tile_h, samples, bps, tile_row_bytes)?;
+        }
+        // §15: "Tiles are compressed individually, just as strips
+        // are compressed." Pass the tile geometry through (only the
+        // CCITT coders read it, and tiling rejects CCITT upstream).
+        compression.pack(&tile, tile_w as u32, tile_h as u32)
+    };
+    let count = tiles_across * tiles_down;
+    let mut out = Vec::with_capacity(count);
+    crate::par::run_ordered(compression.threads, count, build_tile, |_, tile| {
+        out.push(tile);
+        Ok(())
+    })?;
     Ok(out)
 }
 
@@ -4465,7 +4508,7 @@ fn build_tiles_sub4(
     tile_w: usize,
     tile_h: usize,
     predictor: bool,
-    compression: TiffCompression,
+    compression: Packer,
 ) -> Result<Vec<Vec<u8>>> {
     let src_row_bytes = width.div_ceil(2);
     let tile_row_bytes = tile_w / 2; // tile_w is a validated multiple of 16
@@ -4511,7 +4554,7 @@ fn build_tiles_bilevel(
     height: usize,
     tile_w: usize,
     tile_h: usize,
-    compression: TiffCompression,
+    compression: Packer,
 ) -> Result<Vec<Vec<u8>>> {
     let image_row_bytes = width.div_ceil(8);
     // `tile_w` is a multiple of 16 (caller-validated), so this is exact.
@@ -4584,7 +4627,7 @@ fn build_tiles_planar(
     bps: usize,
     predictor: bool,
     float_predictor: bool,
-    compression: TiffCompression,
+    compression: Packer,
 ) -> Result<Vec<Vec<u8>>> {
     let bytes_per_sample = bps / 8;
     let pixel_bytes = samples * bytes_per_sample;
@@ -5992,20 +6035,53 @@ mod tests {
     }
 
     #[test]
-    fn encode_tiling_rejects_ccitt() {
-        let packed = bilevel_checkerboard(32, 16);
-        let page = EncodePage {
-            width: 32,
-            height: 16,
-            kind: EncodePixelFormat::Bilevel { pixels: &packed },
-            compression: TiffCompression::CcittRle,
-            predictor: false,
-            planar: false,
-            tiling: Some((16, 16)),
-            bigtiff: false,
-            extras: PageExtras::default(),
-        };
-        assert!(encode_page(&page).is_err());
+    fn encode_tiling_composes_with_ccitt() {
+        // §15: "Tiles are compressed individually, just as strips are
+        // compressed" — every CCITT scheme codes a tile as a page of
+        // TileWidth × TileLength, edge tiles included.
+        let packed = bilevel_checkerboard(40, 24);
+        let reference = decode_page(
+            &encode_page(&EncodePage {
+                width: 40,
+                height: 24,
+                kind: EncodePixelFormat::Bilevel { pixels: &packed },
+                compression: TiffCompression::None,
+                predictor: false,
+                planar: false,
+                tiling: None,
+                bigtiff: false,
+                extras: PageExtras::default(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        for compression in [
+            TiffCompression::CcittRle,
+            TiffCompression::CcittT4OneD {
+                eol_byte_aligned: true,
+            },
+            TiffCompression::CcittT4TwoD {
+                eol_byte_aligned: false,
+                uncompressed: false,
+            },
+            TiffCompression::CcittT6 {
+                uncompressed: false,
+            },
+        ] {
+            let page = EncodePage {
+                width: 40,
+                height: 24,
+                kind: EncodePixelFormat::Bilevel { pixels: &packed },
+                compression,
+                predictor: false,
+                planar: false,
+                tiling: Some((16, 16)),
+                bigtiff: false,
+                extras: PageExtras::default(),
+            };
+            let tiled = decode_page(&encode_page(&page).unwrap()).unwrap();
+            assert_eq!(tiled.image, reference.image, "{compression:?}");
+        }
     }
 
     #[test]

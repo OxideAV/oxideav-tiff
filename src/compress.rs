@@ -107,48 +107,6 @@ const LZW_EOI_CODE: u16 = 257;
 const LZW_FIRST_CODE: u16 = 258;
 const LZW_MAX_CODE: u16 = 4095; // 12-bit max
 
-/// Bit reader for TIFF LZW: codes are stored MSB-first (FillOrder=1,
-/// per spec: "LZW compression codes are stored into bytes in
-/// high-to-low-order fashion").
-struct LzwBits<'a> {
-    src: &'a [u8],
-    bit_pos: usize, // global bit index from the start of `src`
-}
-
-impl<'a> LzwBits<'a> {
-    fn new(src: &'a [u8]) -> Self {
-        Self { src, bit_pos: 0 }
-    }
-
-    /// Read `n` bits (n <= 12). Returns None if the stream is
-    /// exhausted before `n` bits could be read.
-    fn read(&mut self, n: u32) -> Option<u16> {
-        let total_bits = self.src.len() * 8;
-        if self.bit_pos + n as usize > total_bits {
-            return None;
-        }
-        let mut value: u32 = 0;
-        let mut remaining = n;
-        let mut pos = self.bit_pos;
-        while remaining > 0 {
-            let byte = self.src[pos / 8];
-            let bit_in_byte = (pos % 8) as u32;
-            // bits remaining in this byte starting at bit_in_byte
-            // (high-bit-first)
-            let avail = 8 - bit_in_byte;
-            let take = avail.min(remaining);
-            let shift_right = avail - take;
-            let mask = (1u32 << take) - 1;
-            let chunk = ((byte as u32) >> shift_right) & mask;
-            value = (value << take) | chunk;
-            pos += take as usize;
-            remaining -= take;
-        }
-        self.bit_pos = pos;
-        Some(value as u16)
-    }
-}
-
 /// Decompress a TIFF LZW strip to the expected number of output bytes.
 ///
 /// Per spec: the decompressor mirrors the compressor's table. The
@@ -161,141 +119,98 @@ impl<'a> LzwBits<'a> {
 /// quirk: switch to N+1-bit codes when the next code to write would
 /// be entry 2^N - 1).
 pub fn unpack_lzw(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
-    let mut bits = LzwBits::new(input);
-    // Bound the upfront reservation. LZW's worst-case ratio per
-    // codeword is the longest dictionary string (capped at 4095
-    // codes, so a single 12-bit code can emit at most a few thousand
-    // bytes), times `input.len() * 8 / 9` codewords for a 9-bit
-    // run; we use `MAX_INITIAL_RESERVE` directly because that bound
-    // is already much larger than any realistic single-strip output.
-    let reserve = expected_len.min(MAX_INITIAL_RESERVE);
-    let mut out = Vec::with_capacity(reserve);
+    // Bound the upfront reservation: a hostile `expected_len` must not
+    // size the buffer by itself.
+    let mut out: Vec<u8> = Vec::with_capacity(expected_len.min(MAX_INITIAL_RESERVE));
 
-    // Per-strip table: each entry is the prefix-code + last-byte
-    // pair, plus a cached length so we can pre-size on emit.
-    // entries[0..=255] are leaf single-byte strings; we store
-    // (prefix=NONE, byte=i, len=1) for them. NONE = u16::MAX.
-    const NONE: u16 = u16::MAX;
-    let mut prefix: Vec<u16> = vec![0; (LZW_MAX_CODE as usize) + 1];
-    let mut suffix: Vec<u8> = vec![0; (LZW_MAX_CODE as usize) + 1];
-    let mut len: Vec<u32> = vec![0; (LZW_MAX_CODE as usize) + 1];
-    let init = |prefix: &mut [u16], suffix: &mut [u8], len: &mut [u32]| {
-        for i in 0..=255u16 {
-            prefix[i as usize] = NONE;
-            suffix[i as usize] = i as u8;
-            len[i as usize] = 1;
-        }
-    };
-    init(&mut prefix, &mut suffix, &mut len);
-
+    // The string table as spans of the output. The string of a code
+    // `c >= 258` is `out[pos[c] .. pos[c] + len[c]]`: a new entry is
+    // "the previous string + the first byte of the current one", and
+    // the current string is written directly behind the previous one,
+    // so the entry is the previous string's span grown by one byte.
+    // Emitting a code is then one block copy instead of a walk along a
+    // prefix chain. Codes below 256 are their own byte. A Clear only
+    // resets `next_code`: entries at or above it are never read.
+    const TABLE: usize = (LZW_MAX_CODE as usize) + 1;
+    let mut pos = [0u32; TABLE];
+    let mut len = [0u32; TABLE];
     let mut code_size: u32 = 9;
     let mut next_code: u16 = LZW_FIRST_CODE;
-    let mut prev_code: Option<u16> = None;
+    // Span of the previously emitted string (None right after a Clear).
+    let mut prev: Option<(u32, u32)> = None;
 
-    // Reusable scratch for decoding a string in reverse.
-    let mut scratch: Vec<u8> = Vec::with_capacity(64);
-
-    // Helper: write the string at `code` to `out`, returning its
-    // first byte (used as the suffix when adding the new entry).
-    //
-    // Returns `None` if the prefix chain failed to terminate within
-    // `LZW_MAX_CODE + 1` hops — a well-formed TIFF/LZW table has at
-    // most 4096 entries, and each `prefix[c]` walk strictly shortens
-    // the implied string by one byte (the table is built bottom-up
-    // from leaves), so a chain longer than that is a structural
-    // invariant violation (self-cycle or cross-cycle introduced by
-    // a malformed stream). Defence-in-depth against any future
-    // construction that bypasses the leaf-only entry guard above.
-    let emit = |code: u16,
-                out: &mut Vec<u8>,
-                scratch: &mut Vec<u8>,
-                prefix: &[u16],
-                suffix: &[u8]|
-     -> Option<u8> {
-        scratch.clear();
-        let mut c = code;
-        for _ in 0..=(LZW_MAX_CODE as usize) {
-            scratch.push(suffix[c as usize]);
-            let p = prefix[c as usize];
-            if p == NONE {
-                // scratch now holds the string in reverse order.
-                for &b in scratch.iter().rev() {
-                    out.push(b);
+    // MSB-first bit reader over a 64-bit window.
+    let mut acc: u64 = 0;
+    let mut have: u32 = 0;
+    let mut bytes = input.iter();
+    loop {
+        while have < code_size {
+            match bytes.next() {
+                Some(&b) => {
+                    acc = (acc << 8) | b as u64;
+                    have += 8;
                 }
-                return Some(*scratch.last().unwrap());
+                // Stream exhausted before a full code: end of data.
+                None => return Ok(out),
             }
-            c = p;
         }
-        None
-    };
-
-    while let Some(code) = bits.read(code_size) {
+        have -= code_size;
+        let code = ((acc >> have) & ((1u64 << code_size) - 1)) as u16;
         if code == LZW_EOI_CODE {
             break;
         }
         if code == LZW_CLEAR_CODE {
-            init(&mut prefix, &mut suffix, &mut len);
             code_size = 9;
             next_code = LZW_FIRST_CODE;
-            prev_code = None;
+            prev = None;
             continue;
         }
-        if let Some(prev) = prev_code {
-            if code < next_code {
-                // Code is in the table.
-                let first = emit(code, &mut out, &mut scratch, &prefix, &suffix)
-                    .ok_or_else(|| Error::invalid("TIFF/LZW: prefix chain cycle"))?;
+        let start = out.len() as u32;
+        let cur_len = match prev {
+            None => {
+                // First code after a Clear: must be a single byte —
+                // nothing else is in the table yet.
+                if code >= LZW_CLEAR_CODE {
+                    return Err(Error::invalid(format!(
+                        "TIFF/LZW: first code after Clear is {code}, must be a leaf (<256)"
+                    )));
+                }
+                out.push(code as u8);
+                1
+            }
+            Some((prev_pos, prev_len)) => {
+                let cur_len = if code < LZW_CLEAR_CODE {
+                    out.push(code as u8);
+                    1
+                } else if code < next_code {
+                    let (p, l) = (pos[code as usize] as usize, len[code as usize] as usize);
+                    out.extend_from_within(p..p + l);
+                    l as u32
+                } else if code == next_code {
+                    // The code being defined right now: the previous
+                    // string followed by its own first byte.
+                    let (p, l) = (prev_pos as usize, prev_len as usize);
+                    out.extend_from_within(p..p + l);
+                    let first = out[p];
+                    out.push(first);
+                    prev_len + 1
+                } else {
+                    return Err(Error::invalid(format!(
+                        "TIFF/LZW: code {code} > next_code {next_code}"
+                    )));
+                };
                 if next_code <= LZW_MAX_CODE {
-                    prefix[next_code as usize] = prev;
-                    suffix[next_code as usize] = first;
-                    len[next_code as usize] = len[prev as usize] + 1;
+                    pos[next_code as usize] = prev_pos;
+                    len[next_code as usize] = prev_len + 1;
                     next_code += 1;
                 }
-            } else if code == next_code {
-                // The "KwKwK" special case: the new code refers to
-                // an entry that's about to be added. The string is
-                // prev-string + first-char-of-prev-string.
-                // Emit prev string then append its first char.
-                let first = emit(prev, &mut out, &mut scratch, &prefix, &suffix)
-                    .ok_or_else(|| Error::invalid("TIFF/LZW: prefix chain cycle"))?;
-                out.push(first);
-                if next_code <= LZW_MAX_CODE {
-                    prefix[next_code as usize] = prev;
-                    suffix[next_code as usize] = first;
-                    len[next_code as usize] = len[prev as usize] + 1;
-                    next_code += 1;
-                }
-            } else {
-                return Err(Error::invalid(format!(
-                    "TIFF/LZW: code {code} > next_code {next_code}"
-                )));
+                cur_len
             }
-        } else {
-            // First code after a Clear: must be a single byte (table
-            // indices 0..=255). Any larger value would index into an
-            // uninitialised table slot, and feeding that slot back
-            // through `emit` can chase a self-referential prefix
-            // chain forever (because the *next* iteration's
-            // `code == next_code` branch writes `prefix[next_code]
-            // = prev_code`, and the first-after-Clear we are about
-            // to record as `prev_code` could itself equal
-            // `next_code`). Reject explicitly so the cycle never
-            // forms.
-            if code >= LZW_CLEAR_CODE {
-                return Err(Error::invalid(format!(
-                    "TIFF/LZW: first code after Clear is {code}, must be a leaf (<256)"
-                )));
-            }
-            let _first = emit(code, &mut out, &mut scratch, &prefix, &suffix)
-                .ok_or_else(|| Error::invalid("TIFF/LZW: prefix chain cycle"))?;
-        }
-        prev_code = Some(code);
-        // Bump the code size BEFORE writing the next-code-to-add
-        // exceeds the current width — TIFF Section 13 specifies the
-        // "bump one early" quirk: switch to N+1-bit reads as soon
-        // as table entry (2^N - 1) has just been added (next_code
-        // == 2^N - 1 was the entry just stored, so the *next* add
-        // will be at next_code which now equals 2^N).
+        };
+        prev = Some((start, cur_len));
+        // TIFF section 13: the code width grows one code early — as
+        // soon as table entry 2^N - 2 has been added, the next code is
+        // read with N + 1 bits.
         if code_size < 12 && next_code >= (1u16 << code_size) - 1 {
             code_size += 1;
         }
@@ -406,90 +321,77 @@ pub fn pack_packbits(input: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Size of the trie's parent-indexed arrays. One slot per possible
-/// dictionary entry (codes `0..=LZW_MAX_CODE`), so the trie covers
-/// the entire 12-bit code space without any allocation past
-/// initialisation.
-const LZW_TRIE_SIZE: usize = (LZW_MAX_CODE as usize) + 1;
-
-/// Sentinel "no child" / "no sibling" value. The dictionary never
-/// stores codes below `LZW_FIRST_CODE` as child entries (codes 0..=255
-/// are roots, 256/257 are control codes), so 0 is unambiguously
-/// "empty slot" for both `first_child` and `next_sibling`.
-const LZW_TRIE_NONE: u16 = 0;
-
-/// LZW encoder trie. Each dictionary entry `c` is identified by its
-/// `(parent_code, suffix_byte)` pair; the trie indexes by parent and
-/// walks a singly-linked list of children to find the matching
-/// suffix, replacing the old `HashMap<(u16, u8), u16>` lookup with
-/// pure array math.
+/// Dictionary of the LZW encoder: `(prefix code, next byte) → code`.
 ///
-/// Three flat parallel arrays of `LZW_TRIE_SIZE` elements:
-///
-/// * `first_child[parent]` — head of `parent`'s child list, or
-///   `LZW_TRIE_NONE` if no children have been added under that prefix
-///   yet.
-/// * `next_sibling[c]` — next entry in `c`'s parent's child list, or
-///   `LZW_TRIE_NONE` at end of list.
-/// * `suffix[c]` — the byte that, concatenated to `parent`'s string,
-///   produces `c`'s string.
-///
-/// Total RAM footprint per encoder invocation: `LZW_TRIE_SIZE * (2 +
-/// 2 + 1) = 4096 * 5 = 20 480` bytes, all stack-resident through the
-/// `Box<LzwTrie>` heap allocation (so a deep recursion can't blow the
-/// stack on small-default-stack platforms).
-struct LzwTrie {
-    first_child: [u16; LZW_TRIE_SIZE],
-    next_sibling: [u16; LZW_TRIE_SIZE],
-    suffix: [u8; LZW_TRIE_SIZE],
+/// An open-addressing table with linear probing over 2¹³ slots (the
+/// table never holds more than 3838 strings, so it stays under half
+/// full). Every slot carries the generation it was written in: a Clear
+/// bumps the generation instead of wiping the table, and a slot from
+/// an older generation reads as empty.
+struct LzwDict {
+    keys: Vec<u32>,
+    codes: Vec<u16>,
+    stamps: Vec<u32>,
+    generation: u32,
 }
 
-impl LzwTrie {
-    fn new() -> Box<Self> {
-        // 20 KiB zero-initialised; `LZW_TRIE_NONE = 0` matches the
-        // zeroes, so the trie starts empty correctly.
-        Box::new(Self {
-            first_child: [0; LZW_TRIE_SIZE],
-            next_sibling: [0; LZW_TRIE_SIZE],
-            suffix: [0; LZW_TRIE_SIZE],
-        })
-    }
+impl LzwDict {
+    const BITS: u32 = 13;
+    const SLOTS: usize = 1 << Self::BITS;
 
-    /// Reset on `ClearCode`: every child list head becomes empty.
-    /// We only need to zero `first_child` because once a parent has
-    /// no head, the `next_sibling` / `suffix` slots are unreachable
-    /// from a lookup walk regardless of their stale values, and the
-    /// next `insert` overwrites them.
-    fn reset(&mut self) {
-        self.first_child.fill(LZW_TRIE_NONE);
-    }
-
-    /// Lookup `(parent, byte)` in the trie. Returns `Some(code)` if a
-    /// dictionary entry already exists for this pair, else `None`.
-    /// Walks the singly-linked child list at `first_child[parent]`
-    /// (in insertion order) comparing `suffix[c] == byte`.
-    #[inline]
-    fn lookup(&self, parent: u16, byte: u8) -> Option<u16> {
-        let mut c = self.first_child[parent as usize];
-        while c != LZW_TRIE_NONE {
-            if self.suffix[c as usize] == byte {
-                return Some(c);
-            }
-            c = self.next_sibling[c as usize];
+    fn new() -> Self {
+        Self {
+            keys: vec![0; Self::SLOTS],
+            codes: vec![0; Self::SLOTS],
+            stamps: vec![0; Self::SLOTS],
+            generation: 1,
         }
-        None
     }
 
-    /// Insert a new entry `new_code` as a child of `parent` with the
-    /// given `byte`. The new entry is pushed at the *head* of
-    /// `parent`'s child list so it's the first one a subsequent
-    /// lookup sees — modest cache-locality win for repeated motifs in
-    /// the input.
     #[inline]
-    fn insert(&mut self, parent: u16, byte: u8, new_code: u16) {
-        self.suffix[new_code as usize] = byte;
-        self.next_sibling[new_code as usize] = self.first_child[parent as usize];
-        self.first_child[parent as usize] = new_code;
+    fn key(prefix: u16, byte: u8) -> u32 {
+        (prefix as u32) << 8 | byte as u32
+    }
+
+    /// Fibonacci hashing of the 20-bit key onto the slot index.
+    #[inline]
+    fn home(key: u32) -> usize {
+        (key.wrapping_mul(0x9E37_79B1) >> (32 - Self::BITS)) as usize
+    }
+
+    #[inline]
+    fn lookup(&self, prefix: u16, byte: u8) -> Option<u16> {
+        let key = Self::key(prefix, byte);
+        let mut i = Self::home(key);
+        loop {
+            if self.stamps[i] != self.generation {
+                return None;
+            }
+            if self.keys[i] == key {
+                return Some(self.codes[i]);
+            }
+            i = (i + 1) & (Self::SLOTS - 1);
+        }
+    }
+
+    #[inline]
+    fn insert(&mut self, prefix: u16, byte: u8, code: u16) {
+        let key = Self::key(prefix, byte);
+        let mut i = Self::home(key);
+        while self.stamps[i] == self.generation {
+            i = (i + 1) & (Self::SLOTS - 1);
+        }
+        self.stamps[i] = self.generation;
+        self.keys[i] = key;
+        self.codes[i] = code;
+    }
+
+    fn reset(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.stamps.fill(0);
+            self.generation = 1;
+        }
     }
 }
 
@@ -499,17 +401,13 @@ impl LzwTrie {
 /// as `unpack_lzw` does on the read side, and emits `ClearCode`
 /// when the table fills.
 ///
-/// Round 129: the dictionary is a flat-array trie keyed by
-/// `(parent_code, suffix_byte)` instead of the previous
-/// `HashMap<(u16, u8), u16>`. The bitstream output is byte-for-byte
-/// identical to the old implementation (same greedy match, same
-/// code-width bump points, same Clear-on-fill timing), so the change
-/// is invisible to any decoder, but lookup is now a short chain walk
-/// over up-to-12-bit codes rather than a `(u16, u8)` hash + bucket
-/// scan, eliminating the per-pixel HashMap overhead that dominated
-/// the encoder profile on Rgb24 / Gray8 strips.
+/// The dictionary is a hashed table keyed by `(prefix code, next
+/// byte)` ([`LzwDict`]): one probe per input byte, and a Clear costs a
+/// counter bump. The bitstream is the same greedy longest-match stream
+/// as before (same code-width bump points, same Clear-on-fill timing),
+/// so the change is invisible to any decoder.
 pub fn pack_lzw(input: &[u8]) -> Vec<u8> {
-    let mut trie = LzwTrie::new();
+    let mut trie = LzwDict::new();
     let mut next_code: u16 = LZW_FIRST_CODE;
     let mut code_size: u32 = 9;
 
@@ -601,6 +499,24 @@ pub fn pack_deflate(input: &[u8]) -> Result<Vec<u8>> {
 /// encoder-side runtime parameter only — it is never stored in the
 /// TIFF file and the decoder is level-agnostic (trace doc §2) — so no
 /// knob is exposed here.
+/// [`pack_deflate`] at an explicit zlib level (`0..=9`, clamped).
+pub fn pack_deflate_level(input: &[u8], level: u8) -> Result<Vec<u8>> {
+    let config = compcol::zlib::EncoderConfig {
+        level: level.min(9),
+    };
+    compcol::vec::compress_to_vec_with::<compcol::zlib::Zlib>(input, config)
+        .map_err(|e| Error::invalid(format!("TIFF/Deflate: zlib deflate failed: {e:?}")))
+}
+
+/// [`pack_zstd`] at an explicit Zstandard level (`1..=22`, clamped).
+pub fn pack_zstd_level(input: &[u8], level: u8) -> Result<Vec<u8>> {
+    let config = compcol::zstd::EncoderConfig {
+        level: level.clamp(1, 22) as i32,
+    };
+    compcol::vec::compress_to_vec_with::<compcol::zstd::Zstd>(input, config)
+        .map_err(|e| Error::invalid(format!("TIFF/ZSTD: Zstandard frame encode failed: {e:?}")))
+}
+
 pub fn pack_zstd(input: &[u8]) -> Result<Vec<u8>> {
     compcol::vec::compress_to_vec::<compcol::zstd::Zstd>(input)
         .map_err(|e| Error::invalid(format!("TIFF/ZSTD: Zstandard frame encode failed: {e:?}")))
@@ -835,12 +751,9 @@ mod tests {
     #[test]
     fn lzw_roundtrip_byte_pattern_repeated() {
         // Tightly-repeating 16-byte motif — the inverse of a
-        // pseudo-random fixture: the trie's child lists for the
-        // motif's prefix codes get hit repeatedly, so this is the
-        // case where the head-insertion order in `LzwTrie::insert`
-        // earns its keep (most-recently-added child is found first).
-        // Mainly a roundtrip-correctness check; the bench file
-        // exercises throughput.
+        // pseudo-random fixture: long dictionary strings, many Clears.
+        // A roundtrip-correctness check; the bench file exercises
+        // throughput.
         let motif = b"abcdefghijklmnop";
         let mut src = Vec::with_capacity(motif.len() * 2048);
         for _ in 0..2048 {
@@ -852,19 +765,18 @@ mod tests {
     }
 
     #[test]
-    fn lzw_trie_lookup_and_insert() {
-        // Direct unit test of the trie API: insert two children of
-        // the same parent, look both up, look up a missing one.
-        // Verifies head-insertion ordering and the lookup-walk
-        // termination contract.
-        let mut t = LzwTrie::new();
+    fn lzw_dictionary_lookup_insert_and_reset() {
+        // Direct unit test of the encoder dictionary: insert two
+        // strings with the same prefix, look both up, look up missing
+        // ones, and check that a reset empties it without a wipe.
+        let mut t = LzwDict::new();
         t.insert(b'A' as u16, b'B', 258);
         t.insert(b'A' as u16, b'C', 259);
         assert_eq!(t.lookup(b'A' as u16, b'B'), Some(258));
         assert_eq!(t.lookup(b'A' as u16, b'C'), Some(259));
         assert_eq!(t.lookup(b'A' as u16, b'X'), None);
         assert_eq!(t.lookup(b'Z' as u16, b'B'), None);
-        // Reset clears the parent's child list.
+        // A reset starts a new generation: old slots read as empty.
         t.reset();
         assert_eq!(t.lookup(b'A' as u16, b'B'), None);
         // Post-reset insert is visible again.

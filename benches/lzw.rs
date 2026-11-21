@@ -1,13 +1,10 @@
 //! Criterion benchmarks for the TIFF LZW encoder hot path
 //! (`oxideav_tiff::compress::pack_lzw`).
 //!
-//! Round 129 (depth-mode benchmarks): the LZW encoder is the slowest
-//! piece of the Compression=5 strip writer. Round 129 replaced the
-//! per-byte `HashMap<(u16, u8), u16>` lookup with a flat-array trie
-//! (`first_child` / `next_sibling` / `suffix`, all `[u16; 4096]` /
-//! `[u8; 4096]`). This bench file is the A/B harness for that change
-//! and for any future encoder tweaks (Clear-on-fill heuristics, code
-//! width search, dictionary-pre-seeding for known-prefix corpora).
+//! The dictionary lookup (`(prefix code, next byte) → code`, one per
+//! input byte) dominates the encoder; this bench file is the A/B
+//! harness for changes to it (hash-map → child-list trie → the current
+//! generation-stamped hashed table) and for any future encoder tweaks.
 //!
 //! Every fixture is built deterministically in-bench — no committed
 //! payload files, no `docs/` reads, no external library calls — so
@@ -16,25 +13,20 @@
 //! Scenarios:
 //!
 //!   - **lzw_random_64k**: 64 KiB of xorshift32 output. The "worst
-//!     case" for LZW: very few prefix repeats, so the trie's child
-//!     lists stay shallow and the dictionary fills slowly. Sets the
-//!     baseline for the per-byte lookup overhead.
+//!     case" for LZW: very few prefix repeats, the dictionary fills
+//!     with two-byte strings and is cleared often. Sets the baseline
+//!     for the per-byte lookup and per-Clear cost.
 //!   - **lzw_repeating_motif_64k**: 16-byte motif repeated 4096
-//!     times. Tight prefix reuse — the trie hits long matches early
-//!     and the bench is dominated by the inner-loop lookup walk.
-//!     This is the case where head-insertion ordering in
-//!     `LzwTrie::insert` (most-recently-added-child first) matters
-//!     most.
-//!   - **lzw_zeros_256k**: 256 KiB of all-zero bytes. Triggers the
-//!     longest-possible run of incremental dictionary growth before
-//!     `LZW_MAX_CODE = 4095` is hit and the Clear path fires; useful
-//!     for measuring the per-Clear reset cost (`first_child.fill(0)`
-//!     dominates the post-reset window).
+//!     times. Tight prefix reuse — long matches, almost every lookup
+//!     hits.
+//!   - **lzw_zeros_256k**: 256 KiB of all-zero bytes. The longest
+//!     possible strings before `LZW_MAX_CODE = 4095` is reached and
+//!     the Clear path fires.
 //!   - **lzw_natural_image_64k**: 256x256 8-bit greyscale gradient
 //!     (vertical ramp + horizontal sinusoid). A more realistic
-//!     image-like payload: medium prefix reuse, no pathological
-//!     patterns, code width climbs steadily from 9 to 12 bits over
-//!     the strip. Most representative of a real TIFF strip.
+//!     image-like payload: medium prefix reuse, code width climbs
+//!     steadily from 9 to 12 bits over the strip. Most representative
+//!     of a real TIFF strip.
 //!
 //! Run with:
 //!     cargo bench -p oxideav-tiff --bench lzw

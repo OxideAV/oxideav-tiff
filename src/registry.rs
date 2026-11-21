@@ -632,6 +632,11 @@ impl Decoder for TiffDecoder {
     fn codec_id(&self) -> &CodecId {
         &self.codec_id
     }
+    /// The framework's thread budget becomes the strip / tile budget
+    /// of every page decode (serial unless one is granted).
+    fn set_execution_context(&mut self, ctx: &oxideav_core::ExecutionContext) {
+        self.opts.threads = ctx.threads;
+    }
     fn send_packet(&mut self, packet: &Packet) -> Result<()> {
         let data = packet.data.clone();
         let header = parse_header(&data)?;
@@ -791,6 +796,11 @@ pub struct TiffEncoder {
 }
 
 impl Encoder for TiffEncoder {
+    /// The framework's thread budget becomes the strip / tile budget
+    /// of every page written (serial unless one is granted).
+    fn set_execution_context(&mut self, ctx: &oxideav_core::ExecutionContext) {
+        self.opts.threads = ctx.threads;
+    }
     fn codec_id(&self) -> &CodecId {
         &self.output_params.codec_id
     }

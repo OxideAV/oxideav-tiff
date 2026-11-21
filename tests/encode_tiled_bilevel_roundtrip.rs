@@ -220,22 +220,52 @@ fn tile_dims_must_be_multiple_of_16() {
 }
 
 #[test]
-fn ccitt_tiling_still_rejected() {
-    // CCITT remains strip-oriented on the encode side.
-    let pixels = bilevel_pattern(32, 32);
-    let page = EncodePage::new(
-        32,
-        32,
-        EncodePixelFormat::Bilevel { pixels: &pixels },
+fn ccitt_composes_with_tiling() {
+    // TIFF 6.0 §15: "Tiles are compressed individually, just as strips
+    // are compressed" — a CCITT tile is a facsimile page TileWidth wide
+    // and TileLength long. Partial edge tiles on both axes.
+    let (w, h) = (45u32, 37u32);
+    let pixels = bilevel_pattern(w, h);
+    let strip = oxideav_tiff::decode_page(
+        &encode_page(&EncodePage::new(
+            w,
+            h,
+            EncodePixelFormat::Bilevel { pixels: &pixels },
+            TiffCompression::None,
+            false,
+            false,
+            None,
+            false,
+            PageExtras::default(),
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    for compression in [
         TiffCompression::CcittRle,
-        false,
-        false,
-        Some((16, 16)),
-        false,
-        PageExtras::default(),
-    );
-    assert!(
-        encode_page(&page).is_err(),
-        "CCITT + tiling must be rejected"
-    );
+        TiffCompression::CcittT4OneD {
+            eol_byte_aligned: false,
+        },
+        TiffCompression::CcittT4TwoD {
+            eol_byte_aligned: true,
+            uncompressed: false,
+        },
+        TiffCompression::CcittT6 {
+            uncompressed: false,
+        },
+    ] {
+        let page = EncodePage::new(
+            w,
+            h,
+            EncodePixelFormat::Bilevel { pixels: &pixels },
+            compression,
+            false,
+            false,
+            Some((16, 32)),
+            false,
+            PageExtras::default(),
+        );
+        let tiled = oxideav_tiff::decode_page(&encode_page(&page).unwrap()).unwrap();
+        assert_eq!(tiled.image, strip.image, "{compression:?}");
+    }
 }

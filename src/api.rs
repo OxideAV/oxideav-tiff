@@ -575,6 +575,8 @@ impl<'i> PreparedPage<'i> {
                 Some(gps_entries)
             },
             rows_per_strip: opts.rows_per_strip,
+            threads: opts.threads,
+            level: opts.level,
             page_number: paging.map(|(n, _)| n),
             reduced_resolution: paging.is_some_and(|(_, t)| t & 0b1 != 0),
             multi_page: paging.is_some_and(|(_, t)| t & 0b10 != 0),

@@ -166,6 +166,7 @@ pub mod ifd;
 pub mod image;
 pub mod metadata;
 mod options;
+mod par;
 pub mod tags;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]

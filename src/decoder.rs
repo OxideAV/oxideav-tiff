@@ -944,6 +944,7 @@ pub(crate) fn decode_ifd(
                 t4_options,
                 t6_options,
                 fill_order,
+                opts.threads,
             )?
         }
     } else if planar == PLANAR_SEPARATE {
@@ -975,6 +976,7 @@ pub(crate) fn decode_ifd(
             t4_options,
             t6_options,
             fill_order,
+            opts.threads,
         )?
     };
 
@@ -1596,6 +1598,7 @@ fn decode_strips(
     t4_options: u32,
     t6_options: u32,
     fill_order: FillOrder,
+    threads: usize,
 ) -> Result<Vec<u8>> {
     let rows_per_strip = find(entries, TAG_ROWS_PER_STRIP)
         .map(|e| e.as_u32(bo))
@@ -1663,12 +1666,19 @@ fn decode_strips(
         row_bytes * height as usize
     };
     let mut pixel_buf: Vec<u8> = Vec::with_capacity(buf_cap);
-    let mut rows_done: u32 = 0;
-    for (i, (&offset, &byte_count)) in strip_offsets
-        .iter()
-        .zip(strip_byte_counts.iter())
-        .enumerate()
-    {
+    if rows_per_strip == 0 {
+        return Err(Error::invalid("TIFF: RowsPerStrip=0"));
+    }
+    // Strips are independent: each is decompressed and un-predicted on
+    // its own (on several threads when the caller granted a budget) and
+    // appended in order.
+    let rows_per_strip = rows_per_strip.min(height);
+    let needed = height.div_ceil(rows_per_strip) as usize;
+    if strip_offsets.len() < needed {
+        return Err(Error::invalid("TIFF: strips did not cover full image"));
+    }
+    let decode_strip = |i: usize| -> Result<Vec<u8>> {
+        let (offset, byte_count) = (strip_offsets[i], strip_byte_counts[i]);
         let start = offset as usize;
         let end = start
             .checked_add(byte_count as usize)
@@ -1677,7 +1687,7 @@ fn decode_strips(
             return Err(Error::invalid(format!("TIFF: strip {i} extends past EOF")));
         }
         let raw = &input[start..end];
-        let rows_this_strip = rows_per_strip.min(height - rows_done);
+        let rows_this_strip = rows_per_strip.min(height - i as u32 * rows_per_strip);
         let expected = ycbcr_strip_bytes(rows_this_strip);
         let ccitt = if matches!(
             compression,
@@ -1711,7 +1721,8 @@ fn decode_strips(
             )));
         }
         // Apply predictor per-row if requested.
-        let mut strip = decompressed[..expected].to_vec();
+        let mut strip = decompressed;
+        strip.truncate(expected);
         // Uncompressed bilevel data carried with FillOrder=2 has the
         // bit order reversed in every byte; canonicalise to MSB-first
         // here so the bilevel-to-Gray8 expander downstream sees the
@@ -1757,15 +1768,12 @@ fn decode_strips(
                 bo,
             )?;
         }
+        Ok(strip)
+    };
+    crate::par::run_ordered(threads, needed, decode_strip, |_, strip| {
         pixel_buf.extend_from_slice(&strip);
-        rows_done += rows_this_strip;
-        if rows_done >= height {
-            break;
-        }
-    }
-    if rows_done < height {
-        return Err(Error::invalid("TIFF: strips did not cover full image"));
-    }
+        Ok(())
+    })?;
     Ok(pixel_buf)
 }
 
@@ -1783,6 +1791,7 @@ fn decode_tiles(
     t4_options: u32,
     t6_options: u32,
     fill_order: FillOrder,
+    threads: usize,
 ) -> Result<Vec<u8>> {
     let tile_w = find(entries, TAG_TILE_WIDTH)
         .ok_or_else(|| Error::invalid("TIFF: missing TileWidth"))?
@@ -1862,133 +1871,134 @@ fn decode_tiles(
     let image_row_bytes = bits_per_image_row.div_ceil(8) as usize;
     let mut out = vec![0u8; image_row_bytes * height as usize];
 
-    for ty in 0..tiles_down {
-        for tx in 0..tiles_across {
-            let idx = (ty * tiles_across + tx) as usize;
-            let off = tile_offsets[idx] as usize;
-            let bc = tile_byte_counts[idx] as usize;
-            let end = off
-                .checked_add(bc)
-                .ok_or_else(|| Error::invalid("TIFF: tile length overflow"))?;
-            if end > input.len() {
-                return Err(Error::invalid("TIFF: tile extends past EOF"));
-            }
-            let raw = &input[off..end];
-            let ccitt = if matches!(
-                compression,
-                COMPRESSION_CCITT_HUFFMAN | COMPRESSION_CCITT_T4 | COMPRESSION_CCITT_T6
-            ) {
-                Some(CcittParams {
-                    width: tile_w,
-                    rows: tile_h,
-                    fill: fill_order,
-                    t4_options,
-                    t6_options,
-                })
-            } else {
-                None
-            };
-            // Compression=50001: an edge tile stays padded to the full
-            // §15 tile geometry, so the embedded WebP frame is always
-            // exactly `TileWidth` × `TileLength` (pinned against the
-            // independently produced tiled reference sample).
-            let webp = if compression == COMPRESSION_WEBP {
-                Some(WebpParams {
-                    width: tile_w,
-                    rows: tile_h,
-                    samples_per_pixel,
-                })
-            } else {
-                None
-            };
-            let mut tile = decompress_block(raw, tile_size_bytes, compression, ccitt, webp)?;
-            if tile.len() < tile_size_bytes {
-                return Err(Error::invalid("TIFF: tile short after decompress"));
-            }
-            tile.truncate(tile_size_bytes);
-            // Uncompressed bilevel tile path: see the strip-path
-            // companion comment. Tiles are gated to bps_first % 8 ==
-            // 0 above (see the explicit error a few lines below), so
-            // in practice bps_first==1 + tiles is rejected, but we
-            // keep the normalisation here for symmetry / safety.
-            if compression == COMPRESSION_NONE
-                && fill_order == FillOrder::LsbFirst
-                && bps_first == 1
-            {
-                reverse_bits_in_place(&mut tile);
-            }
-            if predictor == PREDICTOR_HORIZONTAL {
-                apply_horizontal_predictor(
-                    &mut tile,
-                    tile_w as usize,
-                    tile_h as usize,
-                    samples_per_pixel as usize,
-                    bps_first as usize,
-                    tile_row_bytes,
-                    bo,
-                )?;
-            } else if predictor == PREDICTOR_FLOAT {
-                undo_float_predictor(
-                    &mut tile,
-                    tile_w as usize * samples_per_pixel as usize,
-                    samples_per_pixel as usize,
-                    tile_h as usize,
-                    bps_first as usize / 8,
-                    tile_row_bytes,
-                    bo,
-                )?;
-            }
-
-            // Copy the visible portion of the tile into the output
-            // buffer. Tiles at the right/bottom edge may extend past
-            // the image; those samples are simply dropped.
-            //
-            // TIFF 6.0 §15 (page 67) requires `TileWidth` to be "a
-            // multiple of 16", and §15 (page 66) states that within a
-            // tile "each row of data in a tile is treated as a separate
-            // 'scanline'", i.e. every tile row is independently padded
-            // to a byte boundary (`tile_row_bytes` above). Together
-            // these make every tile-column boundary in the destination
-            // image row land on a byte boundary even at sub-byte bit
-            // depths: column `tx` starts at bit
-            // `tx · TileWidth · SamplesPerPixel · BitsPerSample`, and
-            // `TileWidth` being a multiple of 16 makes that product a
-            // multiple of 8 for any `BitsPerSample ∈ {1, 4}`. The
-            // visible region of a tile row therefore copies as a whole
-            // number of bytes starting at a byte-aligned destination
-            // offset, exactly as for byte-aligned depths — the only
-            // difference is that the visible width is measured in bits
-            // and rounded up to bytes (the high bits of a partial-tile
-            // trailing byte are padding the downstream expander, which
-            // reads only `width` pixels per row, ignores).
-            let bits_per_dst_origin =
-                (tx as u64) * (tile_w as u64) * (samples_per_pixel as u64) * (bps_first as u64);
-            if !bits_per_dst_origin.is_multiple_of(8) {
-                // Cannot occur for `TileWidth` a multiple of 16, but
-                // guard against a non-conformant writer rather than
-                // panic on a misaligned slice.
-                return Err(Error::invalid(
-                    "TIFF: tile column boundary is not byte-aligned (TileWidth must be a \
-                     multiple of 16 per TIFF 6.0 §15)",
-                ));
-            }
-            let dst_origin_x = (bits_per_dst_origin / 8) as usize;
-            let visible_w =
-                ((width as i64) - (tx as i64) * (tile_w as i64)).min(tile_w as i64) as usize;
-            let visible_h =
-                ((height as i64) - (ty as i64) * (tile_h as i64)).min(tile_h as i64) as usize;
-            let visible_row_bytes =
-                ((visible_w as u64) * (samples_per_pixel as u64) * (bps_first as u64)).div_ceil(8)
-                    as usize;
-            let dst_origin_y = ty as usize * tile_h as usize;
-            for r in 0..visible_h {
-                let src_off = r * tile_row_bytes;
-                let dst_off = (dst_origin_y + r) * image_row_bytes + dst_origin_x;
-                out[dst_off..dst_off + visible_row_bytes]
-                    .copy_from_slice(&tile[src_off..src_off + visible_row_bytes]);
-            }
+    // Tiles are independent: each is decompressed and un-predicted on
+    // its own (on several threads when the caller granted a budget),
+    // then copied into place in index order.
+    let decode_tile = |idx: usize| -> Result<Vec<u8>> {
+        let off = tile_offsets[idx] as usize;
+        let bc = tile_byte_counts[idx] as usize;
+        let end = off
+            .checked_add(bc)
+            .ok_or_else(|| Error::invalid("TIFF: tile length overflow"))?;
+        if end > input.len() {
+            return Err(Error::invalid("TIFF: tile extends past EOF"));
         }
-    }
+        let raw = &input[off..end];
+        let ccitt = if matches!(
+            compression,
+            COMPRESSION_CCITT_HUFFMAN | COMPRESSION_CCITT_T4 | COMPRESSION_CCITT_T6
+        ) {
+            Some(CcittParams {
+                width: tile_w,
+                rows: tile_h,
+                fill: fill_order,
+                t4_options,
+                t6_options,
+            })
+        } else {
+            None
+        };
+        // Compression=50001: an edge tile stays padded to the full
+        // §15 tile geometry, so the embedded WebP frame is always
+        // exactly `TileWidth` × `TileLength` (pinned against the
+        // independently produced tiled reference sample).
+        let webp = if compression == COMPRESSION_WEBP {
+            Some(WebpParams {
+                width: tile_w,
+                rows: tile_h,
+                samples_per_pixel,
+            })
+        } else {
+            None
+        };
+        let mut tile = decompress_block(raw, tile_size_bytes, compression, ccitt, webp)?;
+        if tile.len() < tile_size_bytes {
+            return Err(Error::invalid("TIFF: tile short after decompress"));
+        }
+        tile.truncate(tile_size_bytes);
+        // Uncompressed bilevel tile path: see the strip-path
+        // companion comment. Tiles are gated to bps_first % 8 ==
+        // 0 above (see the explicit error a few lines below), so
+        // in practice bps_first==1 + tiles is rejected, but we
+        // keep the normalisation here for symmetry / safety.
+        if compression == COMPRESSION_NONE && fill_order == FillOrder::LsbFirst && bps_first == 1 {
+            reverse_bits_in_place(&mut tile);
+        }
+        if predictor == PREDICTOR_HORIZONTAL {
+            apply_horizontal_predictor(
+                &mut tile,
+                tile_w as usize,
+                tile_h as usize,
+                samples_per_pixel as usize,
+                bps_first as usize,
+                tile_row_bytes,
+                bo,
+            )?;
+        } else if predictor == PREDICTOR_FLOAT {
+            undo_float_predictor(
+                &mut tile,
+                tile_w as usize * samples_per_pixel as usize,
+                samples_per_pixel as usize,
+                tile_h as usize,
+                bps_first as usize / 8,
+                tile_row_bytes,
+                bo,
+            )?;
+        }
+        Ok(tile)
+    };
+    crate::par::run_ordered(threads, expected_tiles, decode_tile, |idx, tile| {
+        let (ty, tx) = (idx as u32 / tiles_across, idx as u32 % tiles_across);
+        // Copy the visible portion of the tile into the output
+        // buffer. Tiles at the right/bottom edge may extend past
+        // the image; those samples are simply dropped.
+        //
+        // TIFF 6.0 §15 (page 67) requires `TileWidth` to be "a
+        // multiple of 16", and §15 (page 66) states that within a
+        // tile "each row of data in a tile is treated as a separate
+        // 'scanline'", i.e. every tile row is independently padded
+        // to a byte boundary (`tile_row_bytes` above). Together
+        // these make every tile-column boundary in the destination
+        // image row land on a byte boundary even at sub-byte bit
+        // depths: column `tx` starts at bit
+        // `tx · TileWidth · SamplesPerPixel · BitsPerSample`, and
+        // `TileWidth` being a multiple of 16 makes that product a
+        // multiple of 8 for any `BitsPerSample ∈ {1, 4}`. The
+        // visible region of a tile row therefore copies as a whole
+        // number of bytes starting at a byte-aligned destination
+        // offset, exactly as for byte-aligned depths — the only
+        // difference is that the visible width is measured in bits
+        // and rounded up to bytes (the high bits of a partial-tile
+        // trailing byte are padding the downstream expander, which
+        // reads only `width` pixels per row, ignores).
+        let bits_per_dst_origin =
+            (tx as u64) * (tile_w as u64) * (samples_per_pixel as u64) * (bps_first as u64);
+        if !bits_per_dst_origin.is_multiple_of(8) {
+            // Cannot occur for `TileWidth` a multiple of 16, but
+            // guard against a non-conformant writer rather than
+            // panic on a misaligned slice.
+            return Err(Error::invalid(
+                "TIFF: tile column boundary is not byte-aligned (TileWidth must be a \
+                 multiple of 16 per TIFF 6.0 §15)",
+            ));
+        }
+        let dst_origin_x = (bits_per_dst_origin / 8) as usize;
+        let visible_w =
+            ((width as i64) - (tx as i64) * (tile_w as i64)).min(tile_w as i64) as usize;
+        let visible_h =
+            ((height as i64) - (ty as i64) * (tile_h as i64)).min(tile_h as i64) as usize;
+        let visible_row_bytes =
+            ((visible_w as u64) * (samples_per_pixel as u64) * (bps_first as u64)).div_ceil(8)
+                as usize;
+        let dst_origin_y = ty as usize * tile_h as usize;
+        for r in 0..visible_h {
+            let src_off = r * tile_row_bytes;
+            let dst_off = (dst_origin_y + r) * image_row_bytes + dst_origin_x;
+            out[dst_off..dst_off + visible_row_bytes]
+                .copy_from_slice(&tile[src_off..src_off + visible_row_bytes]);
+        }
+        Ok(())
+    })?;
 
     Ok(out)
 }

@@ -43,6 +43,12 @@ pub struct DecodeOptions {
     /// Reject writer shorthands the lenient reader accepts (see the
     /// type docs).
     pub strict: bool,
+    /// Thread budget for strip / tile decompression: `0` and `1` are
+    /// serial (the default), `n > 1` lets up to `n` threads work on the
+    /// segments of a page. The decoded image is identical at every
+    /// budget; a threaded decode holds all decompressed segments of a
+    /// page at once.
+    pub threads: usize,
 }
 
 impl DecodeOptions {
@@ -83,6 +89,13 @@ impl DecodeOptions {
     /// Set strict mode.
     pub fn with_strict(mut self, strict: bool) -> Self {
         self.strict = strict;
+        self
+    }
+
+    /// Grant a thread budget for strip / tile decompression (see
+    /// [`Self::threads`]; `0` and `1` are serial).
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
         self
     }
 
@@ -145,6 +158,7 @@ impl Default for DecodeOptions {
             max_pixels: Some(Self::DEFAULT_MAX_PIXELS),
             max_bytes: Some(Self::DEFAULT_MAX_BYTES),
             strict: false,
+            threads: 1,
         }
     }
 }
@@ -192,6 +206,12 @@ pub struct EncodeOptions {
     /// Embed `metadata.iptc` as tag 33723. Default `true`.
     pub embed_iptc: bool,
     /// `Software` (tag 305) string. Default `None` (tag omitted).
+    /// Thread budget for strip / tile compression: `0` and `1` are
+    /// serial (the default); see [`crate::PageExtras::threads`].
+    pub threads: usize,
+    /// Coder effort for `Deflate` (`0..=9`) / `Zstd` (`1..=22`); `None`
+    /// keeps the coder's default. See [`crate::PageExtras::level`].
+    pub level: Option<u8>,
     pub software: Option<String>,
     /// `XResolution` / `YResolution` / `ResolutionUnit` (282 / 283 /
     /// 296). Default `None` (tags omitted).
@@ -211,6 +231,8 @@ impl Default for EncodeOptions {
             embed_xmp: true,
             embed_exif: true,
             embed_iptc: true,
+            threads: 1,
+            level: None,
             software: None,
             resolution: None,
         }
@@ -250,6 +272,20 @@ impl EncodeOptions {
     /// Set (or clear) `RowsPerStrip`.
     pub fn with_rows_per_strip(mut self, rows: impl Into<Option<u32>>) -> Self {
         self.rows_per_strip = rows.into();
+        self
+    }
+
+    /// Grant a thread budget for strip / tile compression (`0` and `1`
+    /// are serial).
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    /// Set the Deflate / Zstandard coder effort (`None` = the coder's
+    /// default).
+    pub fn with_level(mut self, level: impl Into<Option<u8>>) -> Self {
+        self.level = level.into();
         self
     }
 
