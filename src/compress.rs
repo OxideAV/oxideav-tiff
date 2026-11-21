@@ -25,15 +25,6 @@ use crate::error::{Result, TiffError as Error};
 /// per-iteration input read).
 const MAX_INITIAL_RESERVE: usize = 64 * 1024;
 
-/// Upper bound on the decompressed size of a single Deflate or
-/// Zstandard strip. Neither wire format bounds its own output;
-/// without an explicit limit a 100-byte stream can claim to expand
-/// to several gigabytes (a classic "zip bomb"). The cap passed to
-/// `compcol`'s capped decompressor is `expected_len` (from the IFD)
-/// clamped to `MAX_CODEC_OUTPUT`; both bounds are needed because
-/// `expected_len` itself can be attacker-chosen on a malformed file.
-const MAX_CODEC_OUTPUT: usize = 64 * 1024 * 1024;
-
 // ---------------------------------------------------------------------------
 // PackBits — TIFF 6.0 Section 9
 // ---------------------------------------------------------------------------
@@ -225,17 +216,18 @@ pub fn unpack_lzw(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
 // Deflate — Adobe Compression=8 (zlib stream)
 // ---------------------------------------------------------------------------
 
+/// Inflate one Compression=8 strip / tile (a zlib stream).
+///
+/// Neither Deflate nor Zstandard bounds its own output — a 100-byte
+/// stream can claim to expand to gigabytes — so the output is capped
+/// at `expected_len`, the size the directory says the segment has, and
+/// a stream that holds more is an error rather than an allocation. The
+/// decoder bounds `expected_len` itself by `DecodeOptions::max_bytes`
+/// (strips through the image geometry, tiles through the tile-size
+/// gate), so the cap is as large as the page legitimately needs: a
+/// single strip may be the whole image.
 pub fn unpack_deflate(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
-    // Cap output to the smaller of the IFD-claimed `expected_len`
-    // and `MAX_CODEC_OUTPUT`. Without an explicit limit, a
-    // malformed stream can claim to expand a 100-byte payload into
-    // gigabytes; `compcol`'s capped helper bails with
-    // `OutputLimitExceeded` once the cap is hit and we surface that
-    // as a normal decode error rather than an OOM abort. The cap is
-    // loose enough not to interfere with any legitimate single-strip
-    // TIFF (most encoders chunk at well under 64 MiB per strip), but
-    // tight enough to bound the worst-case per-call allocation.
-    let limit = expected_len.min(MAX_CODEC_OUTPUT) as u64;
+    let limit = expected_len as u64;
     compcol::vec::decompress_to_vec_capped::<compcol::zlib::Zlib>(input, limit)
         .map_err(|e| Error::invalid(format!("TIFF/Deflate: zlib inflate failed: {e:?}")))
 }
@@ -250,9 +242,10 @@ pub fn unpack_deflate(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
 /// doc `docs/image/tiff/tiff-zstd-compression-50000.md` §3, the codec
 /// is applied independently per strip / tile — no file-global stream,
 /// no cross-strip dictionary — so a plain one-shot frame decode with
-/// the same zip-bomb output cap as Deflate is the whole job.
+/// the same output cap as Deflate (see [`unpack_deflate`]) is the whole
+/// job.
 pub fn unpack_zstd(input: &[u8], expected_len: usize) -> Result<Vec<u8>> {
-    let limit = expected_len.min(MAX_CODEC_OUTPUT) as u64;
+    let limit = expected_len as u64;
     compcol::vec::decompress_to_vec_capped::<compcol::zstd::Zstd>(input, limit)
         .map_err(|e| Error::invalid(format!("TIFF/ZSTD: Zstandard frame decode failed: {e:?}")))
 }
@@ -621,12 +614,11 @@ mod tests {
     #[test]
     fn deflate_output_is_bounded() {
         // The raw zlib wire format has no built-in bound on output
-        // size; `unpack_deflate` must cap at `MAX_CODEC_OUTPUT` to
-        // prevent zip-bomb OOMs. Encode a small zlib stream and
-        // confirm decode succeeds within the cap — the
-        // bound-violation half of the contract is exercised
-        // explicitly below (`deflate_cap_exceeded_errors`) and by
-        // the fuzz target.
+        // size; `unpack_deflate` caps at the caller's `expected_len`.
+        // Encode a small zlib stream and confirm decode succeeds
+        // within the cap — the bound-violation half of the contract is
+        // exercised explicitly below (`deflate_cap_exceeded_errors`)
+        // and by the fuzz target.
         let src = vec![0u8; 1024];
         let encoded = pack_deflate(&src).unwrap();
         let back = unpack_deflate(&encoded, src.len()).unwrap();

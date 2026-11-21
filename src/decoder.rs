@@ -652,6 +652,39 @@ pub(crate) fn decode_ifd(
         &format!("{width}x{height} x {samples_per_pixel} samples x {bps_first} bits"),
     )?;
 
+    // Tile-size gate: TileWidth and TileLength are free LONGs, and
+    // every tile walker sizes a buffer from them. One decompressed
+    // tile is held to the same `max_bytes` limit as the whole image
+    // (and must not overflow the arithmetic at all), which also bounds
+    // what the Deflate / Zstandard decoders may produce for it.
+    if let Some(tw) = find(entries, TAG_TILE_WIDTH) {
+        let tw = tw.as_u32(bo)? as u64;
+        let tl = find(entries, TAG_TILE_LENGTH)
+            .map(|e| e.as_u32(bo))
+            .transpose()?
+            .unwrap_or(0) as u64;
+        let tile_bytes = tw
+            .saturating_mul(tl)
+            .saturating_mul(samples_per_pixel as u64)
+            .saturating_mul((bps_first as u64).div_ceil(8));
+        // (× 64: the general sample path keeps one `u64` per sample of
+        // a tile row, at most 64 times the row's packed size.)
+        if tile_bytes > (isize::MAX as u64) / 64 {
+            return Err(Error::invalid(format!(
+                "TIFF: tile {tw}x{tl} is too large to address"
+            )));
+        }
+        opts.check_bytes(
+            tile_bytes,
+            &format!("one {tw}x{tl} tile x {samples_per_pixel} samples x {bps_first} bits"),
+        )?;
+        opts.check_bytes(
+            tw.saturating_mul(samples_per_pixel as u64)
+                .saturating_mul(8),
+            &format!("one row of a {tw}-wide tile x {samples_per_pixel} samples"),
+        )?;
+    }
+
     // Predictor = 3 (the IEEE floating-point predictor) is validated here,
     // before any strip/tile is decompressed, because the per-strip /
     // per-tile assembly applies the predictor in-line. It is defined only

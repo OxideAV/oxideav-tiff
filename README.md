@@ -245,7 +245,8 @@ pinned for every native layout × compression in
 `max_pixels` (default 256 Mi), `max_bytes` (assembled sample bytes,
 default 1 GiB) — `None` lifts a limit, `unlimited()` lifts all; checked
 against the IFD's claims before any allocation, failing with
-`Error::LimitExceeded`. `strict` (default `false`) rejects the
+`Error::LimitExceeded`. `threads` (default 1 = serial) grants a budget
+for strip / tile decompression. `strict` (default `false`) rejects the
 `SampleFormat` single-entry shorthand on multi-sample images; every
 other malformed layout tag is already an error in both modes.
 
@@ -258,7 +259,9 @@ carries none), `planar` (`PlanarConfiguration = 2`), `tiling`
 (`(TileWidth, TileLength)`, multiples of 16), `rows_per_strip`,
 `bigtiff`, `embed_icc` / `embed_xmp` / `embed_exif` / `embed_iptc`
 (default `true`),
-`software` (tag 305), `resolution` (`PageResolution`).
+`software` (tag 305), `resolution` (`PageResolution`), `threads`
+(default 1 = serial) and `level` (Deflate / Zstandard effort, default
+the coder's).
 
 ## Metadata and colour
 
@@ -298,6 +301,9 @@ the lossless round-trip pin.
   bits, YCbCr at other than 8 bits (outside JPEG), float CMYK / palette
   / CIELab, `Compression = 34925` (LZMA2) and the other unlisted
   schemes, deep CMYK JPEG; see *Backlog*.
+- One decompressed tile is held to the same `max_bytes` limit as the
+  whole image; a strip or tile may be as large as that allows (a page
+  stored as a single strip decodes whatever its size).
 - A sample wider than the layout that carries it is narrowed: 17..64-bit
   integers keep their top 16 bits, CMYK inks wider than 8 bits their
   top 8.
@@ -1052,7 +1058,9 @@ the byte-aligned chunky formats (`Gray8` / `Gray16Le` / `Rgb24` /
 `Predictor = 2` (applied per-tile), and for the 1-bit `Bilevel` /
 `TransparencyMask` formats under the same byte-aligned compressors
 (sub-byte tile-row bit packing with §15 edge replication, no predictor).
-Tiling is rejected with the CCITT compressors. An independent transcode of our tiled
+The CCITT schemes compose with tiles as well (§15: "Tiles are compressed
+individually, just as strips are compressed" — each tile is coded as a
+page `TileWidth` wide and `TileLength` long). An independent transcode of our tiled
 output to an uncompressed TIFF re-decodes to the original pixels, and an
 independent reference reader reads it bit-exactly.
 
@@ -1105,10 +1113,9 @@ MSB-first and padded to a byte boundary (`tile_w / 8` bytes — `tile_w`
 is a multiple of 16, so this is exact and every tile-column boundary
 lands on a byte boundary at `BitsPerSample = 1`). Boundary tiles are
 padded by replicating the last visible column / row (§15 "Padding").
-It composes with the byte-aligned compressors the decoder's sub-byte
-tile path reads (None / PackBits / LZW / Deflate / ZSTD) and with
-BigTIFF; the §14 predictor (undefined for 1-bit) and the strip-oriented
-CCITT coders stay rejected. `tests/encode_tiled_bilevel_roundtrip.rs`
+It composes with None / PackBits / LZW / Deflate / ZSTD, with the
+CCITT schemes (one facsimile page per tile) and with BigTIFF; the §14
+predictor (undefined for 1-bit) stays rejected. `tests/encode_tiled_bilevel_roundtrip.rs`
 encodes the same 1-bit pixels both tiled and strip-based, decodes both,
 and asserts the rendered `Gray8` planes are byte-identical across the
 full compressor set and the exact-fit / partial-edge / non-square /
@@ -1494,13 +1501,15 @@ refused with a typed error. Four files (separate-plane YCbCr
 JPEG) decode here but are refused by both black-box readers, so there
 is nothing to compare them with.
 
-**Ours → foreign — 14 014 files, 0 refused or mis-read.** Every layout
+**Ours → foreign — 14 110 files, 0 refused or mis-read.** Every layout
 the writer emits (43 input kinds ×
-17 schemes × predictor × chunky / separate × strips / `RowsPerStrip`
+24 scheme settings (None, PackBits, LZW, Deflate, Zstd, WebP, CCITT
+RLE / G3 1-D / G3 2-D / G4 with and without fill, five JPEG DCT option
+sets, the seven lossless-JPEG predictors) × predictor × chunky / separate × strips / `RowsPerStrip`
 1 / 7 / 16 / tiles 16² / 32 × 48 × classic / BigTIFF, at six image
-sizes from 1 × 1 to 300 × 200): 14 014 files, all accepted by
-`tiffinfo -D` without a warning; 5 820 confirmed sample-exact by two
-black-box readers, 6 474 by one, and 1 720 in layouts none of the readers
+sizes from 1 × 1 to 300 × 200): 14 110 files, all accepted by
+`tiffinfo -D` without a warning; 5 868 confirmed sample-exact by two
+black-box readers, 6 522 by one, and 1 720 in layouts none of the readers
 on hand reads at all:
 
 - JPEG at 12 / 16-bit precision (both readers are 8-bit JPEG builds);
@@ -1526,7 +1535,12 @@ Never verified against an outside stream: GeoTIFF tags (no tool on
 hand writes them; hand-built directories only), `SubIFDs` image trees,
 old-style JPEG (`Compression = 6`, no current writer), CCITT
 uncompressed-mode segments, `Compression = 2` (CCITT RLE) from another
-writer, DNG raw pages.
+writer, ICCLab pages, DNG raw pages, and whole-byte samples that are
+not 8 / 16 / 32 / 64 bits wide (24, 40, 48, 56): TIFF 6.0 states the
+byte order for 16- and 32-bit integers only; this crate reads such
+samples in the file's byte order, and the one black-box writer that
+produces 24-bit samples stores them in the opposite order, so there is
+no outside reference for them.
 
 ## Fuzzing
 
@@ -1590,25 +1604,76 @@ isn't being driven.
 
 ## Benchmarks
 
-A Criterion bench harness lives at `benches/lzw.rs` covering the
-TIFF/LZW encoder hot path (`compress::pack_lzw`). Run with:
+### Throughput
 
-```sh
-cargo bench -p oxideav-tiff --bench lzw
-```
+`benches/throughput.rs` (`cargo bench --bench throughput`) times whole
+pages — 2048 × 1536 (3.15 MP), a synthetic photo-like raster for the
+continuous-tone rows and a text-like page for the bilevel ones — and
+prints megapixels per second. One core unless a thread budget is named.
 
-`pack_lzw` uses a flat-array trie (three `[u16; 4096]` / `[u8; 4096]`
-arrays — `first_child`, `next_sibling`, `suffix`) for its dictionary
-lookup. The bitstream output is identical to the simpler hash-map
-formulation (same greedy match, same code-width bump points, same
-Clear-on-fill timing), so it is invisible to any decoder, but throughput
-on representative image-like strips is far higher: the four bench
-scenarios (`lzw_random_64k`, `lzw_repeating_motif_64k`,
-`lzw_zeros_256k`, `lzw_natural_image_64k`) range from a modest gain on
-random data (no prefix reuse, worst case) up to roughly 20x on a natural
-256×256 8-bit greyscale image fixture, where the trie's child lists for
-common short prefixes amortise across many matches. Numbers move with
-host hardware; the value is the relative cost across scenarios.
+Before → after this round's performance work, serial, and the same
+after-build with a budget of four threads. Each figure is the median of
+three runs of the bench (itself a median of seven), old and new
+binaries alternating, on an Apple-silicon machine shared with other
+builds (load average 10 to 40 during the run):
+
+| Layout | encode MP/s | encode, 4 threads | decode MP/s | decode, 4 threads |
+|---|---:|---:|---:|---:|
+| RGB8 uncompressed, 16-row strips | 6149 → 5836 | 5985 | 4477 → 5728 | 6304 |
+| RGB8 PackBits, strips | 404 → 396 | 1081 | 2638 → 5028 | 6104 |
+| RGB8 LZW, strips | 25 → 49 | 180 | 59 → 108 | 384 |
+| RGB8 LZW + predictor, strips | 24 → 64 | 195 | 64 → 83 | 320 |
+| RGB8 LZW + predictor, 256² tiles | 22 → 61 | 228 | 57 → 85 | 309 |
+| RGB8 Deflate + predictor, strips | 12 → 12 | 38 | 122 → 123 | 446 |
+| RGB8 Deflate level 1 + predictor, strips | — → 56 | 164 | — → 127 | 468 |
+| RGB8 Deflate + predictor, 256² tiles | 10 → 11 | 35 | 125 → 120 | 434 |
+| RGB8 Zstd + predictor, strips | 20 → 21 | 72 | 58 → 60 | 226 |
+| Gray16 LZW + predictor, strips | 44 → 102 | 304 | 91 → 149 | 491 |
+| Gray16 Deflate + predictor, strips | 11 → 13 | 42 | 197 → 210 | 631 |
+| Bilevel CCITT G4, 64-row strips | 66 → 75 | 232 | 309 → 314 | 732 |
+| Bilevel CCITT G3 1-D, strips | 787 → 846 | 1997 | 106 → 100 | 298 |
+
+Serial: LZW encode 2.0× to 2.8×, LZW decode 1.3× to 1.8×, PackBits
+decode 1.9×, uncompressed decode 1.3×; the rest is within run-to-run
+noise. Four threads: 3.2× to 3.8× the serial figure on the LZW /
+Deflate / Zstandard rows, in both directions. What changed:
+
+- **LZW decode** keeps its string table as spans of the output: a table
+  string is the previous string plus one byte, and it sits in the
+  output already, so emitting a code is one block copy instead of a
+  walk along a prefix chain, a reversal and a byte-by-byte push; codes
+  are read through a 64-bit window. Clears no longer wipe anything.
+- **LZW encode** looks `(prefix, byte)` up in a generation-stamped
+  hashed table (one probe per input byte; a Clear is a counter bump)
+  instead of walking a child list. Same code stream as before, bit for
+  bit.
+- **Strips and tiles** are no longer copied once more after
+  decompression, and a tile is assembled row-span by row-span.
+- **Opt-in threads.** `DecodeOptions::with_threads(n)` /
+  `EncodeOptions::with_threads(n)` / `PageExtras::with_threads(n)` (and
+  the framework's `ExecutionContext` through the registry codec) let up
+  to `n` threads decompress / compress the strips or tiles of a chunky
+  page. The default is serial; the result — decoded page or written
+  file — is identical at every budget (pinned in
+  `tests/threads_and_level.rs` and on every file of the black-box
+  matrix). A threaded decode holds all decompressed segments of a page
+  at once. Separate-plane pages, the general sample path and
+  JPEG-in-TIFF stay serial.
+- **Coder level.** `EncodeOptions::with_level` / `PageExtras::with_level`
+  set the Deflate (0..=9, default 6) or Zstandard (1..=22, default 3)
+  effort. Deflate encode is the slowest row by far and its time is the
+  coder's: level 1 is 4.7× faster for a 4 % larger file on the bench
+  raster (5 277 530 against 5 076 610 bytes). The default is unchanged.
+
+Not improved: Deflate / Zstandard encode at their default levels (time
+spent in the `compcol` coders), CCITT G3 decode, uncompressed encode.
+
+### LZW encoder micro-bench
+
+`benches/lzw.rs` (Criterion, `cargo bench --bench lzw`) isolates
+`compress::pack_lzw` on four payloads (`lzw_random_64k`,
+`lzw_repeating_motif_64k`, `lzw_zeros_256k`, `lzw_natural_image_64k`)
+for A/B work on the dictionary.
 
 ## License
 

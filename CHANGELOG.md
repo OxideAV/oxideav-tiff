@@ -36,11 +36,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `⌈w / 2⌉`.
 - **Zstandard frames** that the previous `compcol` 0.6 decoder rejected
   as corrupt (`compcol` 0.8 now).
+- **A single Deflate / Zstandard strip or tile larger than 64 MiB was
+  refused** (`OutputLimitExceeded`): the output cap was a fixed 64 MiB
+  on top of the size the directory declares, so an ordinary one-strip
+  27-megapixel RGB page did not decode. The cap is now the declared
+  segment size alone, which `DecodeOptions::max_bytes` bounds.
+- **Tile-size gate.** `TileWidth` × `TileLength` × samples is checked
+  against `max_bytes` (and against arithmetic overflow) before any tile
+  walker sizes a buffer from it.
 - **Writer: a predictor next to `None` / `PackBits`** is no longer
   written (§14 defines the predictor for the LZW family; other readers
   do not reverse one declared on uncompressed or PackBits data, so
   those pages were mis-read elsewhere). `predictor = true` now takes
   effect with `Lzw` / `Deflate` / `Zstd` only.
+
+### Performance
+
+- LZW decode keeps the string table as spans of its own output (one
+  block copy per code, 64-bit code window, no table wipe on Clear) and
+  LZW encode uses a generation-stamped hashed dictionary: encode 2.0×
+  to 2.8×, decode 1.3× to 1.8× on the bench raster, same code stream.
+- Decompressed strips / tiles are no longer copied a second time
+  (PackBits decode 1.9×, uncompressed decode 1.3×).
+- Opt-in strip / tile threads: `DecodeOptions::with_threads`,
+  `EncodeOptions::with_threads`, `PageExtras::with_threads`, and the
+  framework's `ExecutionContext` through the registry codec. Serial by
+  default; output identical at every budget. Four threads: 3.2× to
+  3.8× the serial figure on LZW / Deflate / Zstandard pages, both
+  directions.
+- `EncodeOptions::with_level` / `PageExtras::with_level`: Deflate
+  (0..=9) and Zstandard (1..=22) coder effort (`compress::
+  pack_deflate_level` / `pack_zstd_level`). Defaults unchanged.
+- `benches/throughput.rs`: megapixels per second for the common
+  layouts (before → after table in the README).
 
 ### Added
 
@@ -74,6 +102,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and GeoTIFF georeferencing (`GeoTiff`: GeoKey directory resolved to
   SHORT / DOUBLE / ASCII values, pixel scale, tiepoints, transformation,
   `raster_to_model`) on `Page::geotiff`.
+- CCITT schemes in tiles (`TiffCompression::Ccitt*` with `tiling`):
+  §15, "Tiles are compressed individually, just as strips are
+  compressed".
 - `tests/blackbox_matrix.rs`: the live black-box matrix (files written
   by `magick`, `tiffcp`, `raw2tiff`, `ffmpeg`, `sips`, `tiffset` decoded
   here and by a black-box reader; every layout this crate writes read
