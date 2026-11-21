@@ -28,7 +28,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use oxideav_tiff::ifd::{Entry, find, parse_header, parse_ifd};
-use oxideav_tiff::{Page, TiffImage, TiffPixelFormat, decode_pages};
+use oxideav_tiff::{DecodeOptions, Page, TiffImage, TiffPixelFormat, decode_pages};
 
 // ---------------------------------------------------------------------
 // Tool plumbing
@@ -936,6 +936,22 @@ fn run_case(c: &Case, scratch: &Path) -> (Outcome, String) {
             return (Outcome::Refused(e.to_string()), desc);
         }
     };
+    // A granted thread budget must hand back the very same pages.
+    match oxideav_tiff::decode_pages_with(&bytes, &DecodeOptions::default().with_threads(3)) {
+        Ok(threaded) if threaded == pages => {}
+        Ok(_) => {
+            return (
+                Outcome::Mismatch(s("3-thread decode differs from serial")),
+                desc,
+            );
+        }
+        Err(e) => {
+            return (
+                Outcome::Mismatch(format!("3-thread decode failed: {e}")),
+                desc,
+            );
+        }
+    }
     // The header-only probe must describe what decode returns.
     match oxideav_tiff::info(&bytes) {
         Ok(i) => {
@@ -1488,11 +1504,13 @@ const KINDS: &[Kind] = &[
     },
     // Every other sample width the writer takes (bit-packed below 8
     // and between 8 and 16, bit strings or whole bytes above). 24 bits
-    // is left out: that writer stores 24-bit samples its own way (a
-    // 16-bit 0xF618 goes to disk as F5 18 F6 where the 24-bit value of
-    // the same intensity is F6 18 F6), so its files cannot serve as a
-    // reference for the plain integer reading; the 24-bit unpacker is
-    // pinned by the pack / unpack round trip in `generic`.
+    // is left out: TIFF 6.0 states the byte order for 16- and 32-bit
+    // integers only, and this writer stores a 24-bit sample in the
+    // byte order opposite to the file's (0xF618F5 goes to disk as
+    // F5 18 F6 under `MM` and F6 18 F5 under `II`), so its files are
+    // no reference for the plain reading (file byte order) this crate
+    // applies; the 24-bit unpacker is pinned by the pack / unpack
+    // round trip in `generic`.
     Kind {
         tag: "gray3",
         src: ("gray", 16),
@@ -1720,12 +1738,14 @@ fn magick_cases(dir: &TempDir) -> Vec<Case> {
                     for pred in preds {
                         // Byte order alternates across the sweep (both
                         // orders for the core kinds' strip layout).
+                        // (`tiff:endian` selects the file's byte order;
+                        // the writer's default is big-endian.)
                         let endians: &[&str] = if kind.core && *lname == "strip" {
-                            &["LSB", "MSB"]
+                            &["tiff:endian=lsb", "tiff:endian=msb"]
                         } else if out.len() % 2 == 0 {
-                            &["LSB"]
+                            &["tiff:endian=lsb"]
                         } else {
-                            &["MSB"]
+                            &["tiff:endian=msb"]
                         };
                         for endian in endians {
                             let name = format!(
@@ -1739,10 +1759,10 @@ fn magick_cases(dir: &TempDir) -> Vec<Case> {
                                 } else {
                                     String::new()
                                 },
-                                endian.to_lowercase()
+                                &endian[endian.len() - 3..]
                             );
                             let pdef = format!("tiff:predictor={pred}");
-                            let mut extra: Vec<&str> = vec!["-compress", comp, "-endian", endian];
+                            let mut extra: Vec<&str> = vec!["-compress", comp, "-define", endian];
                             if comp_name == "webpl" {
                                 extra.extend_from_slice(&["-quality", "100"]);
                             }
@@ -1764,8 +1784,8 @@ fn magick_cases(dir: &TempDir) -> Vec<Case> {
             (
                 "lsb-lzw2",
                 &[
-                    "-endian",
-                    "LSB",
+                    "-define",
+                    "tiff:endian=lsb",
                     "-compress",
                     "LZW",
                     "-define",
@@ -1775,14 +1795,19 @@ fn magick_cases(dir: &TempDir) -> Vec<Case> {
             ),
             (
                 "big-lsb-tile",
-                &["-endian", "LSB", "-define", "tiff:tile-geometry=16x16"][..],
+                &[
+                    "-define",
+                    "tiff:endian=lsb",
+                    "-define",
+                    "tiff:tile-geometry=16x16",
+                ][..],
                 true,
             ),
             (
                 "msb-lzw2",
                 &[
-                    "-endian",
-                    "MSB",
+                    "-define",
+                    "tiff:endian=msb",
                     "-compress",
                     "LZW",
                     "-define",
@@ -1793,8 +1818,8 @@ fn magick_cases(dir: &TempDir) -> Vec<Case> {
             (
                 "msb-tile",
                 &[
-                    "-endian",
-                    "MSB",
+                    "-define",
+                    "tiff:endian=msb",
                     "-compress",
                     "Zip",
                     "-define",
@@ -1802,10 +1827,19 @@ fn magick_cases(dir: &TempDir) -> Vec<Case> {
                 ][..],
                 false,
             ),
-            ("big-lsb", &["-endian", "LSB", "-compress", "LZW"][..], true),
+            (
+                "big-lsb",
+                &["-define", "tiff:endian=lsb", "-compress", "LZW"][..],
+                true,
+            ),
             (
                 "big-msb-tile",
-                &["-endian", "MSB", "-define", "tiff:tile-geometry=16x16"][..],
+                &[
+                    "-define",
+                    "tiff:endian=msb",
+                    "-define",
+                    "tiff:tile-geometry=16x16",
+                ][..],
                 true,
             ),
             ("fill-lsb", &["-define", "tiff:fill-order=lsb"][..], false),
@@ -1907,7 +1941,7 @@ fn base_file(dir: &TempDir, tag: &str, w: u32, h: u32) -> Option<PathBuf> {
     if !out.exists() {
         let mut a = src.load.clone();
         a.extend(kind.args.iter().map(|x| x.to_string()));
-        a.extend(sv(&["-compress", "None", "-endian", "LSB"]));
+        a.extend(sv(&["-compress", "None", "-define", "tiff:endian=lsb"]));
         a.push(p(&out));
         run("magick", &a).ok()?;
     }
