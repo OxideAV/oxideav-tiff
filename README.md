@@ -1591,6 +1591,13 @@ over two sessions, one at full input length) for ten minutes each
 after the blob / multi-page / muxer work landed; neither found a
 crash.
 
+After the round that added the general sample path, the tag readers,
+the segment threads and the LZW rewrite, bounded foreground runs on the
+final tree — `decode` 452 k executions over three sessions (the target
+now also drives `ExifData::parse` and a three-thread decode),
+`jpeg_roundtrip` 132 k, `registry_encode` 5.7 k — found no crash,
+timeout or out-of-memory.
+
 The harness has caught and pinned several panic vectors as regression
 tests: an LZW first-after-Clear non-leaf code forming a self-referential
 prefix chain (`src/compress.rs`), a BigTIFF `first_ifd_offset = u64::MAX`
@@ -1598,8 +1605,9 @@ that overflowed slice math (`src/ifd.rs`), and an attacker-claimed
 `ImageWidth × ImageLength` driving a multi-exabyte upfront allocation
 (the `DecodeOptions::max_pixels` gate), and an unknown-typed
 colorimetry entry whose `count` sized a 3.5 GB float vector
-(`Entry::as_f64_vec`, r466). Deflate output is capped
-to bound zip-bomb expansion. Regression tests live in
+(`Entry::as_f64_vec`, r466). Deflate and Zstandard output is capped
+at the segment size the directory declares (itself bounded by
+`DecodeOptions::max_bytes`). Regression tests live in
 `tests/decode_fuzz_regressions.rs` plus inline `compress` / `ifd` test
 modules so the panic-freedom checks survive in CI even when the fuzzer
 isn't being driven.

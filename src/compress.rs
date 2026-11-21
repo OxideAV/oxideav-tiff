@@ -395,7 +395,7 @@ impl LzwDict {
 /// when the table fills.
 ///
 /// The dictionary is a hashed table keyed by `(prefix code, next
-/// byte)` ([`LzwDict`]): one probe per input byte, and a Clear costs a
+/// byte)` (`LzwDict`): one probe per input byte, and a Clear costs a
 /// counter bump. The bitstream is the same greedy longest-match stream
 /// as before (same code-width bump points, same Clear-on-fill timing),
 /// so the change is invisible to any decoder.

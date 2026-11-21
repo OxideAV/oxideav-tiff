@@ -18,12 +18,17 @@
 //! * Byte order: `II` (little-endian) and `MM` (big-endian)
 //! * Variants: classic TIFF (32-bit offsets) + BigTIFF (64-bit offsets)
 //! * Photometric: WhiteIsZero / BlackIsZero / RGB / Palette / CMYK /
-//!   YCbCr / TransparencyMask / CIELab (3-sample L*a*b* and 1-sample
-//!   L*-only, TIFF 6.0 §23, decoded to display Rgb24 / Gray8 via
-//!   Lab → XYZ@D65 → linear NTSC RGB → sRGB)
-//! * Bit depths: 1, 4, 8, 16 (per-strip and per-tile), plus the deep
-//!   9..=16-bit JPEG-in-TIFF precisions (12-bit SOF1, 9..16-bit SOF3
-//!   lossless) rendered to `Gray16Le` / `Rgb48Le`
+//!   YCbCr / TransparencyMask / CIELab and ICCLab (3-sample L*a*b*
+//!   and 1-sample L*-only at 8 or 16 bits, decoded to display RGB /
+//!   gray via Lab → XYZ under the page white → D65 → BT.709 → sRGB)
+//! * Bit depths: any `BitsPerSample` from 1 to 64 for grayscale / RGB
+//!   / CMYK (unsigned or signed, with extra samples; widened or
+//!   narrowed onto the 8- or 16-bit layout), 1..8-bit palettes, IEEE
+//!   float at 16 / 32 / 64 bits, plus the deep 9..=16-bit JPEG-in-TIFF
+//!   precisions (12-bit SOF1, 9..16-bit SOF3 lossless)
+//! * Alpha: unassociated and associated alpha extra samples decode to
+//!   the straight-alpha layouts (`Ya8`, `Ya16Le`, `Rgba`, `Rgba64Le`,
+//!   `RgbaF32Le`)
 //! * Compression: 1 None / 2 CCITT Modified Huffman / 3 CCITT T.4
 //!   (1-D and 2-D) / 4 CCITT T.6 / 32773 PackBits / 5 LZW /
 //!   8 Deflate (zlib) / 50000 Zstandard (de-facto registry
@@ -34,8 +39,14 @@
 //!   7 JPEG-in-TIFF (TIFF Tech Note 2; routes each strip/tile through
 //!   `oxideav-mjpeg`; chunky and TN2 `PlanarConfiguration = 2`
 //!   single-channel segments)
-//! * Predictor: 1 (none) and 2 (horizontal differencing,
-//!   per-component for SamplesPerPixel > 1)
+//! * Predictor: 1 (none), 2 (horizontal differencing at every sample
+//!   width, offset SamplesPerPixel on chunky data) and 3 (the
+//!   floating-point predictor)
+//! * `FillOrder` 1 and 2
+//! * Tag catalogues: typed Exif / GPS / Interoperability directories
+//!   and GeoTIFF georeferencing on every [`Page`] ([`tags`])
+//! * Opt-in strip / tile threads ([`DecodeOptions::with_threads`];
+//!   serial by default)
 //! * Strip OR tile layout
 //! * Multi-page (full next-IFD chain walk via [`decode_all`], or
 //!   [`decode_pages`] to keep each page's metadata)
