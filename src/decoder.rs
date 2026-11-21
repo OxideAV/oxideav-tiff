@@ -731,7 +731,7 @@ pub(crate) fn decode_ifd(
     // are handled where the bits are consumed; for every other
     // byte-stream layout the segments are read from a bit-reversed copy
     // of the file, which is what other writers of such pages store
-    // (compressed or not, at any sample width).
+    // (compressed or not, at any sample width, WebP segments included).
     let reversed_input: Vec<u8>;
     let (input, fill_order) = match fill_order_raw {
         1 => (input, FillOrder::MsbFirst),
@@ -744,13 +744,32 @@ pub(crate) fn decode_ifd(
                         | COMPRESSION_CCITT_T4
                         | COMPRESSION_CCITT_T6
                 );
-            let jpeg = matches!(compression, COMPRESSION_JPEG_OLD | COMPRESSION_JPEG_NEW);
+            // A JPEG segment is a marker stream: when the first one
+            // starts with the SOI marker as stored, the data is not
+            // bit-reversed and the field has nothing to act on (what
+            // one black-box writer produces: it tags every file
+            // FillOrder = 2 and stores its JPEG segments plainly).
+            let first_segment_is_plain_jpeg = || -> bool {
+                [TAG_STRIP_OFFSETS, TAG_TILE_OFFSETS]
+                    .iter()
+                    .filter_map(|&t| find(entries, t))
+                    .filter_map(|e| e.as_u64_vec(bo).ok())
+                    .filter_map(|v| v.first().copied())
+                    .any(|off| {
+                        usize::try_from(off)
+                            .ok()
+                            .and_then(|o| input.get(o..o.checked_add(2)?))
+                            == Some(&[0xFF, 0xD8][..])
+                    })
+            };
             if bilevel_native {
                 (input, FillOrder::LsbFirst)
-            } else if jpeg || compression == COMPRESSION_WEBP {
-                return Err(Error::Unsupported(format!(
-                    "TIFF: FillOrder=2 with Compression={compression} is not supported"
-                )));
+            } else if compression == COMPRESSION_JPEG_NEW && first_segment_is_plain_jpeg() {
+                (input, FillOrder::MsbFirst)
+            } else if compression == COMPRESSION_JPEG_OLD {
+                return Err(Error::Unsupported(
+                    "TIFF: FillOrder=2 with Compression=6 is not supported".into(),
+                ));
             } else {
                 opts.check_bytes(input.len() as u64, "FillOrder=2 working copy")?;
                 reversed_input = input.iter().map(|b| b.reverse_bits()).collect();

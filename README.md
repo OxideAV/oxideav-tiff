@@ -747,8 +747,10 @@ is honoured where the bits are consumed. Page 32 warns that anything
 else is "potentially ambiguous"; other writers do produce such pages
 (one black-box tool tags every file it writes `FillOrder = 2`), and
 what they store is every byte of the strip / tile data bit-reversed,
-compressed or not, at any sample width. That is how they are read here
-(JPEG and WebP segments under `FillOrder = 2` are refused).
+compressed or not, at any sample width, WebP segments included. That
+is how they are read here. A JPEG segment that starts with its SOI
+marker as stored is not reversed (that tool stores JPEG data plainly
+under the same tag); old-style JPEG under `FillOrder = 2` is refused.
 
 `SampleFormat` (tag 339, TIFF 6.0 §SampleFormat page 80) is inspected
 on every IFD. Value `1` (unsigned integer, the spec default) and value
@@ -1478,7 +1480,7 @@ committed) and skips when the tools are absent. Counts below are from
 one run with `magick` 7.1.2, the `tiffcp` / `tiffinfo` / `tiff2rgba` /
 `raw2tiff` / `tiffset` / `tiffcrop` 4.7.2 tools, `ffmpeg` and `sips`.
 
-**Foreign → ours — 5330 files, 4981 decoded and confirmed, 345 refused
+**Foreign → ours — 5522 files, 5156 decoded and confirmed, 362 refused
 as a known gap, 4 with no reader to compare against, 0 wrong.** Files
 written by other software, decoded here and
 by a black-box reader, compared sample-exact wherever the layout is
@@ -1489,8 +1491,8 @@ within the bound stated next to each generator, because TIFF 6.0 §21 /
 | Writer | Files | Pass | Known gap | Sweep |
 |---|---:|---:|---:|---|
 | `magick` | 2381 | 2219 | 162 | 59 sample kinds (unsigned at 1..16, 31, 32 and 64 bits, signed, half / single / double float, bilevel both polarities, palette 1 / 2 / 4 / 8-bit, gray + alpha, RGB(A) with associated / unassociated / unspecified extra, CMYK(A), YCbCr, CIELab 8 / 16) × None / PackBits / LZW / Deflate / Zstd / LZMA / WebP / JPEG / G3 / G4 × predictor 1 / 2 / 3 × strips (1, 7, all rows) / tiles (16², 32 × 48) × chunky / separate × both byte orders × classic / BigTIFF × `FillOrder`; JPEG sampling 1×1 … 4×2 at three qualities; sizes 1 × 1 … 640 × 400 |
-| `tiffcp` | 1892 | 1705 | 183 | re-writes of 16 base pages: every `-c` scheme incl. G3 1-D / 2-D / fill, G4, JPEG (YCbCr 2 × 2 and RGB), `-r` 1 / 5 / 16, tiles 16² / 32 × 16 / 128², `-p separate`, `-B` / `-L`, `-8`, `-f lsb2msb` |
-| `raw2tiff` | 864 | 864 | 0 | byte / short / long / sbyte / sshort / slong / float / double × gray (both polarities) / gray + extra / RGB / RGB + extra / CMYK / CIELab × pixel / band order × None / PackBits / LZW / Deflate (± predictor); the tool tags every file `FillOrder = 2` |
+| `tiffcp` | 2074 | 1870 | 200 | re-writes of 16 base pages: every `-c` scheme incl. G3 1-D / 2-D / fill, G4, JPEG (YCbCr 2 × 2 and RGB), `-r` 1 / 5 / 16, tiles 16² / 32 × 16 / 128², `-p separate`, `-B` / `-L`, `-8`, `-f lsb2msb` (every scheme of every page) |
+| `raw2tiff` | 874 | 874 | 0 | byte / short / long / sbyte / sshort / slong / float / double × gray (both polarities) / gray + extra / RGB / RGB + extra / CMYK / CIELab × pixel / band order × None / PackBits / LZW / Deflate (± predictor) / JPEG; the tool tags every file `FillOrder = 2` |
 | `ffmpeg` | 116 | 116 | 0 | 17 pixel formats (gray, gray + alpha, RGB(A) 8 / 16, palette, bilevel both polarities, YCbCr 4:4:4 / 4:2:2 / 4:4:0 / 4:2:0 / 4:1:1 / 4:1:0 with video-range `ReferenceBlackWhite`) × raw / PackBits / LZW / Deflate (32946) |
 | `sips` | 21 | 21 | 0 | 8 / 16-bit gray, gray + alpha, RGB, RGBA × default / LZW / PackBits |
 | `tiffset`, multi-page | 56 | 56 | 0 | all eight `Orientation` values on six layouts; five-page mixed chains (classic / BigTIFF, both byte orders, tiled); reduced-resolution pyramids |

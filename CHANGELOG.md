@@ -87,7 +87,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the straight-alpha layout with the alpha divided back out of the
   colour (it used to decode to opaque RGB).
 - `FillOrder = 2` on any byte-stream layout (every stored byte
-  bit-reversed, compressed or not).
+  bit-reversed, compressed or not, WebP segments included); a JPEG
+  segment stored plainly under that tag (SOI marker as stored) decodes
+  as it is.
 - `Compression = 32946` (Deflate under its older code).
 - 16-bit CIELab and ICCLab (`PhotometricInterpretation = 9`), L\*-only
   pages at 16 bits, `WhitePoint` honoured.

@@ -2050,7 +2050,10 @@ fn tiffcp_cases(dir: &TempDir) -> Vec<Case> {
                     if *lname == "default" || *lname == "t16" {
                         variants.push(("big", vec!["-8"]));
                     }
-                    if tag == "bilevel" && *lname != "t128" {
+                    // FillOrder = 2: every layout of the bilevel page,
+                    // and the default layout of every other kind under
+                    // every scheme.
+                    if (tag == "bilevel" && *lname != "t128") || *lname == "default" {
                         variants.push(("lsb2msb", vec!["-f", "lsb2msb"]));
                     }
                     for (vname, vargs) in variants {
@@ -2188,7 +2191,17 @@ fn raw2tiff_cases(dir: &TempDir) -> Vec<Case> {
                 if inter == "band" && (bands == 1 || lab) {
                     continue;
                 }
-                for comp in ["none", "packbits", "lzw", "lzw:2", "zip", "zip:2"] {
+                for comp in ["none", "packbits", "lzw", "lzw:2", "zip", "zip:2", "jpeg"] {
+                    // (JPEG: 8-bit gray / RGB / CMYK only; the tool
+                    // tags these FillOrder = 2 as well.)
+                    if comp == "jpeg"
+                        && !(dtype == "byte"
+                            && matches!(photo, "minisblack" | "rgb" | "cmyk")
+                            && matches!(bands, 1 | 3 | 4)
+                            && !(photo == "rgb" && bands == 4))
+                    {
+                        continue;
+                    }
                     for rows in ["1000", "3"] {
                         let name = format!(
                             "raw2tiff-{dtype}-{photo}{bands}-{inter}-{}-r{rows}",
@@ -2220,7 +2233,9 @@ fn raw2tiff_cases(dir: &TempDir) -> Vec<Case> {
                             name,
                             cmds: vec![(s("raw2tiff"), a)],
                             out: o,
-                            tol,
+                            // DCT: two readers' inverse transforms
+                            // differ within the T.81 accuracy bounds.
+                            tol: if comp == "jpeg" { Tol::Within(8) } else { tol },
                             pages: 1,
                         });
                     }
