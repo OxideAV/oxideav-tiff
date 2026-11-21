@@ -37,7 +37,7 @@ oxideav-mjpeg = { version = "0.1", optional = true }
 # Compression=8 (Adobe Deflate) and the RFC 8478 Zstandard frame for
 # the Compression=50000 extension. `default-features = false` keeps
 # the dependency to exactly those two algorithms.
-compcol = { version = "0.6", default-features = false, features = [
+compcol = { version = "0.8", default-features = false, features = [
     "zlib",
     "zstd",
 ] }
